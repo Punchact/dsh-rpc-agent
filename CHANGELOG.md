@@ -10,6 +10,20 @@
 
 暂无。
 
+## [0.4.4] - 2026-11-05
+
+### 修复
+
+- 发布流水线在**没有配置 `NPM_TOKEN`** 时，`setup-node` 的 `registry-url` 会写下一行
+  `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}`；secret 不存在时它展开成空令牌，npm 于是认定
+  "凭证存在但无效"，直接 `ENEEDAUTH`，**根本不会去试 OIDC**。现在不再用 `registry-url`，
+  `~/.npmrc` 只在确实有令牌时由发布步骤自己写。
+- 发布任务多一步诊断，打印 node/npm 版本与 OIDC 端点是否可用，免得下次再靠猜。
+
+### 说明
+
+- 运行时没有任何改动。这一版的目的是让 `latest` 由 OIDC 发布出来（带 provenance）。
+
 ## [0.4.3] - 2026-11-05
 
 ### 变更
