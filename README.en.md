@@ -1,0 +1,160 @@
+# dsh-rpc
+
+[中文](./README.md) · Unofficial project
+
+A loopback **JSON-RPC bridge** that lets any local agent — Claude Code, Cursor, Codex CLI, Trae, or your own script — hand a task to [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) and get its final answer back.
+
+The Harness is not just a model here: it is a **full agent** with its own tools, skills, MCP servers, sandbox and session context. The caller needs one HTTP request or one MCP tool.
+
+> **Not affiliated with DeepSeek.** This is a third-party plugin, independently maintained, not endorsed or supported by DeepSeek. Read [Security model](#security-model) first: holding this bridge's token means holding permission to make the Harness act on this machine.
+
+```
+Claude Code / Cursor / Codex ──┐
+dsh-rpc CLI ───────────────────┼──► http://127.0.0.1:<port>/dsh-rpc ──► DSH agent
+your script (import lib/client)┘        JSON-RPC 2.0 + Bearer token
+```
+
+The port is **not fixed**: the Harness asks the OS for one on every start, so it changes across restarts. `node bin/dsh-rpc.mjs ping` prints the current `origin`; the plugin also publishes it to `endpoint.json`, which every client re-reads per call.
+
+## Install
+
+```js
+// Let the Harness install it; `target` is the absolute path of your clone.
+plugin_manager({ action: "install_bundle", target: "<absolute-path-to-your-clone>" })
+```
+
+The install is a **link** to the clone, so source edits need no reinstall — but the host caches ES modules. To load new `lib/*.mjs`, toggle the plugin row once:
+
+```js
+plugin_manager({ action: "set_plugin", target: "include:dsh-rpc-bridge", enabled: false })
+plugin_manager({ action: "set_plugin", target: "include:dsh-rpc-bridge", enabled: true  })
+```
+
+Requires Node `^22.19.0 || >=24`. Zero runtime dependencies.
+
+## Use it
+
+### MCP (recommended)
+
+```powershell
+claude mcp add dsh -- node "<path-to-your-clone>\bin\dsh-rpc-mcp.mjs"
+```
+
+Five tools: `dsh_ask`, `dsh_sessions`, `dsh_wait`, `dsh_cancel`, `dsh_status`. Arguments are snake_case (`prompt`, `session_id`, `agent_preset`, `timeout_ms`). The MCP server shares no context with the Harness session — pass the returned `session_id` to continue one.
+
+### CLI
+
+```powershell
+node bin/dsh-rpc.mjs health --wait 15000     # unauthenticated liveness, poll until ready
+node bin/dsh-rpc.mjs ping                    # authenticated status
+node bin/dsh-rpc.mjs ask "summarize this repo" --cwd . --json
+node bin/dsh-rpc.mjs ask "continue" --session session-xxxx --json
+node bin/dsh-rpc.mjs sessions --limit 10
+```
+
+Exit codes: `0` done · `1` failed or the turn did not complete · `2` usage error · `3` cannot reach the Harness.
+
+### HTTP
+
+```powershell
+$endpoint = (Get-Content "$env:USERPROFILE\.dsh\dsh-rpc\endpoint.json" -Raw | ConvertFrom-Json).url
+$token    = (Get-Content "$env:USERPROFILE\.dsh\dsh-rpc\token" -Raw).Trim()
+$body = @{ jsonrpc = "2.0"; id = 1; method = "dsh.sessions.ask";
+           params = @{ text = "hello"; cwd = "C:\path\to\work" } } | ConvertTo-Json -Depth 6
+Invoke-RestMethod -Method Post -Uri $endpoint `
+  -Headers @{ Authorization = "Bearer $token" } -ContentType application/json -Body $body
+```
+
+### JavaScript
+
+```js
+import { rpcCall } from "./dsh-rpc-plugin/lib/client.mjs";
+
+const answer = await rpcCall("dsh.sessions.ask", { text: "summarize this repo", cwd: process.cwd() });
+console.log(answer.text, answer.usage);
+```
+
+`rpcCall` resolves to the method's `result`; failures throw an `Error` carrying `code` / `data` / `status`.
+
+## Methods
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `dsh.discover` | — | version, transport address, method catalog |
+| `dsh.ping` | — | `{ok, plugin, version, protocol, origin, tokenSource, activeRuns}` |
+| `dsh.models` | — | routable providers and models |
+| `dsh.sessions.list` | `limit?` | `{total, items[]}` |
+| `dsh.sessions.create` | `cwd?, agentPreset?` | `{sessionId, agentPreset, cwd}` |
+| `dsh.sessions.ask` | `text, sessionId?, cwd?, agentPreset?, mode?, timeoutMs?` | turn result (below) |
+| `dsh.sessions.prompt` | `sessionId, text, mode?` | `{accepted, requestId}`, returns immediately |
+| `dsh.sessions.wait` | `sessionId, timeoutMs?` | turn result |
+| `dsh.sessions.cancel` | `sessionId` | `{accepted}` |
+| `dsh.sessions.history` | `sessionId, limit?` | `{cursor, turn, running, messageCount, records[]}` |
+
+A **turn result** carries `sessionId`, `turn`, `status` (`completed` / `aborted` / `blocked` / `error` / `max-tokens` / `interrupted` / `forked` / `idle` / `timeout` / `unknown`), `reason`, `text`, optional `reasoning`, `tools[]`, `usage`, `durationMs`, `timedOut`, `partial`, `requestId`, `created`, `cursor`.
+
+`status` always comes from that turn's own `turn/end` reason. `partial: true` means the event stream ended before `turn/end`, so `text` is a fragment. A `timeout` does **not** cancel the turn.
+
+**Turn attribution**: after submitting, the bridge looks for its own `user/message` (`source.rpcId` equals the request id) and takes the turn that message landed in. If something else (the GUI, another agent) speaks first in the same session, their answer is never returned as yours.
+
+`POST /dsh-rpc/stream` takes the same params and answers NDJSON: `{type:"session"}`, `{type:"progress", frame}`, then `{type:"result", …}` or `{type:"error", error}`.
+
+## Security model
+
+**One line: the bearer token is permission to make the Harness act on this machine.**
+
+A process holding it can create sessions and submit prompts, and the Harness will then use **its own** tools to read files, write files, run commands and reach the network — constrained by the Harness sandbox and approval policy, not by this plugin. The bridge only forwards requests and results; it widens nothing and reviews nothing.
+
+| Surface | Behaviour |
+| --- | --- |
+| Transport | loopback only by default (`127.0.0.1`, `::1`, `::ffff:127.0.0.1`); other peers get 403 |
+| Token | 32 random bytes at `%USERPROFILE%\.dsh\dsh-rpc\token`, mode 0600 where the filesystem supports it |
+| Comparison | SHA-256 with a constant-time compare |
+| Unauthenticated | `GET /health` returns only `{ok, plugin, version, protocol, authenticated}` |
+| Request size | 1 MiB by default; larger bodies get a real 413 |
+| Peer check | socket `remoteAddress` — `X-Forwarded-For` is ignored, so behind a proxy every peer looks like the proxy |
+
+Deliberately absent: transport encryption (loopback only, never binds a public interface), rate limiting, request signing, prompt logging (unless `logRequests` is on).
+
+`allowRemote: true` disables the loopback allow-list and adds **no** authentication strength. Treat that as a deployment decision requiring a TLS-terminating proxy and its own access control.
+
+## Ports and connection stability
+
+The port moves on restart, so the plugin publishes it rather than pinning it:
+
+- Pinning would require restating the whole `webserver` row (the patch replaces the config wholesale), and a taken port would stop the Harness from starting.
+- The plugin writes `endpoint.json` on every activation: `url`, `origin`, `path`, `version`, `plugin`, `pid`, `startedAt`, `updatedAt`.
+- Clients re-read the file per call. They retry **once**, and only on `ECONNREFUSED` — the request never left the process. `ECONNRESET`, `EPIPE` and timeouts are reported, never resent, because a prompt may already be delivered. An explicit `--url` is never retried.
+
+After a restart:
+
+```powershell
+node bin/dsh-rpc.mjs health --wait 15000
+```
+
+## Follow a CLI task in the GUI
+
+A session started from the CLI is a **real Harness session**, so it appears in the GUI sidebar — open it to see the transcript, tool calls and token usage. The CLI's own stdout stays in your terminal.
+
+- Always pass `--cwd`; otherwise the session lands in the Harness process directory and is hard to identify.
+- Keep the returned `sessionId` to `wait`, read `history`, continue, or take over in the GUI.
+- The GUI does not pop up. If a turn hits an approval prompt nobody answers, it waits until `timeoutMs` and `ask` returns `status:"timeout"` **without** cancelling the turn.
+
+## Verify
+
+```powershell
+node test/methods.test.mjs   # 21 unit tests, no Harness needed
+node test/client.test.mjs    # 6 client retry/error tests, no Harness needed
+node test/e2e.mjs --cwd .    # 14 end-to-end checks against a live Harness
+node test/edge.mjs           # 24 protocol/edge checks against a live Harness
+```
+
+Run the files directly, not through `node --test`: that forks a child process, which some sandboxes forbid.
+
+Last run (2026-11-05): unit 21/21, client 6/6, end-to-end 14/14, edge 24/24.
+
+Port-drift check (manual): point `endpoint.json` at a dead port, run `dsh-rpc ping`, and expect exit code 3 plus a message naming `nothing is listening`, the publishing `pid`, and `health --wait`. Restore the file and `ping` recovers immediately.
+
+## License
+
+MIT © 2026 Punchact. See [LICENSE](./LICENSE).

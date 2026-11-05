@@ -22,7 +22,7 @@ COMMANDS
   ping                      show bridge status, config and active runs
   discover                  list every RPC method with its params and result shape
   models                    list routable providers and models
-  health                    unauthenticated liveness probe
+  health [--wait MS]        unauthenticated liveness probe (with --wait, poll until ready)
   sessions [--limit N]      list Harness sessions
   create [--cwd DIR]        create a blank session
   ask <prompt...>           create/reuse a session, prompt it, wait for the turn
@@ -40,6 +40,7 @@ OPTIONS
   --mode queue|steer        prompt delivery mode (default queue)
   --timeout MS              wait budget for ask/wait (default 600000)
   --limit N                 list/history size
+  --wait MS                 health: keep polling the published endpoint until it answers
   --stream                  stream progress frames while waiting (ask)
   --json                    print the raw JSON result
   --url URL                 override the endpoint
@@ -56,7 +57,7 @@ Endpoint discovery (auto): $DSH_HOME/dsh-rpc/endpoint.json and .../token
 `;
 
 const BOOLEAN_FLAGS = new Set(["json", "stream", "help", "verbose"]);
-const VALUE_FLAGS = new Set(["cwd", "session", "preset", "mode", "timeout", "limit", "url", "token"]);
+const VALUE_FLAGS = new Set(["cwd", "session", "preset", "mode", "timeout", "limit", "wait", "url", "token"]);
 
 function parseArgv(argv) {
   const flags = {};
@@ -227,6 +228,54 @@ function failureExitCode(error) {
   return 1;
 }
 
+const HEALTH_POLL_MS = 250;
+// A single liveness probe nobody answers must not wait for undici's own 300s
+// header deadline; a probe is only useful if it is short.
+const HEALTH_PROBE_TIMEOUT_MS = 5000;
+
+/**
+ * Probe `/health`, optionally polling until a deadline.
+ *
+ * `--wait` exists because the interesting moment for a health probe is right
+ * after a restart: the Web server may not be listening yet, and a single shot
+ * then reports a connection error that says nothing about whether the bridge is
+ * coming up. Each poll re-reads the published endpoint, because a restart also
+ * moves the port. Every attempt is capped by what is left of the budget, so
+ * `--wait 5000` cannot take minutes when the address accepts but never answers.
+ */
+async function probeHealth(explicitUrl, budgetMs) {
+  const startedAt = Date.now();
+  const deadline = startedAt + budgetMs;
+  let failure = { kind: "transport", message: "the plugin has not published an endpoint yet" };
+
+  for (;;) {
+    const target = explicitUrl ?? readEndpoint()?.url;
+    if (target) {
+      const limit = budgetMs > 0 ? Math.max(50, deadline - Date.now()) : HEALTH_PROBE_TIMEOUT_MS;
+      try {
+        const response = await fetch(`${target.replace(/\/+$/, "")}/health`, {
+          signal: AbortSignal.timeout(limit),
+        });
+        const body = await response.text();
+        if (response.ok) {
+          print(body);
+          if (budgetMs > 0) note(`ready after ${Date.now() - startedAt}ms`);
+          return 0;
+        }
+        failure = { kind: "http", message: `HTTP ${response.status}` };
+      } catch (error) {
+        failure = { kind: "transport", message: error.message };
+      }
+    }
+    if (Date.now() >= deadline) break;
+    const pause = Math.max(10, Math.min(HEALTH_POLL_MS, deadline - Date.now()));
+    await new Promise((resolve) => setTimeout(resolve, pause));
+  }
+
+  note(`health check failed after ${Date.now() - startedAt}ms: ${failure.message}`);
+  return failure.kind === "http" ? 1 : 3;
+}
+
 async function main(argv) {
   const { flags, positional } = parseArgv(argv);
   if (flags.help || positional.length === 0) {
@@ -277,14 +326,13 @@ async function main(argv) {
     case "health": {
       // Unauthenticated, so it needs no token — but it still needs an address,
       // and the plugin publishes one; requiring --url here was pure friction.
-      const target = flags.url ?? readEndpoint()?.url;
-      if (!target) {
+      const budget = numberOf(flags, "wait") ?? 0;
+      const target = flags.url ?? (budget > 0 ? null : readEndpoint()?.url);
+      if (!target && budget === 0) {
         note("health needs --url (the plugin has not published an endpoint yet)");
         return 2;
       }
-      const response = await fetch(`${target.replace(/\/+$/, "")}/health`);
-      print(await response.text());
-      return response.ok ? 0 : 1;
+      return await probeHealth(target, budget);
     }
     case "sessions": {
       const params = {};

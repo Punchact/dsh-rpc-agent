@@ -1,0 +1,36 @@
+name: test
+
+# Only the checks that need nothing but Node. `test/e2e.mjs` and `test/edge.mjs`
+# drive a live DeepSeek Harness instance and cannot run on a hosted runner, so
+# they stay a local, manual gate (see README "验证" / "Verify").
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Mirrors engines: "^22.19.0 || >=24".
+        node: ["22.x", "24.x"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Syntax check every module
+        run: |
+          for file in index.mjs lib/*.mjs bin/*.mjs test/*.mjs; do
+            node --check "$file"
+          done
+
+      - name: PLUGIN_VERSION matches package.json
+        run: npm run check:version
+
+      - name: Unit tests (no Harness required)
+        run: npm test

@@ -1,14 +1,22 @@
-# @punchact/dsh-rpc
+# dsh-rpc
+
+[English](./README.en.md) · 非官方项目
 
 把 DeepSeek Harness 变成本机可调用的 **RPC 服务**：任何本地 agent（Claude Code、Codex CLI、Cursor、Trae、自己写的脚本）都能把任务交给 DSH，拿回它的最终回答。
 
 DSH 在这里不是一个模型，而是一个**完整的 agent**——带自己的工具、技能、MCP 服务器、沙箱与会话上下文。调用方只需要一句 HTTP 或一个 MCP 工具。
 
+> **本项目与 DeepSeek 官方无关。** 它是第三方插件，由社区开发者独立维护，不获 DeepSeek 背书，也不由其提供支持。使用前请先读第 7 节的安全模型：拿到本插件的 token，等于拿到在这台机器上驱动 DSH 执行动作的权限。
+
 ```
 Claude Code / Cursor / Codex ──┐
-dsh-rpc CLI ───────────────────┼──► http://127.0.0.1:6695/dsh-rpc ──► DSH agent
+dsh-rpc CLI ───────────────────┼──► http://127.0.0.1:<port>/dsh-rpc ──► DSH agent
 自己的脚本 (import lib/client) ─┘        JSON-RPC 2.0 + Bearer token
 ```
+
+端口**不是固定的**：DSH 每次启动由系统分配一个，重启后会变。`node bin/dsh-rpc.mjs ping` 输出的 `origin` 就是当前地址；插件也把它写进 `endpoint.json`，客户端每次调用现读该文件（见第 8 节）。
+
+**目录**：[1 接入路径](#1-四条接入路径) · [2 端点与凭据](#2-端点与凭据) · [3 方法](#3-方法一览) · [4 错误码](#4-错误码) · [5 配置](#5-配置) · [6 安装与更新](#6-安装与更新) · [7 安全模型](#7-安全模型) · [8 端口与稳定性](#8-端口与连接稳定性) · [9 从 GUI 跟进](#9-从-gui-跟进-cli-发起的任务) · [10 验证](#10-验证) · [11 已知边界](#11-已知边界) · [12 排障](#12-排障)
 
 ---
 
@@ -18,7 +26,7 @@ dsh-rpc CLI ───────────────────┼──�
 | --- | --- | --- |
 | **MCP 工具** | Claude Code、Cursor、Codex 等支持 MCP 的 agent | `bin/dsh-rpc-mcp.mjs` |
 | **CLI** | 人在终端里试、脚本里 `$(...)` 取值 | `bin/dsh-rpc.mjs` |
-| **HTTP JSON-RPC** | 任何语言的进程 | `POST http://127.0.0.1:6695/dsh-rpc` |
+| **HTTP JSON-RPC** | 任何语言的进程 | `POST http://127.0.0.1:<port>/dsh-rpc` |
 | **JS 客户端库** | Node 侧集成 | `import { rpcCall, rpcStream } from "@punchact/dsh-rpc/client"` |
 
 ### MCP（推荐）
@@ -27,14 +35,14 @@ dsh-rpc CLI ───────────────────┼──�
 claude mcp add dsh -- node "<path-to-your-clone>\bin\dsh-rpc-mcp.mjs"
 ```
 
-Cursor / Codex 用配置文件等价写法：
+Cursor / Codex 用配置文件等价写法（Windows 下 JSON 里的反斜杠要转义；macOS/Linux 用 `/`）：
 
 ```json
 {
   "mcpServers": {
     "dsh": {
       "command": "node",
-      "args": ["<absolute-path-to-your-clone>\\bin\\dsh-rpc-mcp.mjs"]
+      "args": ["<path-to-your-clone>/bin/dsh-rpc-mcp.mjs"]
     }
   }
 }
@@ -60,6 +68,7 @@ Cursor / Codex 用配置文件等价写法：
 
 ```powershell
 node bin/dsh-rpc.mjs health            # 免鉴权探活
+node bin/dsh-rpc.mjs health --wait 15000  # 刚重启完时轮询到就绪再返回
 node bin/dsh-rpc.mjs ping              # 带 token 的真实调用
 node bin/dsh-rpc.mjs ask "只回复两个字：收到" --cwd . --json
 node bin/dsh-rpc.mjs ask "接着上一句" --session session-xxxx --json
@@ -78,12 +87,15 @@ node bin/dsh-rpc.mjs call dsh.sessions.list '{"limit":3}'
 ### 直接 HTTP
 
 ```powershell
-$token = (Get-Content "$env:USERPROFILE\.dsh\dsh-rpc\token" -Raw).Trim()
+$endpoint = (Get-Content "$env:USERPROFILE\.dsh\dsh-rpc\endpoint.json" -Raw | ConvertFrom-Json).url
+$token    = (Get-Content "$env:USERPROFILE\.dsh\dsh-rpc\token" -Raw).Trim()
 $body = @{ jsonrpc = "2.0"; id = 1; method = "dsh.sessions.ask";
            params = @{ text = "只回复两个字：收到"; cwd = "C:\path\to\work" } } | ConvertTo-Json -Depth 6
-Invoke-RestMethod -Method Post -Uri http://127.0.0.1:6695/dsh-rpc `
+Invoke-RestMethod -Method Post -Uri $endpoint `
   -Headers @{ Authorization = "Bearer $token" } -ContentType application/json -Body $body
 ```
+
+（`endpoint.json` 由插件在每次启动时重写，所以这样取地址不需要知道端口。）
 
 ### JS 客户端库
 
@@ -102,12 +114,29 @@ console.log(answer.text, answer.usage);
 
 | 项 | 值 |
 | --- | --- |
-| RPC 端点 | `POST http://127.0.0.1:6695/dsh-rpc`（JSON-RPC 2.0） |
-| 流式端点 | `POST http://127.0.0.1:6695/dsh-rpc/stream`（NDJSON） |
-| 探活 | `GET http://127.0.0.1:6695/dsh-rpc/health`（**免鉴权**） |
+| RPC 端点 | `POST http://127.0.0.1:<port>/dsh-rpc`（JSON-RPC 2.0） |
+| 流式端点 | `POST http://127.0.0.1:<port>/dsh-rpc/stream`（NDJSON） |
+| 探活 | `GET http://127.0.0.1:<port>/dsh-rpc/health`（**免鉴权**） |
 | 凭据 | `Authorization: Bearer <token>`，或 `X-DSH-RPC-Token: <token>` |
 | token 文件 | `%USERPROFILE%\.dsh\dsh-rpc\token`（32 字节随机 hex，权限 0600） |
-| 端点描述 | `%USERPROFILE%\.dsh\dsh-rpc\endpoint.json`（插件启动时自动写入） |
+| 端点描述 | `%USERPROFILE%\.dsh\dsh-rpc\endpoint.json`（插件每次启动重写） |
+
+`<port>` 由 DSH 自己决定，每次启动可能不同。`endpoint.json` 长这样：
+
+```jsonc
+{
+  "url": "http://127.0.0.1:3820/dsh-rpc",
+  "origin": "http://127.0.0.1:3820",
+  "path": "/dsh-rpc",
+  "version": "0.1.0",
+  "plugin": "dsh-rpc",
+  "pid": 12345,                              // 写这个文件的 Host 进程
+  "startedAt": "2026-11-05T01:05:58.000Z",   // 该进程的启动时刻
+  "updatedAt": "2026-11-05T01:06:31.924Z"    // 本次写入时刻
+}
+```
+
+`pid` 与 `startedAt` 是给客户端判断"Harness 是不是重启过"用的：两者都没变却连不上，说明不是端口漂移。
 
 - **token 自动生成**：插件首次激活时生成并落盘，调用方 CLI/MCP 自动读取，无需手工配置。
 - **只服务 loopback**：默认仅接受 `127.0.0.1` / `::1` / `::ffff:127.0.0.1`，其它来源 403。要开放到局域网须显式打开 `allowRemote`（见配置）。
@@ -230,7 +259,7 @@ JSON-RPC 标准码之外，本插件用 `-3200x` 段表达业务语义：
 ## 6. 安装与更新
 
 ```js
-// 交给 DSH 自己安装（安装后会立即激活）
+// 交给 DSH 自己安装（安装后会立即激活）；target 传本目录的绝对路径
 plugin_manager({ action: "install_bundle",
                  target: "<absolute-path-to-your-clone>" })
 ```
@@ -247,23 +276,94 @@ plugin_manager({ action: "set_plugin", target: "include:dsh-rpc-bridge", enabled
 
 ---
 
-## 7. 验证
+## 7. 安全模型
+
+**一句话：本插件的 bearer token 等价于"在这台机器上让 DSH 替你执行动作"的权限。**
+
+拿到 token 的进程可以新建会话、投递 prompt，于是 DSH 会用**它自己的**工具去读文件、写文件、跑命令、访问网络——受 DSH 自己的沙箱与审批策略约束，但不受本插件约束。本插件只做两件事：把请求转给 Host、把结果转回来；它不额外放宽任何权限，也不替你审阅内容。
+
+| 面 | 现状 | 说明 |
+| --- | --- | --- |
+| 传输 | loopback + Bearer token | 默认只接受 `127.0.0.1` / `::1` / `::ffff:127.0.0.1`，其它来源 403 |
+| token 存储 | `%USERPROFILE%\.dsh\dsh-rpc\token` | 首次启动生成 32 字节随机值，权限 0600（非 POSIX 文件系统上尽力而为） |
+| token 比较 | SHA-256 + 定时安全比较 | 不按字节提前返回 |
+| 免鉴权端点 | `GET /health` | 只回 `{ok, plugin, version, protocol, authenticated}`，不含会话、配置或路径 |
+| 请求体上限 | 1 MiB（可配） | 超限返回 413，不会无限读入内存 |
+| 来源校验 | 按 socket 的 `remoteAddress` | 不看 `X-Forwarded-For`；放在反向代理后面会一律看到代理地址 |
+
+**没有做的事**（有意为之）：不加密传输（只服务 loopback，且不监听对外网卡）、不做速率限制、不做请求签名、默认不记录 prompt 内容（`logRequests` 显式打开才记日志头部）。
+
+**如果要暴露到局域网**：`allowRemote: true` 只是关掉 loopback 白名单，**不会**增加任何认证强度。那种部署应放在 TLS 终止代理后面并另配访问控制；本机单用户场景之外不建议这么做。
+
+**共享机器**：token 文件就是凭据。不要抄进 shell 历史、CI 明文变量或聊天记录；怀疑泄漏就删掉该文件并重载插件——会重新生成，旧 token 立即失效。
+
+---
+
+## 8. 端口与连接稳定性
+
+DSH 的 Web 服务端口由启动器决定，桌面端交给系统分配，所以**重启后会变**。本插件不固定端口。
+
+**为什么不在 patch 里写死**：`dsh-web-app` 的 webserver 行用 `!!js` 取 `ctx.webStartup.port ?? 3080`；而 `cordis.patch.yml` 的覆写是**整行 config 替换**，写死就要把 `host` / `tls` / `compression` 等键全部重述，官方升级引入新键时会静默丢掉。另外端口被占时 DSH 会起不来，也无法多开。相比之下让插件"跟着 DSH 走"更稳。
+
+**端点由插件发布**：每次激活调用 `ctx.webServer.getOrigin()` 拿真实地址写进 `endpoint.json`；客户端（CLI / MCP / `lib/client.mjs`）**每次调用都重新读**，不缓存。
+
+**重启窗口内只重试一种错**：客户端仅对 `ECONNREFUSED`（TCP 被拒、请求没发出去）重读端点重试一次；`ECONNRESET` / `EPIPE` / 超时**不重试**，因为字节可能已被对方收下，重发有重复投递 prompt 的风险。显式 `--url` 或 `DSH_RPC_URL` 也不重试——你指定了地址，答案就是那个错误。
+
+**重启后串脚本**：
+
+```powershell
+node bin/dsh-rpc.mjs health --wait 15000; if ($?) { node bin/dsh-rpc.mjs ask "接着干" --session session-xxxx }
+```
+
+`--wait` 每 250ms 重读端点并探活，就绪返回 0（打印耗时），超时返回 3。
+
+**仍可能失败的情形**：Harness 启动中插件尚未激活（`endpoint.json` 还是上一次的地址，`pid` 未变而端口已失效）；同时跑多个实例（单文件，后写覆盖先写）。这两种请用 `--url` 显式指定。
+
+---
+
+## 9. 从 GUI 跟进 CLI 发起的任务
+
+CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输出。但被驱动的那一轮**是 Harness 里的真会话**，所以它同时出现在 GUI：
+
+| 层 | 在哪看得到 |
+| --- | --- |
+| CLI 进程的 stdout / stderr / 退出码 | 只在执行它的终端 |
+| 该轮的会话与完整对话 | GUI 侧栏的会话列表；点开可看 transcript、工具调用、token 用量 |
+
+能这样是因为插件走 Host 的 `sessionController`（而不是拿一个裸 agent）：会话日志、标题生成、`running` 状态都来自同一份存储。
+
+**三个实践要点**：
+
+1. **总是带 `--cwd`**。不带时 Host 用进程工作目录（通常是 DSH 自己的 profile 目录），这样的会话在侧栏里不容易认出属于哪个项目。
+2. **留住返回的 `sessionId`**。后续 `wait` / `history` / 续聊 / 在 GUI 里接手都靠它。
+3. **GUI 不会主动弹窗**。会话只是进了列表，需要你点开。
+
+**审批仍由 GUI 或你的策略决定**：若那一轮触发需要人工批准的工具调用，它会挂在 Host 侧等待；没人打开会话时，这一轮会一直等到 `timeoutMs` 用完——此时 `ask` 返回 `status:"timeout"`，且**不会**取消该轮（可在 GUI 里继续，或调 `dsh.sessions.cancel`）。
+
+---
+
+## 10. 验证
 
 ```powershell
 cd dsh-rpc-plugin
 node test/methods.test.mjs     # 21 个单元用例，无需 Harness
+node test/client.test.mjs      # 6 项客户端重试/报错用例，无需 Harness
 node test/e2e.mjs --cwd .      # 14 项端到端检查，打真实 Harness
 node test/edge.mjs             # 24 项协议/边界对抗检查，打真实 Harness
 ```
 
-- **单元**用 `node:test` 与一个手写的 Host 假体（含 `follow` 流、事件总线、`user/message` 认领），覆盖轮次归属、steer、超时、abort 原因、history、cancel、并发拒绝、cwd 归属、`limit` 校验、dispatcher 错误码。必须**直接 node 运行**——`node --test` 会为每个文件 fork 子进程，在 DSH 沙箱下被 `spawn EPERM` 挡住。上次实跑：21/21。
-- **端到端**走的是与外部 agent 完全相同的 `lib/client.mjs`，因此跑绿即证明 plugin → Host `sessionController` → HTTP → JSON-RPC → 调用方 整条链路成立。上次实跑：14/14。
-- **边界**检查协议层：batch、通知、id 形态、鉴权头、超大 body（应得真正的 413 而不是断连）、参数注入防护、超时钳制、并发 ask、`limit` 语义。上次实跑：24/24。
+`npm test` 跑前两个（都不需要 Harness，适合 CI）。
+
+- **单元**用 `node:test` 与一个手写的 Host 假体（含 `follow` 流、事件总线、`user/message` 认领），覆盖轮次归属、steer、超时、abort 原因、history、cancel、并发拒绝、cwd 归属、`limit` 校验、dispatcher 错误码。必须**直接 node 运行**——`node --test` 会为每个文件 fork 子进程，在 DSH 沙箱下被 `spawn EPERM` 挡住。上次实跑：21/21（2026-11-05）。
+- **客户端**用临时 `$DSH_HOME` 与本地假服务，验证重试与报错策略：端点重发后重试一次且只投递一次、`ECONNRESET` 绝不重放、显式 `--url` 不重试、重试后的失败不被改写成"没人监听"、端点未变时报错含 `pid` 与下一步建议；另有一例直接对 `lib/transport.mjs` 钉住「从 undici 的 cause 链里取真实 errno」在各平台的形状（Linux 上 `UND_ERR_SOCKET` 会归一成 `ECONNRESET`）。上次实跑：6/6（2026-11-05）。
+- **端到端**走的是与外部 agent 完全相同的 `lib/client.mjs`，因此跑绿即证明 plugin → Host `sessionController` → HTTP → JSON-RPC → 调用方 整条链路成立。上次实跑：14/14（2026-11-05）。
+- **边界**检查协议层：batch、通知、id 形态、鉴权头、超大 body（应得真正的 413 而不是断连）、参数注入防护、超时钳制、并发 ask、`limit` 语义。上次实跑：24/24（2026-11-05）。
+- **端口漂移**（手工）：把 `endpoint.json` 的 url 改成死端口再跑 `dsh-rpc ping`，应得退出码 3 与含 `nothing is listening`、`pid`、`health --wait` 的可读报错；把文件恢复后 `ping` 立刻正常。2026-11-05 实跑符合预期。
 - **显示核验**：Plugins 页里的插件行标题与图标已目视确认（显示为 `RPC Bridge` + 本包图标，2026-11-05）。注意 `plugin_manager list_bundles` 输出的是 `package.json` 的 `description` 字段，和前台显示不是同一来源，别拿它当 locale 生效的证据。
 
 ---
 
-## 8. 已知边界
+## 11. 已知边界
 
 - **同一会话只允许一个「提问型」运行**：本插件的两个 `ask`/`prompt` 并发时第二个直接返回 `-32004`。注意这只约束本插件——GUI 或别的 agent 仍可以在同一会话插话；轮次归属靠 `user/message` 里的 `rpcId` 认领（见第 3 节），不会把别人的回答当成你的，代价是那一轮要等它跑完才能轮到你。`wait` 不受限，可随时挂上去看。
 - **`wait` 只看得见快照窗口**：`wait` 靠 `follow` 的首帧快照判断「当前/最后一轮」，窗口上限 500 条事件（`maxMessages`）。极长会话若快照已截断到目标轮次之前，可能把状态报成 `completed`（而非那一轮真实的 `aborted`/`blocked`）；要精确值就带上 `sessionId` 调 `history` 复核。
@@ -276,7 +376,7 @@ node test/edge.mjs             # 24 项协议/边界对抗检查，打真实 Har
 
 ---
 
-## 9. 排障
+## 12. 排障
 
 | 现象 | 原因 / 处理 |
 | --- | --- |

@@ -32,7 +32,7 @@ flowchart LR
     D["任意脚本<br/>lib/client.mjs"]
   end
 
-  subgraph host["DSH 宿主进程（端口 6695）"]
+  subgraph host["DSH 宿主进程（Web 端口由启动器分配）"]
     W["webServer<br/>register(exact|prefix)"]
     R["dsh-rpc 路由<br/>/dsh-rpc, /stream, /health"]
     M["methods<br/>JSON-RPC ↔ Service"]
@@ -72,7 +72,7 @@ flowchart LR
 
 ### 4.1 复用 `ctx.webServer`，不自建 HTTP server
 
-`webServer.register({kind, path, handler})` 把路由挂到 GUI 已经监听的 6695 端口上：
+`webServer.register({kind, path, handler})` 把路由挂到 GUI 已经监听的那个端口上（端口号由 DSH 决定，见第 11 节）：
 
 - 不用抢端口、不用管 TLS/证书、不用向用户解释"还有第二个端口"。
 - 生命周期跟着插件走：`ctx.effect(() => () => dispose())` 注册的 disposer 会在插件卸载时摘掉路由。
@@ -139,7 +139,7 @@ Host 抛 `RemoteError(code, message, details)`（`isDSHRemoteError === true`）�
 
 - token 32 字节随机 hex，落盘 0600，路径 `%USERPROFILE%\.dsh\dsh-rpc\token`。
 - 比对用 `sha256` + `timingSafeEqual`，避免时序侧信道。
-- **loopback 白名单**：`req.socket.remoteAddress ∈ {127.0.0.1, ::1, ::ffff:127.0.0.1}`，否则 403。这一层是防"浏览器里随手 fetch"——因为任何网页都能向 `127.0.0.1:6695` 发请求，token 才挡得住跨站调用，白名单则挡掉非本机来源。
+- **loopback 白名单**：`req.socket.remoteAddress ∈ {127.0.0.1, ::1, ::ffff:127.0.0.1}`，否则 403。这一层是防"浏览器里随手 fetch"——因为任何网页都能向本机回环端口发请求，token 才挡得住跨站调用，白名单则挡掉非本机来源。
 - `/health` 故意免鉴权，只回插件版本与 `authenticated:false`，方便探活。
 
 ## 5. 撞到的宿主契约（踩坑记录）
@@ -174,11 +174,15 @@ Host 抛 `RemoteError(code, message, details)`（`isDSHRemoteError === true`）�
 | 层 | 手段 | 结果 |
 | --- | --- | --- |
 | 单元 | `test/methods.test.mjs`，21 例，Host 假体（含 follow 流与事件总线、必需 signal 的断言、`user/message` 认领） | 21/21 |
+| 客户端 | `test/client.test.mjs`，6 例，临时 `$DSH_HOME` + 本地假服务（重试一次且不重放、`ECONNRESET` 不重试、显式 url 不重试、重试后的非连接失败保持原义、过期端点报错含 `pid`），外加一例对 `lib/transport.mjs` 钉住各平台的 errno 形状 | 6/6 |
 | 端到端 | `test/e2e.mjs`，14 项，走真实 `lib/client.mjs` | 14/14 |
 | 边界 | `test/edge.mjs`，24 项协议对抗（batch、通知、超大 body、参数注入、超时钳制、并发、`limit` 语义） | 24/24 |
 | 传输 | 401 / 403 / 413 / -32601 / -32602 / health 免鉴权 | 通过 |
 | 语义 | ask 单轮、同会话续聊记住上文、history 只读、流式帧、取消活动轮次 → `aborted`、空闲 wait 取原因、并发 ask → `-32004`、别人插话时认领自己的轮次（实跑：`prompt` 抢跑一轮，`ask` 正确返回 turn 2 自己的答案） | 通过 |
 | 接入 | MCP `initialize` / `tools/list` / `dsh_ask` / `dsh_status`（stdio 实跑） | 通过 |
+| 稳定性 | 端点被改为死端口后 `ping` 退出码 3 且报错含 `nothing is listening`/`pid`/`health --wait`；恢复后立即正常（2026-11-05 实跑） | 通过 |
+
+以上数字均为 2026-11-05 在本机实跑，命令见 README §10。
 
 ## 8. 后续可做
 
@@ -216,7 +220,7 @@ Host 抛 `RemoteError(code, message, details)`（`isDSHRemoteError === true`）�
 
 ## 10. 第二轮复盘（2026-11-05，独立复核后）
 
-这一轮由外部审计方（Kimi 3.1 Pro，只读）对 `drive()` / `readBody()` / 协议边界做了对抗性复核，加上自查与实跑探针。**六条发现里五条成立**，逐条落地如下。
+这一轮由外部独立审计方（只读，未改文件、未重载、未重启）对 `drive()` / `readBody()` / 协议边界做了对抗性复核，加上自查与实跑探针。**六条发现里五条成立**，逐条落地如下。
 
 | 严重度 | 发现 | 判定 | 处置 |
 | --- | --- | --- | --- |
@@ -241,5 +245,48 @@ Host 抛 `RemoteError(code, message, details)`（`isDSHRemoteError === true`）�
 - 实测推翻：`plugin_manager list_bundles` 返回的 description 逐字等于 `package.json` 的 `description`；而 `locale/en.json` 的 title 是 `RPC Bridge`、`zh.json` 是 `RPC 桥接`，这两个串在该接口输出里根本没有出现。
 - 真实根因：把"接口输出里有个像标题的字段"直接等价成"locale 的 meta 生效了"，中间缺一步字段来源核对——典型的计数型断言量错对象。
 - 正确表述：`list_bundles` 显示的是包的 `description`；`locale` 的 `meta` 是否被前台采用，只能靠界面核验（已由用户于 2026-11-05 确认 title 与图标生效）。
+
+---
+
+## 11. 端口与连接稳定性（2026-11-05）
+
+**问题**：DSH 的 Web 端口不固定。`dsh-web-app/cordis.patch.yml` 里 webserver 行是
+
+```yaml
+host: !!js ctx.webStartup.host ?? '127.0.0.1'
+port: !!js ctx.webStartup.port ?? 3080
+tls: !!js ctx.webStartup.tls
+compression: gzip
+```
+
+桌面启动器传入 `port: 0`（交给系统分配），于是每次重启端口都变。任何"写死端口"的文档、配置或客户端都会在重启后失真。
+
+**决策一：不固定端口。** 曾考虑在该行覆写 `port: 9527`，放弃的理由：
+
+1. `cordis.patch.yml` 的覆写是**整行 config 替换**，写死 port 就要把 `host`/`tls`/`compression`/`compressionLevel`/`compressionThresholdBytes` 全部重述——官方升级增删键时会静默丢失行为。
+2. 固定端口后，端口被占则 DSH 起不来，也失去多实例能力。
+3. 代价只是"客户端要知道当前端口"，而这可以自动化。
+
+**决策二：`endpoint.json` 是端点的唯一真相源。** 插件每次激活调用 `ctx.webServer.getOrigin()`（绑定前会抛错，故失败时回落到 `ctx.on('ready')` 重试），把结果连同 `pid`、`startedAt`、`updatedAt` 一起原子写入（写 `${target}.${pid}.tmp` 再 `renameSync`）。客户端**每次调用都重新读**，不缓存：
+
+- `lib/client.mjs` 的 `rpcCall` / `rpcStream` 在每次调用入口解析连接；
+- `readEndpoint()` 不缓存结果；
+- CLI 的 `health` / `env` 也走这个文件，而不是 `DSH_WEB_URL`。
+
+**决策三：只对"连接没建立"重试一次。** `ECONNREFUSED` 表示 TCP 握手被拒、请求没发出去，重试不会重复投递；`ECONNRESET`/`EPIPE`/超时可能意味着 prompt 已被收下并在跑，重发会造成重复轮次，因此只报错不重试。显式 `--url`/`DSH_RPC_URL` 不重试——调用方指定了地址，答案就是那个错误。
+
+**决策四：`pid` + `startedAt` 让失败可归因。** 客户端重试后仍失败时，报错会带上"最后一次发布的时间与进程身份"，从而区分"Harness 换了端口"与"插件没在工作"。
+
+**决策五：只有"连接被拒"才改写成端口漂移的说明。** 重试之后的失败若仍是 `ECONNREFUSED`，才包装成"没人监听 + 建议 `health --wait`"；若换到了新地址却拿到 401/方法错误/超时，那是请求本身的答案，原样抛出。否则读者会去查一个并不存在的重启。
+
+**决策六：`health --wait` 的每次探测都受剩余预算约束。** 否则地址接受连接却不应答时，要靠 undici 的 300s 头超时才返回，`--wait 5000` 会变成几分钟。单发探查另有 5s 上限。
+
+**已知残余风险**
+
+- 插件尚未激活的启动窗口内，`endpoint.json` 还是上一次的内容（`pid` 是旧的、端口已失效），客户端重试一次后仍会失败——这是有意的：宁可报错，也不去猜。
+- `endpoint.json` 是单文件，同时跑两个 Harness 时后启动的会覆盖前一个；多实例场景请用 `--url` 显式指定。
+
+**验证**：`test/client.test.mjs` 六项——端点重发后重试成功且只投递一次、`ECONNRESET` 不重试（连接计数为 1）、显式 `--url` 不重试、重试后的 401 不被改写成"没人监听"、端点未变时报错含 `pid` 与 `health --wait` 提示，外加一例对 `lib/transport.mjs` 钉住各平台 errno 形状。
+
 
 

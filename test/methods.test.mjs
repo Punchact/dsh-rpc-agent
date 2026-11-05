@@ -279,13 +279,24 @@ test("ask times out without cancelling the turn", async () => {
       { kind: "text", turn: 1, text: "slow" },
     ],
   });
+  // `drive()` unrefs its deadline timer on purpose: a bridge call must never be
+  // the thing keeping the Host process alive. In this test the fake Host settles
+  // in ~10ms and then nothing but that unref'd timer is left, so on a runner
+  // without extra handles the loop empties and the process exits before the 1s
+  // deadline is ever reached (node:test reports it as "Promise resolution is
+  // still pending…"). Hold the loop open for the duration of the assertion.
+  const keepAlive = setTimeout(() => {}, 5000);
   const started = Date.now();
-  const result = await build(controller).ask({ text: "go", timeoutMs: 50 });
-  assert.equal(result.status, "timeout");
-  assert.equal(result.timedOut, true);
-  assert.equal(result.text, "slow");
-  assert.equal(controller.cancelled.length, 0, "a timeout must not cancel the turn");
-  assert.ok(Date.now() - started >= 900, "timeoutMs is clamped to the 1s floor");
+  try {
+    const result = await build(controller).ask({ text: "go", timeoutMs: 50 });
+    assert.equal(result.status, "timeout");
+    assert.equal(result.timedOut, true);
+    assert.equal(result.text, "slow");
+    assert.equal(controller.cancelled.length, 0, "a timeout must not cancel the turn");
+    assert.ok(Date.now() - started >= 900, "timeoutMs is clamped to the 1s floor");
+  } finally {
+    clearTimeout(keepAlive);
+  }
 });
 
 test("wait returns the last completed turn of an idle session", async () => {
