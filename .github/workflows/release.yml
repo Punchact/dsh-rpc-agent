@@ -1,0 +1,92 @@
+name: release
+
+# Publishing is driven by a GitHub Release, not by a tag push: the release is the moment a human
+# says "this commit is what users get", and it is also the only trigger npm's Trusted Publishing
+# can identify.
+#
+# One-time setup on npmjs.com (before the first release):
+#   Package settings → Trusted Publishers → GitHub Actions
+#     Organization or user: Punchact
+#     Repository:           dsh-rpc-agent
+#     Workflow filename:    release.yml
+#   No NPM_TOKEN secret is needed, and none should be added: the job authenticates with a
+#   short-lived OIDC token (`id-token: write`), so a leaked environment can never publish.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Verify and pack, but do not publish"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          cache: npm
+      - run: npm ci
+
+      # A release whose tag and manifest disagree publishes a version nobody can find from the
+      # tag, so refuse before anything is built.
+      - name: tag matches package.json
+        if: github.event_name == 'release'
+        run: |
+          set -euo pipefail
+          expected="v$(node -p "require('./package.json').version")"
+          actual="${GITHUB_REF#refs/tags/}"
+          echo "tag: $actual   package.json: $expected"
+          test "$actual" = "$expected"
+
+      - run: npm run check:version
+      - run: npm test
+      - run: npm run test:host
+      - run: npm run check:package
+
+  publish:
+    name: publish
+    needs: verify
+    # A manual dispatch always reaches this job so the dry run prints the exact command; the
+    # `dry_run` input only decides whether it is a rehearsal or a real publish (see the last step).
+    # A release event has no inputs, so it always publishes for real.
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # the OIDC token npm exchanges for permission to publish
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Node 24 bundles npm 11, and Trusted Publishing needs npm >= 11.5.1.
+          node-version: "24.x"
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+      - run: npm ci
+      - name: toolchain
+        run: node --version && npm --version
+      # Provenance attests "this tarball was built from that public commit". npm refuses it while
+      # the repository is private, so it is added only once the repository is public.
+      - name: publish
+        run: |
+          set -euo pipefail
+          flags="--access public"
+          if [ "${{ github.event.repository.private }}" = "false" ]; then
+            flags="$flags --provenance"
+          fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "dry run: npm publish $flags --dry-run"
+            npm publish $flags --dry-run
+          else
+            npm publish $flags
+          fi

@@ -1,9 +1,12 @@
 {
   "name": "@punchact/dsh-rpc-agent",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Loopback JSON-RPC bridge that lets local AI agents drive DeepSeek Harness sessions",
   "author": "Punchact",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Punchact/dsh-rpc-agent.git"
@@ -12,7 +15,6 @@
   "bugs": {
     "url": "https://github.com/Punchact/dsh-rpc-agent/issues"
   },
-  "private": true,
   "type": "module",
   "main": "index.mjs",
   "icon": "./icon.svg",
@@ -35,8 +37,7 @@
     "README.md",
     "README.en.md",
     "LICENSE",
-    "docs/",
-    "test/"
+    "docs/"
   ],
   "bin": {
     "dsh-rpc": "./bin/dsh-rpc.mjs",
@@ -59,6 +60,8 @@
     "test:host": "node test/host.test.mjs",
     "test:e2e": "node test/e2e.mjs",
     "test:edge": "node test/edge.mjs",
+    "check:package": "node scripts/check-package.mjs",
+    "prepublishOnly": "npm run check:version && npm test && npm run check:package",
     "check:version": "node --input-type=module -e \"import {readFileSync} from 'node:fs'; const {PLUGIN_VERSION} = await import('./lib/version.mjs'); const v = JSON.parse(readFileSync('package.json','utf8')).version; if (PLUGIN_VERSION !== v) { console.error('PLUGIN_VERSION ' + PLUGIN_VERSION + ' != package.json ' + v); process.exit(1); } console.log('version ok: ' + v);\""
   },
   "engines": {

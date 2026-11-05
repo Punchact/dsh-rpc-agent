@@ -20,6 +20,23 @@ The port is **not fixed**: the Harness asks the OS for one on every start, so it
 
 ## Install
 
+**From npm (recommended).** This is a standard DSH bundle: the registry route and the local-directory
+route go through the same pnpm path.
+
+```bash
+dsh plugin add @punchact/dsh-rpc-agent
+```
+
+Or ask the Harness directly:
+
+```js
+plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent" })
+```
+
+Add `--profile <name>` for a non-default profile (the desktop app is `desktop`).
+
+**From a local clone (while you edit the source).**
+
 ```js
 // Let the Harness install it; `target` is the absolute path of your clone.
 plugin_manager({ action: "install_bundle", target: "<absolute-path-to-your-clone>" })
@@ -32,7 +49,11 @@ plugin_manager({ action: "set_plugin", target: "include:dsh-rpc-bridge", enabled
 plugin_manager({ action: "set_plugin", target: "include:dsh-rpc-bridge", enabled: true  })
 ```
 
+`bin/` and `test/` run as separate processes and never need a reload.
+
 Requires Node `^22.19.0 || >=24`. Zero runtime dependencies.
+
+Maintainers: see [docs/release.md](./docs/release.md).
 
 ## Use it
 

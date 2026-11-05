@@ -357,3 +357,17 @@ compression: gzip
 
 **验证**：`test/methods.test.mjs` 41/41（新增排队三例与 `sessionId` 拒绝一例）、`test/host.test.mjs` 1/1、客户端 6/6、状态 6/6、冒烟 exit 0；CI（Node 22/24）跑 `npm ci` + 前四套件 + `test:host`。
 **陷阱复现：unref 的定时器会让"在进程内等它的测试"自我取消。** 桥的截止定时器一律 `unref()`——这是有意的：一次桥运行不该成为宿主进程的保活句柄。代价是**同一个文件里没有任何其它句柄时，事件循环会直接排空**，等待中的 promise 变成 `Promise resolution is still pending but the event loop has already resolved`，`node:test` 把它记为 `cancelledByParent`，后续用例连锁取消。同一类故障在我们这里发生过两次：第一次是超时用例（测试侧加了 keepAlive），第二次是排队用例（Windows 绿、Linux Node 22 红，`pass 20 / cancelled 20`）。现在改为由单元套件在**整个运行期**持有一个句柄（`setInterval` + `after()` 清理），把这条契约写在测试文件顶部，而不是每个用例各加一次。教训：只要产品侧有意 `unref()`，测试侧就必须显式保活——这在 Windows 上测不出来。
+
+## 15. 发布工程（2026-11-05）
+
+**决策十九：`files` 的正确性由脚本守，不由人眼守。** `scripts/check-package.mjs` 向 npm 要真实打包清单（`npm pack --dry-run --json`），然后做四层校验：必需文件在不在、`test/`·`scripts/`·`node_modules/` 有没有混进来、`main`/`exports`/`bin`/`icon`/`dsh.bundle.patch` 指向的路径在不在包里、每个相对 `import` 的目标在不在包里。写它的理由是这类失败**不报错**：`files` 少写一项，`npm install` 一切正常，宿主在 `import` 那一刻才失败，而用户看到的现象是"设置里没有这一页"。`prepublishOnly` 会先跑它，`release.yml` 也会。
+
+**决策二十：发 npm 用 0.4.1，不复用 0.4.0。** `v0.4.0` 的 tag 已经指向 `f6374b4`，而发布 npm 需要改 `package.json`（去 `private`、加 `publishConfig`、收 `files`）——这些改动会让 tarball 里的 `package.json` 与 tag 不一致。版本号是"这个 tarball 对应哪次提交"的索引，让它对不上比多用一个补丁号更糟。所以 0.4.1 = 0.4.0 的代码 + 打包元数据变更。
+
+**决策二十一：provenance 跟着仓库可见性走，而不是一直开着。** npm 的 `--provenance` 需要公开可验证的源码仓库，私有仓库会被直接拒绝。`release.yml` 里按 `github.event.repository.private` 判断是否加这个 flag：现在私有就不加，仓库转公开后下一次发布自动带上。写成条件而不是注释，是因为"以后反正会公开"这种念头最容易被忘掉。
+
+**发布通道：Trusted Publishing（OIDC），不放 `NPM_TOKEN`。** 工作流用 `permissions: id-token: write` 换短期凭证；仓库里没有长期 token，泄露面为零。手动兜底写在 `docs/release.md`，`prepublishOnly` 保证手发也过同样三项检查。
+
+**验证**：`npm publish --dry-run`（未登录状态）exit 0 并给出真实清单；加入 `docs/release.md` 后 `node scripts/check-package.mjs` 报 `@punchact/dsh-rpc-agent@0.4.1, 23 files, 84.2 KB packed`。
+
+**一个必须记下来的实测结论：`--dry-run` 不校验 `private`。** 上一版 `package.json` 里还留着 `"private": true`，而 `npm publish --dry-run` **照样 exit 0**——我据此以为"可以发了"。真实的拒绝发生在正式 publish，也就是打完 tag、建好 Release 之后，是最坏的发现时机。为此 `check-package.mjs` 现在直接断言 `private` 必须不存在、`publishConfig.access` 必须是 `"public"`，并做了反向对照（临时加回 `private: true` → 脚本 exit 1 并指出原因；还原后 exit 0）。教训：**"命令跑通了"不等于"这条命令检查了你在意的那件事"**，能证明可发布性的只有断言本身。

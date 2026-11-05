@@ -304,13 +304,29 @@ JSON-RPC 标准码之外，本插件用 `-3200x` 段表达业务语义：
 
 ## 6. 安装与更新
 
+**从 npm 装（推荐）**。本包是标准 DSH bundle，注册表里装和本地目录装走的是同一套 pnpm 路径：
+
+```bash
+dsh plugin add @punchact/dsh-rpc-agent
+```
+
+或在 DSH 里直接说：
+
+```js
+plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent" })
+```
+
+非默认 profile 加 `--profile <name>`（桌面端是 `desktop`）。
+
+**从本地目录装（改源码时用）**：
+
 ```js
 // 交给 DSH 自己安装（安装后会立即激活）；target 传本目录的绝对路径
 plugin_manager({ action: "install_bundle",
                  target: "<absolute-path-to-your-clone>" })
 ```
 
-- 安装是**指向本目录的链接**，改完源码不需要重装。
+- 这种安装是**指向本目录的链接**，改完源码不需要重装。
 - 但宿主不会因文件变化重新 `import`；要让新的 `lib/*.mjs` 生效，把插件行关一次再开：
 
 ```js
@@ -319,6 +335,8 @@ plugin_manager({ action: "set_plugin", target: "include:dsh-rpc-bridge", enabled
 ```
 
 `bin/` 与 `test/` 是独立进程，改动无需重载。
+
+**发版（仅维护者）**：见 [docs/release.md](./docs/release.md)。
 
 ---
 

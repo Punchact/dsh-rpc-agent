@@ -35,7 +35,7 @@ jobs:
 
       - name: Syntax check every module
         run: |
-          for file in index.mjs client.js lib/*.mjs bin/*.mjs test/*.mjs; do
+          for file in index.mjs client.js lib/*.mjs bin/*.mjs test/*.mjs scripts/*.mjs; do
             node --check "$file"
           done
 
@@ -47,3 +47,9 @@ jobs:
 
       - name: Integration test against the real Host WebServer
         run: npm run test:host
+
+      # The npm tarball is the artifact users install. `files` missing one entry
+      # does not fail the install — it fails at the host's `import`, which the
+      # user experiences as "the settings page is gone". Catch it at PR time.
+      - name: Package contents are complete
+        run: npm run check:package
