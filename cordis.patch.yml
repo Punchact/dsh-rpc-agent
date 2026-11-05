@@ -1,0 +1,9 @@
+# Inserts the loopback JSON-RPC bridge as a Host plugin.
+#
+# Every tunable lives in this row's `config`, so a user edits the profile's patch
+# layer rather than this package. See README.md for the keys; the row validates
+# them itself (the plugin exports no schemastery `Config`, to stay dependency-free).
+- insert:
+    - id: dsh-rpc-bridge
+      name: '@punchact/dsh-rpc'
+      config: {}

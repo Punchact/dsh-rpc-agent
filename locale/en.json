@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "RPC Bridge",
+    "description": "Loopback JSON-RPC and MCP bridge that lets other local AI agents (Claude Code, Codex, Cursor, Trae) drive DeepSeek Harness sessions: create a session, submit a prompt, stream progress and read the turn's answer."
+  }
+}

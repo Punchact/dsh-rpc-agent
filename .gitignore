@@ -1,0 +1,12 @@
+# dependencies (this package has none, but keep the rule)
+node_modules/
+
+# runtime state written by the plugin into $DSH_HOME — must never land in the repo
+endpoint.json
+token
+
+# editor / OS noise
+.DS_Store
+Thumbs.db
+*.log
+*.tmp

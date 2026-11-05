@@ -1,0 +1,3 @@
+# Everything here is authored with LF; keep it that way for anyone cloning with
+# core.autocrlf=true, so byte-level checks stay stable across machines.
+* text=auto eol=lf

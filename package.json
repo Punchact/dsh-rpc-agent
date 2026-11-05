@@ -1,0 +1,53 @@
+{
+  "name": "@punchact/dsh-rpc",
+  "version": "0.1.0",
+  "description": "Loopback JSON-RPC bridge that lets local AI agents drive DeepSeek Harness sessions",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./index.mjs",
+    "./package.json": "./package.json",
+    "./client": "./lib/client.mjs",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.mjs",
+    "lib/",
+    "bin/",
+    "locale/",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "docs/",
+    "test/"
+  ],
+  "bin": {
+    "dsh-rpc": "./bin/dsh-rpc.mjs",
+    "dsh-rpc-mcp": "./bin/dsh-rpc-mcp.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node test/methods.test.mjs",
+    "test:e2e": "node test/e2e.mjs",
+    "test:edge": "node test/edge.mjs",
+    "check:version": "node --input-type=module -e \"import {readFileSync} from 'node:fs'; const {PLUGIN_VERSION} = await import('./lib/version.mjs'); const v = JSON.parse(readFileSync('package.json','utf8')).version; if (PLUGIN_VERSION !== v) { console.error('PLUGIN_VERSION ' + PLUGIN_VERSION + ' != package.json ' + v); process.exit(1); } console.log('version ok: ' + v);\""
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "json-rpc",
+    "mcp",
+    "agent-bridge"
+  ],
+  "license": "MIT"
+}

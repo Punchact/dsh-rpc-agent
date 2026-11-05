@@ -1,0 +1,245 @@
+# dsh-rpc 设计说明
+
+面向的读者：要改这个插件、或要给别的宿主做同类桥接的人。记录**为什么这样做**、以及做的时候在宿主里撞到的具体契约。
+
+---
+
+## 1. 问题
+
+DSH 是一个完整的 agent，但它只有两种被使用方式：人在 GUI/CLI 里用，或它自己去调用别人（MCP、工具）。反过来——**让别人调用 DSH**——没有出口。
+
+目标：本机其它 agent（Claude Code、Cursor、Codex、脚本）能把任务交给 DSH，拿到 DSH 的最终回答，而 DSH 仍然是一个带工具/技能/沙箱/持续会话的 agent，不是一个裸模型。
+
+非目标：远程多租户、跨机器部署、替代 GUI。
+
+## 2. 为什么是插件，而不是旁挂进程
+
+旁挂进程只有两条路：
+
+1. 复刻 DSH 的 agent loop（把 `dsh-agent-loop` 当库用）——但 loop 需要 session store、持久化、工具注册、审批、沙箱、模型路由……等于重新装配半个宿主，而且和宿主的版本强耦合。
+2. 驱动 GUI 的 `/api` 通道——那是给浏览器用的私有协议，带自己的信任与鉴权模型（`connection.admit` / `peer` / `remoteAccess`），对它编程等于依赖未公开的内部约定。
+
+插件路线的收益是**直接拿到 Host 的 Service**：`sessionController` 已经实现了"创建会话 / 提交 prompt / 跟随事件流 / 取消"这一整套，而且和 GUI 共用同一份会话状态。所以插件只做两件事：**注册 HTTP 路由**，**把 HTTP 语义翻译成 Service 调用**。
+
+## 3. 架构
+
+```mermaid
+flowchart LR
+  subgraph callers["调用方（独立进程）"]
+    A["Claude Code<br/>MCP 客户端"]
+    B["Cursor / Codex"]
+    C["dsh-rpc CLI"]
+    D["任意脚本<br/>lib/client.mjs"]
+  end
+
+  subgraph host["DSH 宿主进程（端口 6695）"]
+    W["webServer<br/>register(exact|prefix)"]
+    R["dsh-rpc 路由<br/>/dsh-rpc, /stream, /health"]
+    M["methods<br/>JSON-RPC ↔ Service"]
+    SC["sessionController<br/>create/prompt/follow/wait/cancel"]
+    AL["agentLoop"]
+    S["sessions / 会话日志"]
+  end
+
+  A --> B
+  A -->|stdio JSON-RPC| MCP["bin/dsh-rpc-mcp.mjs"]
+  MCP -->|HTTP| R
+  B -->|HTTP| R
+  C -->|HTTP| R
+  D -->|HTTP| R
+  W --- R
+  R --> M
+  M --> SC
+  SC --> AL
+  AL --> S
+```
+
+组件与职责：
+
+| 文件 | 职责 |
+| --- | --- |
+| `index.mjs` | cordis 插件入口：解析配置、准备 token、建 methods、注册路由、写 `endpoint.json` |
+| `lib/methods.mjs` | 全部业务方法；**轮次追踪算法**在这里 |
+| `lib/http.mjs` | 三条路由、鉴权、loopback 判定、body 上限、批量/通知、NDJSON |
+| `lib/auth.mjs` | token 生成/读取/比对（sha256 + `timingSafeEqual`）、`endpoint.json` |
+| `lib/protocol.mjs` | JSON-RPC 2.0 助手、错误码、Host `RemoteError` → 本地码的映射 |
+| `lib/config.mjs` | 手写配置校验（不用 schemastery，保持零依赖） |
+| `lib/client.mjs` | 出进程客户端（CLI 与 MCP 共用） |
+| `bin/dsh-rpc.mjs` | 人用的 CLI |
+| `bin/dsh-rpc-mcp.mjs` | MCP stdio 桥 |
+
+## 4. 关键决策
+
+### 4.1 复用 `ctx.webServer`，不自建 HTTP server
+
+`webServer.register({kind, path, handler})` 把路由挂到 GUI 已经监听的 6695 端口上：
+
+- 不用抢端口、不用管 TLS/证书、不用向用户解释"还有第二个端口"。
+- 生命周期跟着插件走：`ctx.effect(() => () => dispose())` 注册的 disposer 会在插件卸载时摘掉路由。
+- 代价：路由活在 GUI 的 origin 下，必须自己做鉴权（浏览器同源策略保护不了 loopback）。
+
+### 4.2 用 `sessionController`，不直接用 `agentLoop`
+
+`agentLoop.createAgent` 能造 agent，但**造出来的是裸 agent**：没有 session 日志落盘、没有 title、没有 GUI 可见性、没有 `remoteAccess` 过滤，拆卸顺序也要自己对齐 loop（`sessions` 的注释明确警告过这点）。
+
+`sessionController` 是 GUI 的同一条路径，语义已经封好：
+
+```ts
+create(request: SessionCreateRequest): Promise<{sessionId, agentPreset?}>
+prompt(request: SessionPromptRequest, signal: AbortSignal): Promise<{accepted: true}>
+follow(request: SessionFollowRequest, signal): AsyncIterable<SessionFollowFrame>
+cancel(request: {sessionId}): {accepted: true}
+```
+
+所以 RPC 调用产生的会话就是 GUI 里能看见的普通会话——可在界面里接着聊，也可以被 `dsh.sessions.list` 列出来。
+
+### 4.3 轮次追踪：先看基线，再提交 prompt
+
+RPC 的语义是"给我这一轮的结果"，但 Host 的 `prompt` 只是**投递**（`agent.followup` / `agent.steer`），没有返回值语义。要拿到某一轮的结果，必须自己把"投递"和"这一轮"对上。
+
+做法：
+
+```mermaid
+sequenceDiagram
+  participant C as 调用方
+  participant R as dsh-rpc
+  participant H as sessionController
+  C->>R: ask(text)
+  R->>H: follow(session) → 第一帧 snapshot
+  H-->>R: snapshot{turn: N, running: ?}
+  Note over R: baseline = N（running 时目标同为 N）
+  R->>H: prompt(text, mode)
+  Note over R: 目标轮次 = queue 时 N+1；<br/>steer 且正在跑 时 N
+  H-->>R: event: turn/start{turn: N+1}
+  Note over R: 若新 turn/start ≥ 目标，上调目标（并发排队漂移）
+  H-->>R: event: assistant/message … tool/call …
+  H-->>R: event: turn/end{turn: N+1, reason}
+  R-->>C: {turn, status, text, reasoning, tools, usage}
+```
+
+几个必须处理的细节：
+
+- **基线只认 snapshot 的第一帧**。`follow` 先给快照再给增量，快照里已经混着历史事件（实测一次 snapshot 里有 37 条记录，含 `permission/preset`、`sandbox/mode`、`session/title` 等与轮次无关的事件）。
+- **猜测只是起点，认领才是判据**。起初目标轮次完全靠"基线 + 1"（steer 取基线），再靠 `turn/start` 的 turn ≥ 目标就上调来兜并发漂移——这条路在别人插队时会把**别人的那一轮**当成自己的答案（复审发现的高危项）。现在改为**认领**：投递 prompt 之后，从事件流里找 `user/message` 且 `data.source.rpcId === requestId` 的那条，它落在哪一轮就把目标改成哪一轮；在认领之前，任何 `turn/end` 都不算本次调用的结果（`wait` 没有 prompt，仍按"窗口内最后一轮"处理）。实测该 `rpcId` 由 Host 原样写进 `user/message.source`（`lib/index.js` 里 `source = {kind:'user', rpcId: request.requestId}`），而 `user/message` 事件不带 turn 字段——所以归属要靠"最近一次 `turn/start`"来锚定。
+- **`steer` 落到当前轮次**。正在跑的时候 steer 会插进当前 step，不会产生新的 `turn/start`，因此锚点初始化为基线轮次本身。
+- **只保留轮次作用域事件**，上限 4000 条，避免长会话把内存拖死。
+- **超时不取消**。`timeout` 只表示"我没等到"，把选择权留给调用方（可再 `cancel`）。反过来说，`cancel` 之后 `status` 一定是 `aborted`——因为状态取自该轮自己的 `turn/end` 原因。
+- **空闲会话的 `wait` 也要读原因**。早先的实现直接把"没在跑"当作 `completed`，会把上一轮被取消的会话误报成功；现在统一从 `turn/end` 的 `reason.kind` 取状态。
+- **流提前结束要标 `partial`**。事件流没等到 `turn/end` 就 `done` 时，`text` 是半截；`status` 保持 `unknown`，同时 `partial:true`，避免调用方把片段当完整回答。
+
+### 4.4 零依赖
+
+`package.json` 里没有 `dependencies` / `peerDependencies`。原因不是洁癖，而是**装进 profile 的 bundle 不能依赖 peer 解析**：它的 `node_modules` 由宿主的 pnpm 管理，任何外部依赖都可能解析到宿主自己的版本树里，制造版本漂移。所有能力用 `node:` 内置模块实现（`http` 走 `webServer` 给的 req/res、`crypto` 做 token、`fetch` 做客户端）。
+
+### 4.5 两套错误码对齐
+
+Host 抛 `RemoteError(code, message, details)`（`isDSHRemoteError === true`），码是 `session/not-found`、`session/agent-busy` 这类字符串。RPC 侧把它们映射到 `-3200x` 段，同时把原始 `kind` 留在 `error.data` 里——调用方既能按数值分支，也能拿到宿主的原始语义。
+
+### 4.6 鉴权
+
+- token 32 字节随机 hex，落盘 0600，路径 `%USERPROFILE%\.dsh\dsh-rpc\token`。
+- 比对用 `sha256` + `timingSafeEqual`，避免时序侧信道。
+- **loopback 白名单**：`req.socket.remoteAddress ∈ {127.0.0.1, ::1, ::ffff:127.0.0.1}`，否则 403。这一层是防"浏览器里随手 fetch"——因为任何网页都能向 `127.0.0.1:6695` 发请求，token 才挡得住跨站调用，白名单则挡掉非本机来源。
+- `/health` 故意免鉴权，只回插件版本与 `authenticated:false`，方便探活。
+
+## 5. 撞到的宿主契约（踩坑记录）
+
+这些是读源码 + 实跑才确认的，写下来给后来者省时间。
+
+| 现象 | 真相 |
+| --- | --- |
+| `turnWindow.minMessages must be a positive safe integer no greater than maxMessages` | `SessionFollowRequest.turnWindow` 的 `minMessages` 必须 ≥1；`{minMessages:0}` 非法。本插件干脆不传 `turnWindow`，只用 `maxMessages` |
+| `Cannot read properties of undefined (reading 'throwIfAborted')` | `SessionController.prompt(request, signal)` / `list(_request, signal)` 会**无条件** `signal.throwIfAborted()`。一次性的调用也必须传一个真实 `AbortSignal`，不能传 `undefined` |
+| Host 侧 `cancel` 不抛异常 | `agent.cancel(cause, {keepInbox:true})` 只做 `inbox.clear()` + `phase.abort.abort(cause)`；`SessionController.cancel(request)` 只有一个参数 |
+| `follow` 的迭代器在 abort 时**正常结束**而不是抛错 | 所以"是否超时"只能由自己的 deadline 决定，不能靠 catch 分支 |
+| 改了 `lib/*.mjs` 但行为不变 | 宿主 import 过就不再看文件。`plugin_manager` 把该行 `set_plugin(enabled:false)` 再 `true`，会重新 import（`application: "applied"`），无需重启 Harness |
+| `cordis_inspect_query` 查配置要传 `{name:"@punchact/dsh-rpc"}`，查服务要传 `{service:"webServer"}` | Service provider 的入参键是 `service`，Config provider 才是 `name`；`additionalProperties:false`，传错直接被拒 |
+| 插件行 `status: "absent"` | 正常。插件不导出 `Config` schema，所以没有可校验的 config 契约 |
+| `node --test test/` 报 `spawn EPERM` | DSH 沙箱禁掉 Node 子进程的管道 stdio。单元测试要 `node test/methods.test.mjs` 在进程内跑 |
+
+另外：发行包里的 `.d.ts` 已被裁掉，`lib/types/*.d.ts` 读不到；类型只能从 `lib/index.js` 的 `//#region lib/types/...` 分区注释与 JSDoc 反推。`app.asar` 也不能被 `ls`/`rg`/`node fs` 直接读串——需要按 asar 头格式解出（`_tmp/asar-get.mjs` 就是这么来的）。
+
+## 6. 没选的方案
+
+| 方案 | 为什么没选 |
+| --- | --- |
+| WebSocket / gRPC | JSON-RPC over HTTP 已经够用；NDJSON 流式同样简单，且任何语言、任何 agent 都能拼出请求体 |
+| 直接暴露 GUI 的 `/api` | 私有协议 + 独立信任模型，属于未公开契约 |
+| 一个 RPC 方法对应 Host 的全部 40+ 方法 | 暴露面越大越难保证语义正确；先覆盖"跑一轮、拿结果"闭环，其余按需加 |
+| 把 token 放环境变量 | 环境变量会随子进程扩散；文件 + 显式 env 覆盖（`DSH_RPC_TOKEN`）更可控 |
+| 进程内直调（同进程 import） | 调用方本来就是别的进程 |
+
+## 7. 验证矩阵
+
+| 层 | 手段 | 结果 |
+| --- | --- | --- |
+| 单元 | `test/methods.test.mjs`，21 例，Host 假体（含 follow 流与事件总线、必需 signal 的断言、`user/message` 认领） | 21/21 |
+| 端到端 | `test/e2e.mjs`，14 项，走真实 `lib/client.mjs` | 14/14 |
+| 边界 | `test/edge.mjs`，24 项协议对抗（batch、通知、超大 body、参数注入、超时钳制、并发、`limit` 语义） | 24/24 |
+| 传输 | 401 / 403 / 413 / -32601 / -32602 / health 免鉴权 | 通过 |
+| 语义 | ask 单轮、同会话续聊记住上文、history 只读、流式帧、取消活动轮次 → `aborted`、空闲 wait 取原因、并发 ask → `-32004`、别人插话时认领自己的轮次（实跑：`prompt` 抢跑一轮，`ask` 正确返回 turn 2 自己的答案） | 通过 |
+| 接入 | MCP `initialize` / `tools/list` / `dsh_ask` / `dsh_status`（stdio 实跑） | 通过 |
+
+## 8. 后续可做
+
+- `dsh.sessions.fork` / `rename` / `projections` 的薄封装。
+- 把 `tools/call` 级别的进度也流到 MCP 的 `notifications/progress`，让上层 agent 看到 DSH 正在做什么。
+- 可选的请求日志（`logRequests`）输出到宿主 logger，便于审计谁调用了 DSH。
+- 若需要局域网调用：`allowRemote` + 反向代理终结 TLS，token 走 `Authorization` 头（不要放 query）。
+
+## 9. 审查记录（2026-11-05）
+
+首次交付后做了一轮"缺陷 + 官方规范"复审，以下是**实测确认**并已修复的问题。每条都保留了复现方式，便于回归。
+
+| 严重度 | 问题 | 原因 | 复现 | 修法 |
+| --- | --- | --- | --- | --- |
+| 高 | 超大 body 时客户端只看到 `ECONNRESET`，413 永远发不出去 | `readBody` 一超限就 `req.destroy()`，响应写不进去 | 发 2MB body（`maxBodyBytes` 1MB） | 先排空再应答：超限只标记 overflow，超过 4 倍才断连；handler 按 `tooLarge` 回 **413 + `connection: close`** |
+| 高 | JSON 调用方能注入内部通道 `params.signal` / `params.onEvent` | 驱动选项和方法参数塞在同一个对象里 | 传 `{"signal":"boom"}` → `signal.addEventListener is not a function` | 拆出第二参数 `internalContext(context)`，HTTP 层用 `methods.ask(params, {signal, onEvent})` 传 |
+| 中 | 同一会话并发 `ask` 可能返回别人的轮次 | 两者都算 `baseline + 1`，撞同一个目标轮次 | 并发两个 ask（原先靠时序侥幸正确） | `prompting` Map 登记"谁在等轮次"，第二个提问型运行直接 `-32004`；`wait` 不拦 |
+| 中 | `create` 无条件传 `process.cwd()`，覆盖宿主默认 | Host 的 `cwd = workspace?.path ?? request.cwd ?? defaultCwd`，defaultCwd 本就是 `process.cwd()` | `create {}` / `create {cwd:""}` 都落到 `…\.dsh\profiles\desktop` | 只在调用方真给了 cwd 时才写进 request；结果用 Host `inspect().meta.cwd` 回读 |
+| 中 | Host 错误码映射只有 9 条，`agent-preset/not-found` 等落成 `-32000` | 映射表不全 | `ask` 带不存在的 preset | 扩到 17 条（含 `workspace/not-found`、`subagent/*`、`session/conflict`、`session/steer-unavailable`…） |
+| 中 | CLI 的 `process.exit()` 截断管道 stdout | 未等待 drain 就退出 | `dsh-rpc ask … \| jq` | `flushStdio()` 在退出前 await |
+| 中 | CLI `health` / `env` 不读 `endpoint.json`，跨端口时会探错地方 | 只用 `DSH_WEB_URL` 拼地址 | 换了端口后 `health` 探旧地址 | 两个命令都走 `readEndpoint()` 发现，`--url` 仍最高优先 |
+| 中 | `rpcCall` 无默认超时，宿主卡住会把调用方一起挂死 | 只靠 `fetch` 自身 | 模拟宿主不响应 | 默认 2 分钟 `DEFAULT_CALL_TIMEOUT_MS`，并按错误类型给出退出码 3（连不上）/1（失败） |
+| 中 | MCP 桥 `track()` 返回的 promise 无人接管 | `work.finally()` 的新 promise 悬空 | 上游拒绝时未处理拒绝可杀进程 | `work.catch(log).finally(...)` 真正被接管 |
+| 中 | MCP 桥对 notification 也回帧 | 未判 `id` | 发 `tools/call` 不带 id | `if (!isNotification) reply(...)` |
+| 低 | token 文件里的值不校验最短长度 | 只在 config/env 分支校验 | 手工写入短 token | 文件分支同样按 `MIN_TOKEN_LENGTH` 拒绝并提示删除重生成 |
+| 低 | `endpoint.json` 非原子写 | 直接 `writeFileSync` | 恰好并发读取时可能读到半截 | 写 `${target}.${pid}.tmp` 再 `renameSync` |
+| 低 | `path` 配置不拒绝 `..` 段 | 只做了前缀与尾部归一 | `path: "/dsh-rpc/../../etc"` | 显式拒绝 `.`/`..` 段 |
+
+**规范符合性**（对照 `cordis-plugin-development` 的 `host-plugin.md` / `practices.md` / `verification.md`）：
+
+- 满足：bundle manifest、`cordis.patch.yml` 插入行、`apply(ctx, config)` 形态、所需资源全部经 `ctx.effect` 注册并返回 cleanup、可选服务走 `inject`、显示元数据（`locale/*.json` 的 `meta.title`/`meta.description`）、`exports` 提供 `./locale/*.json` 与 `./icon`、图标在包内且 SVG ≤256KiB、等待持久事件 `turn/end` 而非轮询状态、不向 session 追加自定义事件类型。
+- **明确偏差（已记录、可接受）**：未导出 `Config` schema。`practices.md` 建议可调参数放进 `Config` 以便用户改；本插件改为读 row 的 `config` 并手写校验，理由是零依赖——装进 profile 的 bundle 不应该依赖 `schemastery` 的 peer 解析。代价：`cordis_inspect_query` 里这行 `status: absent`，没有可视化表单。若将来接受一个 peer 依赖，可以补上 `export const Config` 而不改其它代码。
+- 渲染核验：按 `verification.md` 的要求需要浏览器侧确认。**2026-11-05 已由用户在现场目视确认**：Plugins 页里该插件的行显示为 `RPC Bridge`，图标正常渲染 → `locale/*.json` 的 `meta.title` 确实被前台采用，`icon.svg` 渲染通过。
+  - 仍存的边界：`meta.description`（locale 里的描述文案）未单独目视确认；`plugin_manager list_bundles` 输出里的 description 来自 `package.json` 的 `description` 字段，**与前台显示是两条通路**，不能互相代替取证。
+
+## 10. 第二轮复盘（2026-11-05，独立复核后）
+
+这一轮由外部审计方（Kimi 3.1 Pro，只读）对 `drive()` / `readBody()` / 协议边界做了对抗性复核，加上自查与实跑探针。**六条发现里五条成立**，逐条落地如下。
+
+| 严重度 | 发现 | 判定 | 处置 |
+| --- | --- | --- | --- |
+| 高 | 目标轮次被更高轮次无约束抬高，可能把别人的轮次当成本次 `ask` 的结果 | 成立。原 `turn >= targetTurn` 的无条件上调在"别人先插话"时会把对方那一轮认成自己的 | 改为按 `user/message.source.rpcId` **认领**（见 4.3）；认领前任何 `turn/end` 都不接受，`turn/start` 只在"尚未认领 + 未产出正文 + 恰好 +1"时才容忍一次漂移 |
+| 高 | 流未等到 `turn/end` 正常结束时，结果报 `unknown` 却带半截正文 | 部分成立：`unknown` 本身是诚实的，缺的是"这段正文不完整"的显式信号 | 结果新增 `partial: true`（仅当 `status === "unknown"` 且未超时）；README 说明"不要把 `partial` 的 `text` 当完整回答" |
+| 中 | 并发上限按 session 计数，同会话多个 `wait` 互相覆盖，`activeRuns` 漏报 | 成立。`runs` 以 `sessionId` 为键，同会话后一个 run 会覆盖前一个 | `runs` 改为以 `runId` 为键（记录 `sessionId`），`activeRuns` 逐 run 输出；`prompting` 仍按 session 拦提问型并发 |
+| 中 | `wait` 依赖有限快照，截断后可能误报 `idle`/`completed` 或丢掉 `aborted` | 成立，属真实边界 | 不掩盖：写入 README「已知边界」，并提示用 `history` 复核精确状态 |
+| 低 | batch 内全部串行，一条慢 `ask` 阻塞后续请求 | 成立，但是**设计选择**（批量语义可预期、避免同一会话并发争抢） | 保留，写入 README「已知边界」 |
+| 低 | 流式 handler 在方法抛错后仍走 `finally res.end()`，可能操作已关闭的响应 | 不成立/不可复现：`write()` 有 `writableEnded` 守卫，`res.end()` 包在 try/catch 内 | 不改，仅记录 |
+
+同轮自查新增两处加固（未被审计方提出）：
+
+- `drive()` 里"把调用方 signal 接到 `ac`"的代码原本在 `prompting.set(...)` 之后、`try` 之前——若它抛错，session 会永久被标成 busy。已整块移入 `try`，让 `finally` 一定清理。
+- `client.mjs` 收到非 JSON 响应时给出可读诊断（"bridge is most likely not mounted…"），而不是 `Unexpected token '<'`——插件被禁用时 Web 服务仍会回 SPA 的 `index.html`。
+- `limit` 语义统一：非正整数（`0`、`-1`、`2.5`、`"5"`）一律 `-32602`，不再被 `Math.max(1, …)` 悄悄改成 1 条。
+
+**回归证据**：单元 21/21（新增"别人的轮次不被当成本次答案""并发上限按 run 计数""非法 limit 被拒"）、对抗 24/24（新增"小数 limit 被拒""显式 limit 仍生效"）、端到端 14/14；13 个 `.mjs` 全部 `node --check` 通过。
+
+**本轮的更正记录（保留错误原文，不静默删除）**
+
+- 错误原文：第一轮复审汇报里说过"`locale` 里的 `meta.title`/`meta.description` 已经出现在 bundle 列表里了"。
+- 实测推翻：`plugin_manager list_bundles` 返回的 description 逐字等于 `package.json` 的 `description`；而 `locale/en.json` 的 title 是 `RPC Bridge`、`zh.json` 是 `RPC 桥接`，这两个串在该接口输出里根本没有出现。
+- 真实根因：把"接口输出里有个像标题的字段"直接等价成"locale 的 meta 生效了"，中间缺一步字段来源核对——典型的计数型断言量错对象。
+- 正确表述：`list_bundles` 显示的是包的 `description`；`locale` 的 `meta` 是否被前台采用，只能靠界面核验（已由用户于 2026-11-05 确认 title 与图标生效）。
+
+

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "RPC 桥接",
+    "description": "回环 JSON-RPC 与 MCP 桥接：让本机其它 AI Agent（Claude Code、Codex、Cursor、Trae）驱动 DeepSeek Harness 会话——建会话、投 prompt、流式看进度、读回该轮的回答。"
+  }
+}
