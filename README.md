@@ -239,14 +239,15 @@ node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
   "reason": { "kind": "completed" },
   "text": "收到",                  // 该轮正文，多段以空行连接
   "reasoning": "…",               // 可选，思考内容
-  "tools": [],                    // [{callId, name, arguments, output?, isError?}]，该轮的工具调用
+  "tools": [],                    // [{callId, name, arguments, output?, isError?}]，该轮的工具调用；output 单条截断 4000 字、整轮共享 20000 字预算
   "usage": { "inputTokens": 134981, "outputTokens": 2, "totalTokens": 134983 },
   "durationMs": 5311,
   "timedOut": false,
   "partial": false,               // true 表示流在 turn/end 之前结束，text 只是片段
   "sandbox": {                    // 仅当这一轮被沙箱拒绝时出现
     "denied": true,
-    "marker": "[sandbox: file access denied under workspace-write mode]"
+    "marker": "[sandbox: file access denied under workspace-write mode]",
+    "source": "tool"              // "tool" = 工具输出里读到的（可靠）；"text" = 只从 agent 回答里读到（它可能在复述）
   },
   "next": {                       // 仅随 sandbox 出现：文档化的唯一出路
     "tool": "dsh_ask",

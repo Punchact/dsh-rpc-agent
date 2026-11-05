@@ -782,11 +782,44 @@ test("a sandbox refusal is reported as a fact plus the one documented escalation
   assert.equal(result.status, "completed");
   assert.equal(result.sandbox.denied, true);
   assert.equal(result.sandbox.marker, "[sandbox: file access denied under workspace-write mode]");
+  assert.equal(result.sandbox.source, "tool");
   assert.deepEqual(result.next.args, { session_id: "session-test", permission: "danger-full-access" });
   assert.equal(result.next.tool, "dsh_ask");
   // The refusal is not an error: the turn ran and the tool error keeps its own flag.
   assert.equal(result.tools[0].isError, true);
   assert.match(result.tools[0].output, /sandbox: file access denied/);
+});
+
+test("a refusal only the agent mentions is reported, but flagged as the weaker source", async () => {
+  const controller = fakeController({
+    script: [
+      { kind: "start", turn: 1 },
+      { kind: "tool", turn: 1, callId: "c1", name: "bash" },
+      { kind: "toolResult", turn: 1, callId: "c1", text: "ok" },
+      { kind: "text", turn: 1, text: "写入被挡住了：[sandbox: file access denied under workspace-write mode]" },
+      { kind: "end", turn: 1 },
+    ],
+  });
+  const result = await build(controller).ask({ text: "写到 workspace 外" });
+
+  assert.equal(result.sandbox.denied, true);
+  assert.equal(result.sandbox.source, "text");
+});
+
+test("a turn's tool output is bounded even when every call is chatty", async () => {
+  const noisy = "x".repeat(4000);
+  const script = [{ kind: "start", turn: 1 }];
+  for (let i = 0; i < 6; i += 1) {
+    script.push({ kind: "tool", turn: 1, callId: `c${i}`, name: "bash" });
+    script.push({ kind: "toolResult", turn: 1, callId: `c${i}`, text: noisy });
+  }
+  script.push({ kind: "end", turn: 1 });
+
+  const result = await build(fakeController({ script })).ask({ text: "跑很多命令" });
+  const total = result.tools.reduce((sum, tool) => sum + (tool.output?.length ?? 0), 0);
+
+  assert.ok(total <= 20000 + 400, `tool output should stay near the budget, got ${total}`);
+  assert.match(result.tools.at(-1).output, /omitted/);
 });
 
 test("an ordinary failure is not mistaken for a sandbox refusal", async () => {
