@@ -15,6 +15,12 @@ name: release
 #      to successful OIDC runs.
 #   3. Neither: rehearse with `npm publish --dry-run` and say so, rather than failing a release over
 #      a credential nobody has configured yet — and rather than pretending to have published.
+#
+# Two `workflow_dispatch` inputs exist purely for diagnosis and both default to off:
+#   diagnose — print what the registry says about this repository's OIDC trust (an exchange
+#              status), instead of inferring it from `npm publish`'s ENEEDAUTH.
+#   stage    — perform a staged publish, which a Trusted Publisher always permits, to prove the
+#              entry matches without moving `latest`.
 
 on:
   release:
@@ -25,6 +31,14 @@ on:
         description: "Verify and pack, but do not publish"
         type: boolean
         default: true
+      stage:
+        description: "Diagnostic: upload as a staged publish instead of publishing to latest"
+        type: boolean
+        default: false
+      diagnose:
+        description: "Diagnostic: ask the registry why OIDC is or is not accepted, before publishing"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -91,6 +105,38 @@ jobs:
           else
             echo "OIDC: request endpoint ABSENT — id-token: write did not reach this job"
           fi
+      # Diagnostic only, never fatal, and opt-in: ask the registry directly why OIDC is or is not
+      # accepted. `npm publish` collapses every authentication problem into ENEEDAUTH, which cannot
+      # tell a missing Trusted Publisher apart from a mismatched workflow filename; the exchange
+      # endpoint answers with a status code and a reason instead.
+      #
+      # Gated behind `diagnose` because a healthy release learns nothing from it: when a publish
+      # answers ENEEDAUTH, re-dispatch this workflow on the same ref with dry_run=true and
+      # diagnose=true, and read the exchange verdict instead of guessing.
+      - name: oidc exchange probe
+        if: ${{ inputs.diagnose == true }}
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "no OIDC endpoint in this job — id-token: write did not reach it"
+            exit 0
+          fi
+          TOKEN_JSON=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org")
+          ID_TOKEN=$(node -p "JSON.parse(process.argv[1]).value" "$TOKEN_JSON")
+          if [ -z "$ID_TOKEN" ]; then
+            echo "could not obtain an ID token: $TOKEN_JSON"
+            exit 0
+          fi
+          echo "payload claims of the ID token:"
+          node -p "JSON.stringify(JSON.parse(Buffer.from(process.argv[1].split('.')[1],'base64url').toString()).slice, null, 0)" "$ID_TOKEN" 2>/dev/null || true
+          node -e 'const p=JSON.parse(Buffer.from(process.argv[1].split(".")[1],"base64url").toString());for(const k of ["repository","repository_owner","repository_id","workflow_ref","job_workflow_ref","ref","event_name","environment"]) { if (p[k] !== undefined) console.log("  "+k+" = "+JSON.stringify(p[k])); }' "$ID_TOKEN"
+          CODE=$(curl -sS -o /tmp/exchange.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${ID_TOKEN}" \
+            "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/@punchact%2Fdsh-rpc-agent")
+          echo "exchange status: ${CODE}"
+          echo "exchange body: $(cat /tmp/exchange.json)"
       # No --provenance flag: npm generates provenance by itself for OIDC publishes from a public
       # repository, and refuses the flag outright for a private one.
       - name: publish
@@ -112,6 +158,15 @@ jobs:
           if [ "$real" != "1" ]; then
             echo "rehearsal: npm publish --access public --dry-run"
             npm publish --access public --dry-run
+            exit 0
+          fi
+
+          # Diagnostic switch: `npm stage publish` is always permitted for a Trusted Publisher,
+          # while `npm publish` needs the extra "Allowed actions" tick. Staging tells the two
+          # failure modes apart — a staging publish that authenticates proves the entry matches.
+          if [ "${{ inputs.stage }}" = "true" ]; then
+            echo "diagnostic: npm stage publish --access public"
+            npm stage publish --access public
             exit 0
           fi
 
