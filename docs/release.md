@@ -47,6 +47,19 @@ git push origin v0.4.2
 只想演练不发布：Actions → release → Run workflow，`dry_run` 保持默认 `true`，它会跑完整 `verify` 并打印
 `npm publish --access public --dry-run` 的真实清单。
 
+### C. 发布认证失败时怎么定位
+
+`npm publish` 把所有认证问题压成同一句 `ENEEDAUTH`，它分不清"没有 Trusted Publisher 条目"和"条目在但
+工作流文件名对不上"。所以工作流准备了两个诊断开关，默认都关，只在需要时手动开：
+
+| 输入 | 作用 | 怎么读结果 |
+| --- | --- | --- |
+| `diagnose` | 拿 GitHub 的 ID token 直接问注册表 `…/oidc/token/exchange/package/@punchact%2Fdsh-rpc-agent`，并打印 ID token 里的 `repository` / `repository_id` / `workflow_ref` 等声明 | `exchange status: 201` = 信任关系通了；`404 package not found` = 这个包名在 npm 上没有任何条目（或条目指向别的仓库）；`422` = 条目在但声明对不上 |
+| `stage` | 走 `npm stage publish`，这是 Trusted Publisher **总是允许**的动作 | 暂存成功 = 条目匹配；仍 `ENEEDAUTH` = 条目根本不存在或工作流不匹配 |
+
+用法：Actions → release → Run workflow 选**同一个 ref**，`dry_run=true`、`diagnose=true`，看 `oidc exchange
+probe` 那一步的输出。**不要**把这些开关当成常规流程的一部分——健康的发布从里面学不到东西。
+
 ### B. 本机令牌发布（OIDC 出问题时的兜底）
 
 ```bash
@@ -81,7 +94,8 @@ exit 0），而真正的拒绝发生在正式发布会——也就是打完 tag 
 ## 不可逆的地方
 
 - **版本号发出去就收不回**。`npm unpublish` 有 24 小时与依赖数限制，正常路径是发新版本。
-- **provenance 只在「OIDC 发布 + 公开仓库 + 公开包」三条同时成立时才有**。所以现在（仓库私有）发布不会
-  带来源证明，工作流里也没有 `--provenance` 参数——私有仓库下加它会被 npm 直接拒绝；仓库转公开后下一次
-  OIDC 发布会自动带上，不用改代码。用令牌兜底发布则永远拿不到 provenance。
+- **provenance 只在「OIDC 发布 + 公开仓库 + 公开包」三条同时成立时才有**。仓库已于 2026-11-05 转为公开，
+  0.4.4 起由 OIDC 发布的版本自动带上来源证明（`/-/npm/v1/attestations/@punchact%2Fdsh-rpc-agent@<版本>`
+  返回 200，含 `npm publish/v0.1` 与 `https://slsa.dev/provenance/v1`），工作流里刻意不写 `--provenance`
+  参数——npm 自己会加，私有仓库下加它反而会被拒绝。用令牌兜底发布则永远拿不到 provenance。
 - 发到 npm 即**公开**。仓库可以私有，包不行（私有包需要 npm 付费组织）。

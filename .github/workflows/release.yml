@@ -15,6 +15,12 @@ name: release
 #      to successful OIDC runs.
 #   3. Neither: rehearse with `npm publish --dry-run` and say so, rather than failing a release over
 #      a credential nobody has configured yet — and rather than pretending to have published.
+#
+# Two `workflow_dispatch` inputs exist purely for diagnosis and both default to off:
+#   diagnose — print what the registry says about this repository's OIDC trust (an exchange
+#              status), instead of inferring it from `npm publish`'s ENEEDAUTH.
+#   stage    — perform a staged publish, which a Trusted Publisher always permits, to prove the
+#              entry matches without moving `latest`.
 
 on:
   release:
@@ -27,6 +33,10 @@ on:
         default: true
       stage:
         description: "Diagnostic: upload as a staged publish instead of publishing to latest"
+        type: boolean
+        default: false
+      diagnose:
+        description: "Diagnostic: ask the registry why OIDC is or is not accepted, before publishing"
         type: boolean
         default: false
 
@@ -95,11 +105,16 @@ jobs:
           else
             echo "OIDC: request endpoint ABSENT — id-token: write did not reach this job"
           fi
-      # Diagnostic only, never fatal: ask the registry directly why OIDC is or is not accepted.
-      # `npm publish` collapses every authentication problem into ENEEDAUTH, which cannot tell a
-      # missing Trusted Publisher apart from a mismatched workflow filename. The exchange endpoint
-      # answers with a status code and a reason instead.
+      # Diagnostic only, never fatal, and opt-in: ask the registry directly why OIDC is or is not
+      # accepted. `npm publish` collapses every authentication problem into ENEEDAUTH, which cannot
+      # tell a missing Trusted Publisher apart from a mismatched workflow filename; the exchange
+      # endpoint answers with a status code and a reason instead.
+      #
+      # Gated behind `diagnose` because a healthy release learns nothing from it: when a publish
+      # answers ENEEDAUTH, re-dispatch this workflow on the same ref with dry_run=true and
+      # diagnose=true, and read the exchange verdict instead of guessing.
       - name: oidc exchange probe
+        if: ${{ inputs.diagnose == true }}
         continue-on-error: true
         run: |
           set -uo pipefail
