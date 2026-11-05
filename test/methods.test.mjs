@@ -168,6 +168,18 @@ function fakeController({
             });
           } else if (step.kind === "tool") {
             append("tool/call", { turn: step.turn, step: 1, callId: step.callId, name: step.name, arguments: {} });
+          } else if (step.kind === "toolResult") {
+            // The Host stores a tool's answer as a tool-role message; the sandbox
+            // writes its denial marker into that text.
+            append("tool/result", {
+              turn: step.turn,
+              step: 1,
+              message: {
+                toolCallId: step.callId,
+                content: [{ type: "text", text: step.text }],
+                isError: step.isError ?? false,
+              },
+            });
           } else if (step.kind === "end") {
             append("turn/end", { turn: step.turn, reason: step.reason ?? { kind: "completed" } });
           }
@@ -747,6 +759,97 @@ test("a deployment without permissionPresets reports that instead of crashing", 
     () => build(fakeController(), {}, {}).configure({ sessionId: "session-test", permissionPreset: "read-only" }),
     (error) => error.code === -32000 && /no permissionPresets service/.test(error.message),
   );
+});
+
+test("a sandbox refusal is reported as a fact plus the one documented escalation", async () => {
+  const controller = fakeController({
+    script: [
+      { kind: "start", turn: 1 },
+      { kind: "tool", turn: 1, callId: "c1", name: "write_file" },
+      {
+        kind: "toolResult",
+        turn: 1,
+        callId: "c1",
+        text: "Error: EPERM\n[sandbox: file access denied under workspace-write mode]",
+        isError: true,
+      },
+      { kind: "text", turn: 1, text: "写入被沙箱挡住了。" },
+      { kind: "end", turn: 1 },
+    ],
+  });
+  const result = await build(controller).ask({ text: "写到 workspace 外" });
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.sandbox.denied, true);
+  assert.equal(result.sandbox.marker, "[sandbox: file access denied under workspace-write mode]");
+  assert.equal(result.sandbox.source, "tool");
+  assert.deepEqual(result.next.args, { session_id: "session-test", permission: "danger-full-access" });
+  assert.equal(result.next.tool, "dsh_ask");
+  // The refusal is not an error: the turn ran and the tool error keeps its own flag.
+  assert.equal(result.tools[0].isError, true);
+  assert.match(result.tools[0].output, /sandbox: file access denied/);
+});
+
+test("a refusal only the agent mentions is reported, but flagged as the weaker source", async () => {
+  const controller = fakeController({
+    script: [
+      { kind: "start", turn: 1 },
+      { kind: "tool", turn: 1, callId: "c1", name: "bash" },
+      { kind: "toolResult", turn: 1, callId: "c1", text: "ok" },
+      { kind: "text", turn: 1, text: "写入被挡住了：[sandbox: file access denied under workspace-write mode]" },
+      { kind: "end", turn: 1 },
+    ],
+  });
+  const result = await build(controller).ask({ text: "写到 workspace 外" });
+
+  assert.equal(result.sandbox.denied, true);
+  assert.equal(result.sandbox.source, "text");
+});
+
+test("a turn's tool output is bounded even when every call is chatty", async () => {
+  const noisy = "x".repeat(4000);
+  const script = [{ kind: "start", turn: 1 }];
+  for (let i = 0; i < 6; i += 1) {
+    script.push({ kind: "tool", turn: 1, callId: `c${i}`, name: "bash" });
+    script.push({ kind: "toolResult", turn: 1, callId: `c${i}`, text: noisy });
+  }
+  script.push({ kind: "end", turn: 1 });
+
+  const result = await build(fakeController({ script })).ask({ text: "跑很多命令" });
+  const total = result.tools.reduce((sum, tool) => sum + (tool.output?.length ?? 0), 0);
+
+  assert.ok(total <= 20000 + 400, `tool output should stay near the budget, got ${total}`);
+  assert.match(result.tools.at(-1).output, /omitted/);
+});
+
+test("an ordinary failure is not mistaken for a sandbox refusal", async () => {
+  const controller = fakeController({
+    script: [
+      { kind: "start", turn: 1 },
+      { kind: "tool", turn: 1, callId: "c1", name: "bash" },
+      { kind: "toolResult", turn: 1, callId: "c1", text: "error: permission denied (os error 13)", isError: true },
+      { kind: "text", turn: 1, text: "权限不足，但不是沙箱拒绝。" },
+      { kind: "end", turn: 1 },
+    ],
+  });
+  const result = await build(controller).ask({ text: "chmod" });
+
+  assert.equal(result.status, "completed");
+  assert.equal("sandbox" in result, false);
+  assert.equal("next" in result, false);
+});
+
+test("permission presets carry a cost sentence even when the deployment declared none", async () => {
+  const permissions = fakePermissions({
+    options: [{ value: "workspace-write" }, { value: "danger-full-access" }, { value: "house-rules" }],
+    defaultPreset: "workspace-write",
+  });
+  const catalog = await build(fakeController(), {}, { permissionPresets: permissions }).permissionCatalog();
+
+  assert.equal(catalog.defaultPreset, "workspace-write");
+  assert.match(catalog.options[0].cost, /writes inside the session workspace/);
+  assert.match(catalog.options[1].cost, /approvals disabled/);
+  assert.equal(catalog.options[2].cost, null); // unknown preset: no invented wording
 });
 
 test("workspaces are listed with their directory status", async () => {

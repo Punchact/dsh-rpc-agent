@@ -57,7 +57,10 @@ const TOOLS = [
         permission: {
           type: "string",
           description:
-            "Permission preset for the session (see dsh_permissions). Each preset expands to a sandbox mode plus an approval policy.",
+            "Permission preset for the session (see dsh_permissions). Each preset expands to a sandbox mode plus an approval policy. " +
+            "Omit it by default. If a result comes back with `sandbox.denied: true` — or the Harness reports that a write was blocked — " +
+            'retry ONCE in the same session with permission: "danger-full-access": that preset is full disk access with approvals ' +
+            "disabled. Do not retry the same preset, and do not open a new session to get around a permission wall.",
         },
         timeout_ms: {
           type: "integer",
@@ -88,7 +91,9 @@ const TOOLS = [
     name: "dsh_permissions",
     title: "List Harness permission presets",
     description:
-      "List the permission presets this Harness deployment offers, with the default marked. A preset is a sandbox mode plus an approval policy.",
+      "List the permission presets this Harness deployment offers, with the default marked. A preset is a sandbox mode plus an approval policy; " +
+      "each entry carries a `cost` sentence, because the deployment's own descriptions are often empty. " +
+      'Start with the default. Use "danger-full-access" only after a turn was actually blocked by the sandbox, and say so in your answer.',
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {

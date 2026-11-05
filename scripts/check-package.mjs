@@ -42,6 +42,20 @@ function fail(message) {
 }
 
 function packList() {
+  // A sandbox that forbids spawning cmd.exe cannot run npm at all (measured 2026-11-06:
+  // `spawnSync C:\WINDOWS\system32\cmd.exe EPERM` under DSH's workspace-write policy). Rather
+  // than skip the check, accept an already-captured `npm pack --dry-run --json` document: the
+  // assertions below are about what npm decided, not about who ran it.
+  const captured = process.env.CHECK_PACKAGE_JSON;
+  if (captured) {
+    try {
+      return JSON.parse(readFileSync(resolve(captured), "utf8"));
+    } catch (error) {
+      fail(`could not read CHECK_PACKAGE_JSON=${captured}: ${error.message}`);
+      return null;
+    }
+  }
+
   // On Windows npm is a .cmd shim, which spawnSync refuses without a shell; when npm itself
   // started us (prepublishOnly) it hands us the real JS entry, so prefer that and stay shell-free.
   const npmExec = process.env.npm_execpath;
@@ -62,7 +76,12 @@ function packList() {
         timeout: 120000,
       });
   if (out.error) {
-    fail(`could not run npm pack: ${out.error.message}`);
+    fail(
+      `could not run npm pack: ${out.error.message}` +
+        (out.error.code === "EPERM"
+          ? ' — spawning a shell is blocked here; capture `npm pack --dry-run --json` yourself and pass CHECK_PACKAGE_JSON=<file>'
+          : ""),
+    );
     return null;
   }
   if (out.status !== 0) {
