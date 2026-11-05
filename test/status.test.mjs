@@ -110,7 +110,10 @@ test("the status route answers loopback with an aggregate-only payload", async (
     // no prompt body.
     assert.ok(!res.body.includes(TOKEN), "the bearer token must not be echoed");
     assert.ok(!res.body.includes("session-secret"), "session ids stay out of the payload");
-    assert.deepEqual(body.activeRuns, [{ run: "abcdef12", prompt: true, ageMs: 1200, hasSession: true }]);
+    // `state` is what makes a queued run distinguishable from a stuck one.
+    assert.deepEqual(body.activeRuns, [
+      { run: "abcdef12", prompt: true, ageMs: 1200, hasSession: true, state: "running" },
+    ]);
     assert.deepEqual(body.calls, {
       total: 0,
       errors: 0,

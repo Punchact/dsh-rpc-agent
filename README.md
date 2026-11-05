@@ -1,6 +1,8 @@
-# dsh-rpc
+# dsh-rpc-agent
 
 [English](./README.en.md) · 非官方项目
+
+> 仓库名是 `dsh-rpc-agent`；插件包名、命令行与端点路径仍是 `dsh-rpc`（`@punchact/dsh-rpc`、`dsh-rpc`、`/dsh-rpc`）。改包名要让已安装的 profile 重新链接，所以留到下一次重装时一起做。
 
 把 DeepSeek Harness 变成本机可调用的 **RPC 服务**：任何本地 agent（Claude Code、Codex CLI、Cursor、Trae、自己写的脚本）都能把任务交给 DSH，拿回它的最终回答。
 
@@ -164,9 +166,9 @@ console.log(answer.text, answer.usage);
 | `dsh.permissions.catalog` | — | `{options:[{value, name, description?}], defaultPreset}`：每个预设=沙箱模式+审批策略 |
 | `dsh.sessions.configure` | `sessionId, model?, reasoningEffort?, permissionPreset?` | `{sessionId, selected?, permissionPreset?}`：给已有会话换模型/推理等级/权限 |
 | `dsh.sessions.list` | `limit?` | `{total, items:[{sessionId, running, blank, cwd, updatedAt, …}]}` |
-| `dsh.sessions.create` | `workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?` | `{sessionId, agentPreset, cwd, selected?, permissionPreset?}`：`workspaceId` 与 `cwd` 互斥；都不传就交给 Host 决定，`cwd` 回读 Host 实际挂载的目录 |
-| `dsh.sessions.ask` | `text, sessionId?, workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?, mode?, timeoutMs?` | 见下方**轮次结果**；`sessionId` 省略时新建会话，`created:true`。同一会话已有 bridge 在等轮次时返回 `-32004` |
-| `dsh.sessions.prompt` | `sessionId, text, mode?` | `{accepted, sessionId, requestId, mode}`，立即返回、不等轮次 |
+| `dsh.sessions.create` | `workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?` | `{sessionId, agentPreset, cwd, selected?, permissionPreset?}`：`workspaceId` 与 `cwd` 互斥；都不传就交给 Host 决定，`cwd` 回读 Host 实际挂载的目录。**不接受 `sessionId`**——id 由 Host 分配，传了会 `-32602`，不会悄悄换成另一个 id |
+| `dsh.sessions.ask` | `text, sessionId?, workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?, mode?, queue?, timeoutMs?` | 见下方**轮次结果**；`sessionId` 省略时新建会话，`created:true`。同一会话已有 bridge 在等轮次时默认返回 `-32004`，加 `queue: true` 则排队等它结束（受自己的 `timeoutMs` 约束） |
+| `dsh.sessions.prompt` | `sessionId, text, mode?` | `{accepted, sessionId, requestId, mode}`，立即返回、不等轮次；**不占住会话**，所以并发的 `ask` 仍可能抢走那一轮——要结果就配 `dsh.sessions.wait` |
 | `dsh.sessions.wait` | `sessionId, timeoutMs?` | 等待该会话**当前/下一个**轮次结束并返回轮次结果 |
 | `dsh.sessions.cancel` | `sessionId` | `{accepted, sessionId}`：中断正在进行的轮次，保留待处理队列 |
 | `dsh.sessions.history` | `sessionId, limit?` | `{cursor, turn, running, messageCount, records[]}`，只读快照 |
@@ -398,6 +400,7 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 | 最近 12 次调用 | 时间、方法名、耗时、成功/失败与错误码 |
 | 方法用量 | 按方法累计的次数与错误次数 |
 | 怎么接 | 两条可直接复制的命令（MCP 注册、CLI 试一次） |
+| 配置片段 | 按当前生效值生成的一段 `cordis.patch.yml` 行，一键复制——改配置去 profile 的 patch 层，页面只负责把该贴什么写给你 |
 
 它读的是 **`GET /dsh-rpc/status`**：与 `/health` 同一信任边界——**只接受 loopback、不要 token**，因为浏览器里的页面拿不到 `endpoint.json` 里的 token。作为交换，这个端点必须"什么也不说"：
 
@@ -414,18 +417,21 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 
 ```powershell
 cd dsh-rpc-plugin
-node test/methods.test.mjs     # 37 个单元用例，无需 Harness
+node test/methods.test.mjs     # 40 个单元用例，无需 Harness
 node test/client.test.mjs      # 6 项客户端重试/报错用例，无需 Harness
 node test/status.test.mjs      # 6 项 /status 与路由挂载用例，无需 Harness
+node test/catalog.smoke.mjs    # 方法目录与三处包名一致性
+npm ci && node test/host.test.mjs   # 1 项真宿主集成用例（真 WebServer，需装 devDependencies）
 node test/e2e.mjs --cwd .      # 14 项端到端检查，打真实 Harness
 node test/edge.mjs             # 24 项协议/边界对抗检查，打真实 Harness
 ```
 
-`npm test` 跑前三个（都不需要 Harness，适合 CI）。
+`npm test` 跑前四个（都不需要 Harness，也不需要 `npm install`）；`npm run test:host` 跑真宿主集成那一项；`npm run test:e2e` / `npm run test:edge` 要活的 Harness。
 
-- **单元**用 `node:test` 与一个手写的 Host 假体（含 `follow` 流、事件总线、`user/message` 认领），覆盖轮次归属、steer、超时、abort 原因、history、cancel、并发拒绝、cwd 归属、工作区/模型/权限下发、`limit` 校验、dispatcher 错误码。必须**直接 node 运行**——`node --test` 会为每个文件 fork 子进程，在 DSH 沙箱下被 `spawn EPERM` 挡住。上次实跑：37/37（2026-11-05）。
+- **单元**用 `node:test` 与一个手写的 Host 假体（含 `follow` 流、事件总线、`user/message` 认领），覆盖轮次归属、steer、超时、abort 原因、history、cancel、并发拒绝与 `queue` 排队、创建期的参数契约（含拒绝调用方自带 `sessionId`）、cwd 归属、工作区/模型/权限下发、`limit` 校验、dispatcher 错误码。必须**直接 node 运行**——`node --test` 会为每个文件 fork 子进程，在 DSH 沙箱下被 `spawn EPERM` 挡住。上次实跑：41/41（2026-11-05）。
 - **客户端**用临时 `$DSH_HOME` 与本地假服务，验证重试与报错策略：端点重发后重试一次且只投递一次、`ECONNRESET` 绝不重放、显式 `--url` 不重试、重试后的失败不被改写成"没人监听"、端点未变时报错含 `pid` 与下一步建议；另有一例直接对 `lib/transport.mjs` 钉住「从 undici 的 cause 链里取真实 errno」在各平台的形状（Linux 上 `UND_ERR_SOCKET` 会归一成 `ECONNRESET`）。上次实跑：6/6（2026-11-05）。
 - **状态页**用假 `webServer` 与假 `res` 钉住三件事：`/status` 的载荷只有聚合数据（断言 token、`sessionId`、prompt 正文都不出现）、非 loopback 一律 403 且非 GET/HEAD 得 405、以及**路由挂载契约**（同一次进程内第二代能接管上一代的路由而不撞 `duplicate exact route`；挂载中途失败会整段回滚；只有当前属主能真正卸载）。上次实跑：6/6（2026-11-05）。
+- **真宿主集成**不用假 `webServer`：`new Context()` + `ctx.plugin(WebServer, {host:'127.0.0.1', port: 0})` 起真监听，再 `apply()`，然后真发 HTTP 断言 `/health` 200、无 token 的 RPC 401、`/status` 的 `origin` 与真实监听一致、前缀内未注册路径 404，**最后跑插件自己的 disposer 并断言 `/health` 与 `/status` 都变 404**。这是唯一能抓住"上一代路由残留导致重载失败"这一真实事故的测试。上次实跑：1/1（2026-11-05）。
 - **端到端**走的是与外部 agent 完全相同的 `lib/client.mjs`，因此跑绿即证明 plugin → Host `sessionController` → HTTP → JSON-RPC → 调用方 整条链路成立。上次实跑：14/14（2026-11-05）。
 - **边界**检查协议层：batch、通知、id 形态、鉴权头、超大 body（应得真正的 413 而不是断连）、参数注入防护、超时钳制、并发 ask、`limit` 语义。上次实跑：24/24（2026-11-05）。
 - **端口漂移**（手工）：把 `endpoint.json` 的 url 改成死端口再跑 `dsh-rpc ping`，应得退出码 3 与含 `nothing is listening`、`pid`、`health --wait` 的可读报错；把文件恢复后 `ping` 立刻正常。2026-11-05 实跑符合预期。
@@ -435,7 +441,7 @@ node test/edge.mjs             # 24 项协议/边界对抗检查，打真实 Har
 
 ## 12. 已知边界
 
-- **同一会话只允许一个「提问型」运行**：本插件的两个 `ask`/`prompt` 并发时第二个直接返回 `-32004`。注意这只约束本插件——GUI 或别的 agent 仍可以在同一会话插话；轮次归属靠 `user/message` 里的 `rpcId` 认领（见第 3 节），不会把别人的回答当成你的，代价是那一轮要等它跑完才能轮到你。`wait` 不受限，可随时挂上去看。
+- **同一会话只允许一个「提问型」运行**：本插件的两个 `ask` 并发时，第二个默认直接返回 `-32004`；加 `queue: true` 则排队等前一个结束（在它自己的 `timeoutMs` 内，超时给 `-32005`）。排队期间在 `ping`/状态页里能看到 `state: "queued"`。注意这只约束本插件——GUI 或别的 agent 仍可以在同一会话插话；轮次归属靠 `user/message` 里的 `rpcId` 认领（见第 3 节），不会把别人的回答当成你的，代价是那一轮要等它跑完才能轮到你。`wait` 不受限，可随时挂上去看。
 - **`wait` 只看得见快照窗口**：`wait` 靠 `follow` 的首帧快照判断「当前/最后一轮」，窗口上限 500 条事件（`maxMessages`）。极长会话若快照已截断到目标轮次之前，可能把状态报成 `completed`（而非那一轮真实的 `aborted`/`blocked`）；要精确值就带上 `sessionId` 调 `history` 复核。
 - **批量请求串行执行**：一个 HTTP batch 里的多条 JSON-RPC **按顺序**执行（不是并发），一条慢 `ask` 会挡住同批后续请求。要并发请用多个连接。
 - **不复制审批策略**：Harness 侧仍按它自己的审批与沙箱策略执行；需要人工批准的工具有可能让该轮长时间挂起（受 `timeoutMs` 约束）。`permissionPreset` 下发的只是该会话的默认预设，不是放行。

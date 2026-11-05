@@ -39,6 +39,11 @@ const TOOLS = [
             "Put a new session in one of the Harness workspaces (see dsh_workspaces). Exclusive with cwd. Refused when session_id is given.",
         },
         session_id: { type: "string", description: "Continue an existing Harness session instead of creating one." },
+        queue: {
+          type: "boolean",
+          description:
+            "Wait for the session when another caller is already prompting it, instead of failing with a busy error. Bounded by timeout_ms.",
+        },
         agent_preset: {
           type: "string",
           description: "Agent preset for a new session (e.g. standard, minimal, cordis). Refused when session_id is given.",
@@ -289,6 +294,7 @@ async function callTool(name, args) {
         if (typeof args.permission === "string" && args.permission.trim()) {
           params.permissionPreset = args.permission.trim();
         }
+        if (args.queue === true) params.queue = true;
         if (Number.isInteger(args.timeout_ms)) params.timeoutMs = args.timeout_ms;
 
         const result = await rpcCall("dsh.sessions.ask", params, { timeoutMs: turnBudget(args.timeout_ms) });

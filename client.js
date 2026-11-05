@@ -59,6 +59,10 @@ window.__ModuleLoader__.load({
         fail: "失败",
         methods: "方法用量",
         quickstart: "怎么接",
+        configCard: "配置片段",
+        configHint:
+          "这是此刻生效的配置。贴进 profile 的 cordis.patch.yml，只留想改的键——删掉的那些会回到默认值。令牌永远不会出现在这里。",
+        configCopy: "cordis.patch.yml",
         copy: "复制",
         copied: "已复制",
         refresh: "每 2 秒自动刷新",
@@ -98,6 +102,10 @@ window.__ModuleLoader__.load({
         fail: "failed",
         methods: "Method usage",
         quickstart: "How to call it",
+        configCard: "Configuration snippet",
+        configHint:
+          "The values in effect right now. Paste into the profile's cordis.patch.yml and keep only the keys you mean to change — anything you drop falls back to its default. The token never appears here.",
+        configCopy: "cordis.patch.yml",
         copy: "Copy",
         copied: "Copied",
         refresh: "refreshes every 2s",
@@ -314,6 +322,30 @@ window.__ModuleLoader__.load({
       );
     }
 
+    // A paste-ready row for the profile's patch layer, built from the values the
+    // Host reports as live. Unset keys are dropped so the snippet stays readable
+    // (anything omitted falls back to its default), and `token` is never emitted —
+    // this page reads state back, it must not become a way to read a secret out of
+    // the process.
+    function patchSnippet(config) {
+      const rows = [
+        ["enabled", config?.enabled],
+        ["path", config?.path],
+        ["allowRemote", config?.allowRemote],
+        ["defaultCwd", config?.defaultCwd],
+        ["defaultAgentPreset", config?.defaultAgentPreset],
+        ["defaultTimeoutMs", config?.defaultTimeoutMs],
+        ["maxBodyBytes", config?.maxBodyBytes],
+        ["maxSessions", config?.maxSessions],
+        ["logRequests", config?.logRequests],
+        ["tokenFile", config?.tokenFile],
+      ].filter(([, value]) => value !== undefined && value !== null && value !== "");
+      const body = rows
+        .map(([key, value]) => `        ${key}: ${typeof value === "string" ? JSON.stringify(value) : value}`)
+        .join("\n");
+      return `- insert:\n    - id: dsh-rpc-bridge\n      name: '@punchact/dsh-rpc'\n      config:\n${body}`;
+    }
+
     // -------------------------------------------------------------- component --
 
     function makePage(t, lang) {
@@ -450,6 +482,15 @@ window.__ModuleLoader__.load({
           h(CopyLine, { t, label: "CLI", text: "node bin/dsh-rpc.mjs ask \"总结一下这个仓库\" --cwd <你的目录>" }),
           h(CopyLine, { t, label: "MCP", text: `claude mcp add dsh-rpc -- node <path-to-your-clone>/bin/dsh-rpc-mcp.mjs` }),
           h("p", { style: { ...S.empty, marginTop: 6 } }, t("note"), " ", h("code", { style: S.mono }, data?.endpointPath ?? "~/.dsh/dsh-rpc/endpoint.json")),
+        ),
+
+        // Editable from here only as text: the row's config lives in the profile's
+        // patch layer, so the useful thing to hand a person is the exact row to paste.
+        h(
+          Card,
+          { title: t("configCard") },
+          h("p", { style: { ...S.empty, marginBottom: 8 } }, t("configHint")),
+          h(CopyLine, { t, label: t("configCopy"), text: patchSnippet(data?.config) }),
         ),
       );
       };

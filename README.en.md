@@ -1,6 +1,8 @@
-# dsh-rpc
+# dsh-rpc-agent
 
 [中文](./README.md) · Unofficial project
+
+> The repository is `dsh-rpc-agent`; the package name, CLI and endpoint path stay `dsh-rpc` (`@punchact/dsh-rpc`, `dsh-rpc`, `/dsh-rpc`). Renaming the package means relinking an installed profile, so it waits for the next reinstall.
 
 A loopback **JSON-RPC bridge** that lets any local agent — Claude Code, Cursor, Codex CLI, Trae, or your own script — hand a task to [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) and get its final answer back.
 
@@ -92,9 +94,9 @@ console.log(answer.text, answer.usage);
 | `dsh.permissions.catalog` | — | `{options:[…], defaultPreset}`: each preset is a sandbox mode plus an approval policy |
 | `dsh.sessions.configure` | `sessionId, model?, reasoningEffort?, permissionPreset?` | `{sessionId, selected?, permissionPreset?}` |
 | `dsh.sessions.list` | `limit?` | `{total, items[]}` |
-| `dsh.sessions.create` | `workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?` | `{sessionId, agentPreset, cwd, selected?, permissionPreset?}` |
-| `dsh.sessions.ask` | `text, sessionId?, workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?, mode?, timeoutMs?` | turn result (below) |
-| `dsh.sessions.prompt` | `sessionId, text, mode?` | `{accepted, requestId}`, returns immediately |
+| `dsh.sessions.create` | `workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?` | `{sessionId, agentPreset, cwd, selected?, permissionPreset?}`. **No `sessionId`** — ids belong to the Host; passing one is refused with `-32602` rather than silently replaced |
+| `dsh.sessions.ask` | `text, sessionId?, workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?, mode?, queue?, timeoutMs?` | turn result (below). A second prompting run on the same session is refused with `-32004` unless `queue: true`, which waits for that session inside its own `timeoutMs` |
+| `dsh.sessions.prompt` | `sessionId, text, mode?` | `{accepted, requestId}`, returns immediately. Does **not** reserve the session, so a concurrent `ask` can still claim that turn — pair it with `dsh.sessions.wait` when the answer matters |
 | `dsh.sessions.wait` | `sessionId, timeoutMs?` | turn result |
 | `dsh.sessions.cancel` | `sessionId` | `{accepted}` |
 | `dsh.sessions.history` | `sessionId, limit?` | `{cursor, turn, running, messageCount, records[]}` |
@@ -171,16 +173,22 @@ The panel is read-only and disappears with the plugin. It asks a fixed path `/ds
 ## Verify
 
 ```powershell
-node test/methods.test.mjs   # 37 unit tests, no Harness needed
-node test/client.test.mjs    # 6 client retry/error tests, no Harness needed
-node test/status.test.mjs    # 6 status/route-mounting tests, no Harness needed
-node test/e2e.mjs --cwd .    # 14 end-to-end checks against a live Harness
-node test/edge.mjs           # 24 protocol/edge checks against a live Harness
+node test/methods.test.mjs     # 40 unit tests, no Harness needed
+node test/client.test.mjs      # 6 client retry/error tests, no Harness needed
+node test/status.test.mjs      # 6 status/route-mounting tests, no Harness needed
+node test/catalog.smoke.mjs    # method catalogue + the three package names must agree
+npm ci && node test/host.test.mjs   # 1 real-Host integration test (real WebServer; needs devDependencies)
+node test/e2e.mjs --cwd .      # 14 end-to-end checks against a live Harness
+node test/edge.mjs             # 24 protocol/edge checks against a live Harness
 ```
 
 Run the files directly, not through `node --test`: that forks a child process, which some sandboxes forbid.
 
-Last run (2026-11-05): unit 37/37, client 6/6, status 6/6, end-to-end 14/14, edge 24/24.
+`npm test` runs the first four (no Harness, no install needed); `npm run test:host` runs the real-Host one; `npm run test:e2e` / `npm run test:edge` need a live Harness.
+
+Last run (2026-11-05): unit 41/41, client 6/6, status 6/6, catalogue smoke ok, real-Host 1/1, end-to-end 14/14, edge 24/24.
+
+The real-Host test is the only one that cannot be fooled by a fake `webServer`: it starts an actual listener on `127.0.0.1:0`, applies the plugin, sends real HTTP, then runs the plugin's own disposers and asserts `/health` and `/status` both become 404. That is exactly the failure we shipped once — a previous generation's routes surviving a reload, so every later enable died with `duplicate exact route`.
 
 The status tests pin the aggregate-only payload (no token, no session id, no prompt text), the 403/405 guards, and the route-mounting contract: a second generation inside one process takes over the routes a previous one left mounted instead of colliding, a failed mount rolls back completely, and only the current owner can unmount.
 

@@ -3,6 +3,10 @@ name: test
 # Only the checks that need nothing but Node. `test/e2e.mjs` and `test/edge.mjs`
 # drive a live DeepSeek Harness instance and cannot run on a hosted runner, so
 # they stay a local, manual gate (see README "验证" / "Verify").
+#
+# `test/host.test.mjs` is different: it needs no Harness process, only the real
+# `@deepseek-ai/dsh-host-webserver` package, so it runs here too — that is the
+# whole point of keeping it a normal devDependency.
 on:
   push:
     branches: [main]
@@ -22,10 +26,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+          cache: npm
+
+      # Runtime stays dependency-free; these are the Host packages the
+      # integration test mounts against, pinned in package.json.
+      - name: Install dev dependencies
+        run: npm ci
 
       - name: Syntax check every module
         run: |
-          for file in index.mjs lib/*.mjs bin/*.mjs test/*.mjs; do
+          for file in index.mjs client.js lib/*.mjs bin/*.mjs test/*.mjs; do
             node --check "$file"
           done
 
@@ -34,3 +44,6 @@ jobs:
 
       - name: Unit tests (no Harness required)
         run: npm test
+
+      - name: Integration test against the real Host WebServer
+        run: npm run test:host

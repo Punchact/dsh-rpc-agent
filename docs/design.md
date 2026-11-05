@@ -173,7 +173,8 @@ Host 抛 `RemoteError(code, message, details)`（`isDSHRemoteError === true`）�
 
 | 层 | 手段 | 结果 |
 | --- | --- | --- |
-| 单元 | `test/methods.test.mjs`，37 例，Host 假体（含 follow 流与事件总线、必需 signal 的断言、`user/message` 认领、可选服务 `ctx.get` 注入） | 37/37 |
+| 单元 | `test/methods.test.mjs`，41 例，Host 假体（含 follow 流与事件总线、必需 signal 的断言、`user/message` 认领、可选服务 `ctx.get` 注入） | 41/41 |
+| 真宿主 | `test/host.test.mjs`，1 例，进程内起真实 `@deepseek-ai/dsh-host-webserver`（`port: 0`），断言挂载、鉴权、`/status` 与 `disposeEffects()` 后路由 404 | 1/1 |
 | 客户端 | `test/client.test.mjs`，6 例，临时 `$DSH_HOME` + 本地假服务（重试一次且不重放、`ECONNRESET` 不重试、显式 url 不重试、重试后的非连接失败保持原义、过期端点报错含 `pid`），外加一例对 `lib/transport.mjs` 钉住各平台的 errno 形状 | 6/6 |
 | 状态页 | `test/status.test.mjs`，6 例，`/status` 载荷与路由寄生单元的接管/回滚 | 6/6 |
 | 端到端 | `test/e2e.mjs`，14 项，走真实 `lib/client.mjs` | 14/14 |
@@ -339,3 +340,20 @@ compression: gzip
 
 
 
+
+## 14. 契约硬化、并发排队与真宿主测试（2026-11-05）
+
+这一批改动来自对另一个插件（`ryubyte/dsh-a2a`）的对照学习——它把宿主契约当成需要被测试钉住的东西，而我们此前更多依赖活体观察。四项落地如下。
+
+**决策十五：`create` 拒绝调用方自带的 `sessionId`。** 会话 id 由 Host 分配，`SessionCommandController.create` 里那个 `sessionId` 字段不是"指定 id"的入口：传了它，返回的是另一个 id，而调用方从回复里看不出差别——这是最难自查的一类失败模式（"我以为我指定了 id"）。现在直接 `-32602` 并说明该用 `dsh.sessions.ask` 续用既有会话。冒烟测试同步断言 `create` 的 params 里**没有** `sessionId`，防止方法目录与实现再次漂移。
+
+**决策十六：包名三处必须一致，由冒烟测试守。** 一个插件里同一个名字出现在四个地方：`package.json` 的 `name`、`cordis.patch.yml` 里行的 `name`、`client.js` 里 `window.__ModuleLoader__.load({ id })`。前两个决定宿主能不能装配，第三个决定浏览器模块的注册 id；手写时靠人肉同步，而我们改过一次包名（早期的名字已不在历史里，现在是 `@punchact/dsh-rpc`）。`test/catalog.smoke.mjs` 现在把四处一起读出来比对（第四个是面板里那段可粘贴的配置片段，它同样写着要加载哪个包名），并且改成"收集 failures 后统一非零退出"——原来的实现只在方法名不符时失败，其余检查只打印，等于没有断言。
+
+**决策十七：同会话并发默认拒绝，`queue: true` 才排队。** 宿主允许一个会话上排多轮，所以"两个 `ask` 同时进一个会话"不会报错，只会让两个调用方都算出 `baseline+1` 并各自认领——上一版靠 `rpcId` 认领把"别人的回答"挡住了，但结果是其中一方白等一轮。现在 `prompting.set(sessionId, slot)` 改成 `{runId, done, finish}`：第二个提问型运行默认拿 `-32004` 并附具体建议（`queue: true` / `dsh.sessions.wait` / 换会话），选择排队则 `await waitForPromptSlot()`，在前一个 `finish()` 或自己的 deadline 处放行。排队期间 `ping` 与状态页能看见 `state: "queued"`，所以"卡住了"是可观测的而不是需要猜。默认值保持"拒绝"而不是"排队"：静默排队会把超时归因推给调用方看不清的别人。
+
+**决策十八：用真宿主 WebServer 测挂载与卸载。** 假 `webServer` 只能证明"我们调用了 register"，证明不了"宿主接受并能在 dispose 后撤掉"。`test/host.test.mjs` 起真监听（`ctx.plugin(WebServer, {host:'127.0.0.1', port:0})`），真发 HTTP，再跑插件自己的 disposer 断言路由变 404。这条测试存在的理由是一次真实事故：上一代入 dispose 时机不对，导致四条路由泄漏在进程里，此后每次启用都 `duplicate exact route`，只能重启宿主。假体永远抓不到这个。代价是多了两个 devDependency（运行期仍是零依赖，`files` 不含 `node_modules`）。
+
+**为什么不直接用裸 `agentLoop`（B5 的技术落点）。** 我们一直走 `sessionController` 而不是 `ctx.agentLoop.create()`，理由不只是"会话可见"。`dsh-a2a` 的作者在源码注释里点破了更深的一层："in DSH, an agent's tool catalog, prompt sections, and skills all come from its preset composition. Without the join, the agent publishes against the 'empty global layer' and every inbound task degenerates to pure text (the model can only write `<invoke …>` markup as if it were text)"。也就是说裸 agent 即使能跑，**工具面也是空的**——它会"假装调用工具"，把调用写成文本。我们自己的实测可以佐证这条链路在 `sessionController` 路径上是完整的：让会话执行 `echo rpc-tools-ok`，结果里 `tools` 数组带 `callId`（`call_00_…`）、`name: "pwsh"`、完整 `arguments`，正文是真实输出。
+
+**验证**：`test/methods.test.mjs` 41/41（新增排队三例与 `sessionId` 拒绝一例）、`test/host.test.mjs` 1/1、客户端 6/6、状态 6/6、冒烟 exit 0；CI（Node 22/24）跑 `npm ci` + 前四套件 + `test:host`。
+**陷阱复现：unref 的定时器会让"在进程内等它的测试"自我取消。** 桥的截止定时器一律 `unref()`——这是有意的：一次桥运行不该成为宿主进程的保活句柄。代价是**同一个文件里没有任何其它句柄时，事件循环会直接排空**，等待中的 promise 变成 `Promise resolution is still pending but the event loop has already resolved`，`node:test` 把它记为 `cancelledByParent`，后续用例连锁取消。同一类故障在我们这里发生过两次：第一次是超时用例（测试侧加了 keepAlive），第二次是排队用例（Windows 绿、Linux Node 22 红，`pass 20 / cancelled 20`）。现在改为由单元套件在**整个运行期**持有一个句柄（`setInterval` + `after()` 清理），把这条契约写在测试文件顶部，而不是每个用例各加一次。教训：只要产品侧有意 `unref()`，测试侧就必须显式保活——这在 Windows 上测不出来。

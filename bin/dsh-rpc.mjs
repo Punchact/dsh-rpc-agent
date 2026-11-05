@@ -44,6 +44,7 @@ OPTIONS
   --effort NAME             reasoning effort (needs --model in the same call)
   --permission NAME         permission preset for the next turn
   --mode queue|steer        prompt delivery mode (default queue)
+  --queue                   wait for the session when another run is prompting it
   --timeout MS              wait budget for ask/wait (default 600000)
   --limit N                 list/history size
   --wait MS                 health: keep polling the published endpoint until it answers
@@ -62,7 +63,7 @@ Endpoint discovery (auto): $DSH_HOME/dsh-rpc/endpoint.json and .../token
   endpoint  : ${endpointPath()}
 `;
 
-const BOOLEAN_FLAGS = new Set(["json", "stream", "help", "verbose"]);
+const BOOLEAN_FLAGS = new Set(["json", "stream", "help", "verbose", "queue"]);
 const VALUE_FLAGS = new Set([
   "cwd",
   "workspace",
@@ -191,6 +192,7 @@ async function runAsk(flags, positional) {
   if (flags.effort) params.reasoningEffort = flags.effort;
   if (flags.permission) params.permissionPreset = flags.permission;
   if (flags.mode) params.mode = flags.mode;
+  if (flags.queue) params.queue = true;
   const timeout = numberOf(flags, "timeout");
   if (timeout) params.timeoutMs = timeout;
   const budget = { ...connectionOptions(flags), timeoutMs: turnBudget(timeout) };

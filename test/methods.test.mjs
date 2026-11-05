@@ -6,11 +6,19 @@
 // first and then live `{type:'event', event}` frames.
 
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
 
 import { resolveConfig } from "../lib/config.mjs";
 import { createMethods } from "../lib/methods.mjs";
 import { buildDispatcher } from "../lib/http.mjs";
+
+// The bridge deliberately `unref()`s its timers so a bridge run never keeps the
+// Host process alive. In this process those timers are the only handles, so a
+// test that waits on one would see the loop drain and the run cancel itself
+// (`cancelledByParent`, Linux only — Windows happens to keep other handles).
+// The suite therefore holds one handle of its own for its whole lifetime.
+const SUITE_KEEPALIVE = setInterval(() => {}, 60_000);
+after(() => clearInterval(SUITE_KEEPALIVE));
 
 const ORIGIN = { getOrigin: () => "http://127.0.0.1:0" };
 
@@ -37,7 +45,13 @@ function bus() {
   };
 }
 
-function fakeController({ script = [], historical = [], hostCwd = "/host/resolved", models = null } = {}) {
+function fakeController({
+  script = [],
+  scripts = null,
+  historical = [],
+  hostCwd = "/host/resolved",
+  models = null,
+} = {}) {
   const events = [...historical];
   const subscribers = new Set();
   const prompts = [];
@@ -107,17 +121,20 @@ function fakeController({ script = [], historical = [], hostCwd = "/host/resolve
     prompt(request, signal) {
       requireSignal(signal);
       prompts.push(request);
+      // `scripts` gives each prompt its own turn sequence, which is what a queued
+      // second run needs: it must observe its own turn, not replay the first one's.
+      const steps = scripts ? (scripts[prompts.length - 1] ?? []) : script;
       void (async () => {
         // Steering joins a turn that is already running, so the Host appends the
         // message without a fresh `turn/start`; model that explicitly.
-        if (script.length > 0 && script[0].kind !== "start") {
+        if (steps.length > 0 && steps[0].kind !== "start") {
           append("user/message", {
             role: "user",
             content: [{ type: "text", text: "…" }],
             source: { kind: "user", rpcId: request.requestId },
           });
         }
-        for (const step of script) {
+        for (const step of steps) {
           await new Promise((resolve) => setTimeout(resolve, 5));
           if (step.kind === "start") {
             append("turn/start", { turn: step.turn });
@@ -529,6 +546,73 @@ test("a second prompting run on one session is refused instead of crossing turns
   assert.equal(result.status, "completed");
 });
 
+test("a queued run waits for the session and still reports its own turn", async () => {
+  const controller = fakeController({
+    scripts: [
+      [{ kind: "start", turn: 1 }, { kind: "text", turn: 1, text: "甲" }, { kind: "end", turn: 1 }],
+      [{ kind: "start", turn: 2 }, { kind: "text", turn: 2, text: "乙" }, { kind: "end", turn: 2 }],
+    ],
+  });
+  const methods = build(controller);
+  const [first, second] = await Promise.all([
+    methods.ask({ sessionId: "session-test", text: "甲" }),
+    methods.ask({ sessionId: "session-test", text: "乙", queue: true }),
+  ]);
+  assert.equal(first.text, "甲");
+  assert.equal(second.text, "乙");
+  assert.equal(second.turn, 2, "the queued run must be attributed to its own turn");
+});
+
+test("two waiters behind one holder take the session in arrival order", async () => {
+  const controller = fakeController({
+    scripts: [
+      [{ kind: "start", turn: 1 }],
+      [{ kind: "start", turn: 2 }, { kind: "text", turn: 2, text: "乙" }, { kind: "end", turn: 2 }],
+      [{ kind: "start", turn: 3 }, { kind: "text", turn: 3, text: "丙" }, { kind: "end", turn: 3 }],
+    ],
+  });
+  const methods = build(controller);
+  const holder = new AbortController();
+  const first = methods.ask({ sessionId: "session-test", text: "甲" }, { signal: holder.signal });
+  const second = methods.ask({ sessionId: "session-test", text: "乙", queue: true, timeoutMs: 5000 });
+  const third = methods.ask({ sessionId: "session-test", text: "丙", queue: true, timeoutMs: 5000 });
+
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  // However many callers are waiting, exactly one may own the session — the whole
+  // point of the slot. Taking it is fused with the wait, so a release cannot hand
+  // the same session to two waiters.
+  const running = (await methods.ping()).activeRuns.filter((run) => run.state === "running");
+  assert.equal(running.length, 1, "only one run may be prompting the session");
+
+  holder.abort();
+  await first.catch(() => {});
+  const [queued1, queued2] = await Promise.all([second, third]);
+  assert.deepEqual([queued1.turn, queued2.turn], [2, 3], "waiters are served in arrival order");
+  assert.equal(queued1.text, "乙");
+  assert.equal(queued2.text, "丙");
+});
+
+test("a queued run is visible while waiting, and its own deadline ends the wait", async () => {
+  // The holder never finishes its turn, so the queued run can only leave by timing out.
+  const controller = fakeController({ scripts: [[{ kind: "start", turn: 1 }], []] });
+  const methods = build(controller);
+  const holder = new AbortController();
+  const first = methods.ask({ sessionId: "session-test", text: "长" }, { signal: holder.signal });
+  const second = methods.ask({ sessionId: "session-test", text: "等", queue: true, timeoutMs: 1000 });
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const states = (await methods.ping()).activeRuns.map((run) => run.state).sort();
+  assert.deepEqual(states, ["queued", "running"], "a waiting run must be observable, not invisible");
+
+  await assert.rejects(
+    () => second,
+    (error) => error.code === -32005 && /stayed busy/.test(error.message),
+  );
+
+  holder.abort();
+  await first.catch(() => {});
+});
+
 test("creating a session leaves cwd to the Host when the caller names none", async () => {
   const controller = fakeController();
   const result = await build(controller).createSession({});
@@ -562,6 +646,15 @@ test("naming a workspace and a cwd together is refused", async () => {
     (error) => error.code === -32602 && /cannot be combined/.test(error.message),
   );
   assert.equal(controller.created.length, 0, "nothing may be created when the request is contradictory");
+});
+
+test("a caller-chosen session id is refused instead of silently replaced", async () => {
+  const controller = fakeController();
+  await assert.rejects(
+    () => build(controller).createSession({ sessionId: "session-3f2a" }),
+    (error) => error.code === -32602 && /assigned by the Host/.test(error.message),
+  );
+  assert.equal(controller.created.length, 0, "nothing may be created when the requested id cannot be honoured");
 });
 
 const twoProviderModels = {
