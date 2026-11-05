@@ -156,6 +156,19 @@ jobs:
           if [ "${{ inputs.dry_run }}" = "false" ]; then real=1; fi
 
           if [ "$real" != "1" ]; then
+            # A rehearsal on a commit whose version is already on the registry can never reach npm:
+            # it answers "You cannot publish over the previously published versions". Rehearsing
+            # again against an already-released commit is a normal thing to do, so report that state
+            # and treat it as the end of the rehearsal instead of a failure. Nothing is lost: the
+            # pack contents were already checked by `check:package` in the verify job.
+            VERSION=$(node -p "require('./package.json').version")
+            CODE=$(curl -sS -o /dev/null -w '%{http_code}' \
+              "https://registry.npmjs.org/@punchact%2Fdsh-rpc-agent/${VERSION}")
+            if [ "$CODE" = "200" ]; then
+              echo "rehearsal: @punchact/dsh-rpc-agent@${VERSION} is already on the registry"
+              echo "::notice::version ${VERSION} already exists, so this rehearsal stops here — bump the version to rehearse a publish"
+              exit 0
+            fi
             echo "rehearsal: npm publish --access public --dry-run"
             npm publish --access public --dry-run
             exit 0

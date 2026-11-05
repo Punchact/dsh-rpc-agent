@@ -45,7 +45,10 @@ git push origin v0.4.2
 测试、打包内容检查；任何一项红都不进 publish。publish 用 OIDC 换短期凭证，仓库里没有可被盗的令牌。
 
 只想演练不发布：Actions → release → Run workflow，`dry_run` 保持默认 `true`，它会跑完整 `verify` 并打印
-`npm publish --access public --dry-run` 的真实清单。
+`npm publish --access public --dry-run` 的真实清单。若这个版本的号已经在注册表上（比如对着已发布的提交重跑
+演练），工作流会先查 `registry.npmjs.org/@punchact%2Fdsh-rpc-agent/<version>`，命中 200 就直接给出
+`::notice::version … already exists` 并结束，不会因为 npm 那句 "You cannot publish over the previously
+published versions" 变红——那句话对重跑演练是正常状态，不是缺陷。想真正演练打包结果，改版本号再跑。
 
 ### C. 发布认证失败时怎么定位
 
