@@ -40,15 +40,19 @@ Requires Node `^22.19.0 || >=24`. Zero runtime dependencies.
 claude mcp add dsh -- node "<path-to-your-clone>\bin\dsh-rpc-mcp.mjs"
 ```
 
-Five tools: `dsh_ask`, `dsh_sessions`, `dsh_wait`, `dsh_cancel`, `dsh_status`. Arguments are snake_case (`prompt`, `session_id`, `agent_preset`, `timeout_ms`). The MCP server shares no context with the Harness session — pass the returned `session_id` to continue one.
+Seven tools: `dsh_ask`, `dsh_workspaces`, `dsh_permissions`, `dsh_sessions`, `dsh_wait`, `dsh_cancel`, `dsh_status`. Arguments are snake_case (`prompt`, `session_id`, `cwd`, `workspace_id`, `agent_preset`, `model`, `reasoning_effort`, `permission`, `timeout_ms`). The MCP server shares no context with the Harness session — pass the returned `session_id` to continue one.
 
 ### CLI
 
 ```powershell
 node bin/dsh-rpc.mjs health --wait 15000     # unauthenticated liveness, poll until ready
 node bin/dsh-rpc.mjs ping                    # authenticated status
+node bin/dsh-rpc.mjs workspaces              # workspaces shown in the DSH sidebar
+node bin/dsh-rpc.mjs permissions             # permission presets (* marks the default)
 node bin/dsh-rpc.mjs ask "summarize this repo" --cwd . --json
+node bin/dsh-rpc.mjs ask "look at this one" --workspace ws-xxxx --json
 node bin/dsh-rpc.mjs ask "continue" --session session-xxxx --json
+node bin/dsh-rpc.mjs ask "think again" --session session-xxxx --model anthropic/opus-4.6 --effort high
 node bin/dsh-rpc.mjs sessions --limit 10
 ```
 
@@ -83,13 +87,26 @@ console.log(answer.text, answer.usage);
 | `dsh.discover` | — | version, transport address, method catalog |
 | `dsh.ping` | — | `{ok, plugin, version, protocol, origin, tokenSource, activeRuns}` |
 | `dsh.models` | — | routable providers and models |
+| `dsh.workspaces.list` | — | `{total, items:[{id, title, path, status, sessions, …}]}`, `status` ∈ `ok` / `missing-dir` / `unknown` |
+| `dsh.workspaces.create` | `path, title?` | `{id, title, path}`: register a directory as a workspace (idempotent per path) |
+| `dsh.permissions.catalog` | — | `{options:[…], defaultPreset}`: each preset is a sandbox mode plus an approval policy |
+| `dsh.sessions.configure` | `sessionId, model?, reasoningEffort?, permissionPreset?` | `{sessionId, selected?, permissionPreset?}` |
 | `dsh.sessions.list` | `limit?` | `{total, items[]}` |
-| `dsh.sessions.create` | `cwd?, agentPreset?` | `{sessionId, agentPreset, cwd}` |
-| `dsh.sessions.ask` | `text, sessionId?, cwd?, agentPreset?, mode?, timeoutMs?` | turn result (below) |
+| `dsh.sessions.create` | `workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?` | `{sessionId, agentPreset, cwd, selected?, permissionPreset?}` |
+| `dsh.sessions.ask` | `text, sessionId?, workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?, mode?, timeoutMs?` | turn result (below) |
 | `dsh.sessions.prompt` | `sessionId, text, mode?` | `{accepted, requestId}`, returns immediately |
 | `dsh.sessions.wait` | `sessionId, timeoutMs?` | turn result |
 | `dsh.sessions.cancel` | `sessionId` | `{accepted}` |
 | `dsh.sessions.history` | `sessionId, limit?` | `{cursor, turn, running, messageCount, records[]}` |
+
+**Where a session lives, and what it runs with.** These are the Host's own concepts; the bridge only forwards them.
+
+- `workspaceId` goes through `workspace.attachSession`, so the session shows up under that workspace in the GUI sidebar. `cwd` only sets the directory. They are mutually exclusive, and both apply **only when the session is created** — relocating an existing session is refused rather than silently ignored. `agentPreset` is creation-only for the same reason.
+- Neither the CLI nor the MCP bridge pre-filters those options: whatever you pass is forwarded, and the bridge gives one shared refusal. A dropped flag must never look like an honoured one.
+- `model` / `reasoningEffort` reach the Host's `selectModel`. A bare model id is resolved against the catalog: one match is used, several are reported with the spellings that disambiguate, none points you at `dsh.models`. `reasoningEffort` needs `model` in the same request, because the Host exposes no "read the current model back".
+- `permissionPreset` goes through the Host's `permissionPresets` service and is validated against its catalog first. It sets the session's default preset; it does not grant anything by itself.
+- ⚠️ A model switch **also becomes the profile default** (the Host does this for GUI switches too), so an external agent that changes the model changes what your next GUI session starts with.
+
 
 A **turn result** carries `sessionId`, `turn`, `status` (`completed` / `aborted` / `blocked` / `error` / `max-tokens` / `interrupted` / `forked` / `idle` / `timeout` / `unknown`), `reason`, `text`, optional `reasoning`, `tools[]`, `usage`, `durationMs`, `timedOut`, `partial`, `requestId`, `created`, `cursor`.
 
@@ -154,7 +171,7 @@ The panel is read-only and disappears with the plugin. It asks a fixed path `/ds
 ## Verify
 
 ```powershell
-node test/methods.test.mjs   # 21 unit tests, no Harness needed
+node test/methods.test.mjs   # 37 unit tests, no Harness needed
 node test/client.test.mjs    # 6 client retry/error tests, no Harness needed
 node test/status.test.mjs    # 6 status/route-mounting tests, no Harness needed
 node test/e2e.mjs --cwd .    # 14 end-to-end checks against a live Harness
@@ -163,7 +180,7 @@ node test/edge.mjs           # 24 protocol/edge checks against a live Harness
 
 Run the files directly, not through `node --test`: that forks a child process, which some sandboxes forbid.
 
-Last run (2026-11-05): unit 21/21, client 6/6, status 6/6, end-to-end 14/14, edge 24/24.
+Last run (2026-11-05): unit 37/37, client 6/6, status 6/6, end-to-end 14/14, edge 24/24.
 
 The status tests pin the aggregate-only payload (no token, no session id, no prompt text), the 403/405 guards, and the route-mounting contract: a second generation inside one process takes over the routes a previous one left mounted instead of colliding, a failed mount rolls back completely, and only the current owner can unmount.
 

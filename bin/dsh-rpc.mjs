@@ -22,6 +22,8 @@ COMMANDS
   ping                      show bridge status, config and active runs
   discover                  list every RPC method with its params and result shape
   models                    list routable providers and models
+  workspaces                list the workspaces the Host shows in its sidebar
+  permissions               list the permission presets this deployment offers
   health [--wait MS]        unauthenticated liveness probe (with --wait, poll until ready)
   sessions [--limit N]      list Harness sessions
   create [--cwd DIR]        create a blank session
@@ -35,8 +37,12 @@ COMMANDS
 
 OPTIONS
   --cwd DIR                 working directory for a new session
+  --workspace ID            put a new session in this workspace (exclusive with --cwd)
   --session ID              reuse an existing session
   --preset NAME             agent preset for a new session
+  --model NAME              model for the next turn ("provider/model" or a bare id)
+  --effort NAME             reasoning effort (needs --model in the same call)
+  --permission NAME         permission preset for the next turn
   --mode queue|steer        prompt delivery mode (default queue)
   --timeout MS              wait budget for ask/wait (default 600000)
   --limit N                 list/history size
@@ -57,7 +63,21 @@ Endpoint discovery (auto): $DSH_HOME/dsh-rpc/endpoint.json and .../token
 `;
 
 const BOOLEAN_FLAGS = new Set(["json", "stream", "help", "verbose"]);
-const VALUE_FLAGS = new Set(["cwd", "session", "preset", "mode", "timeout", "limit", "wait", "url", "token"]);
+const VALUE_FLAGS = new Set([
+  "cwd",
+  "workspace",
+  "session",
+  "preset",
+  "model",
+  "effort",
+  "permission",
+  "mode",
+  "timeout",
+  "limit",
+  "wait",
+  "url",
+  "token",
+]);
 
 function parseArgv(argv) {
   const flags = {};
@@ -159,9 +179,17 @@ function turnBudget(timeoutMs) {
 async function runAsk(flags, positional) {
   const text = await readPrompt(positional);
   const params = { text };
-  if (flags.cwd) params.cwd = flags.cwd;
+  // Location and preset are creation-time decisions, and the bridge is the only
+  // place that knows it. Forwarding them unconditionally means a caller that asks
+  // for both a session and a location gets the bridge's refusal, rather than having
+  // the flag silently dropped here.
   if (flags.session) params.sessionId = flags.session;
+  if (flags.cwd) params.cwd = flags.cwd;
+  if (flags.workspace) params.workspaceId = flags.workspace;
   if (flags.preset) params.agentPreset = flags.preset;
+  if (flags.model) params.model = flags.model;
+  if (flags.effort) params.reasoningEffort = flags.effort;
+  if (flags.permission) params.permissionPreset = flags.permission;
   if (flags.mode) params.mode = flags.mode;
   const timeout = numberOf(flags, "timeout");
   if (timeout) params.timeoutMs = timeout;
@@ -323,6 +351,36 @@ async function main(argv) {
       print(JSON.stringify(result, null, 2));
       return 0;
     }
+    case "workspaces": {
+      const result = await rpcCall("dsh.workspaces.list", {}, options);
+      if (flags.json) {
+        print(JSON.stringify(result, null, 2));
+        return 0;
+      }
+      if ((result.items ?? []).length === 0) {
+        note("no workspaces are registered yet");
+        return 0;
+      }
+      for (const item of result.items) {
+        print(`${item.id}  ${item.title}  [${item.status}, ${item.sessions} sessions]`);
+        print(`  ${item.path}`);
+      }
+      return 0;
+    }
+    case "permissions": {
+      const result = await rpcCall("dsh.permissions.catalog", {}, options);
+      if (flags.json) {
+        print(JSON.stringify(result, null, 2));
+        return 0;
+      }
+      for (const option of result.options ?? []) {
+        const mark = option.value === result.defaultPreset ? "*" : " ";
+        print(`${mark} ${option.value}  ${option.name}`);
+        if (option.description) print(`    ${option.description}`);
+      }
+      if (result.defaultPreset) note(`* = default preset (${result.defaultPreset})`);
+      return 0;
+    }
     case "health": {
       // Unauthenticated, so it needs no token — but it still needs an address,
       // and the plugin publishes one; requiring --url here was pure friction.
@@ -355,7 +413,11 @@ async function main(argv) {
     case "create": {
       const params = {};
       if (flags.cwd) params.cwd = flags.cwd;
+      if (flags.workspace) params.workspaceId = flags.workspace;
       if (flags.preset) params.agentPreset = flags.preset;
+      if (flags.model) params.model = flags.model;
+      if (flags.effort) params.reasoningEffort = flags.effort;
+      if (flags.permission) params.permissionPreset = flags.permission;
       const result = await rpcCall("dsh.sessions.create", params, options);
       print(flags.json ? JSON.stringify(result, null, 2) : result.sessionId);
       return 0;

@@ -48,13 +48,15 @@ Cursor / Codex 用配置文件等价写法（Windows 下 JSON 里的反斜杠要
 }
 ```
 
-暴露 5 个工具：`dsh_ask`、`dsh_sessions`、`dsh_wait`、`dsh_cancel`、`dsh_status`。`dsh_ask` 返回 Harness 的正文，加一行 `— session … · turn … · completed · 5.2s` 元信息。
+暴露 7 个工具：`dsh_ask`、`dsh_workspaces`、`dsh_permissions`、`dsh_sessions`、`dsh_wait`、`dsh_cancel`、`dsh_status`。`dsh_ask` 返回 Harness 的正文，加一行 `— session … · turn … · completed · 5.2s` 元信息。
 
 工具参数是 snake_case（MCP 侧习惯），和 HTTP 层不同：
 
 | 工具 | 参数 | 说明 |
 | --- | --- | --- |
-| `dsh_ask` | `prompt`（**必填**）、`session_id?`、`agent_preset?`、`timeout_ms?` | 提问一轮并等结果；`session_id` 省略即新建会话 |
+| `dsh_ask` | `prompt`（**必填**）、`session_id?`、`cwd?`、`workspace_id?`、`agent_preset?`、`model?`、`reasoning_effort?`、`permission?`、`timeout_ms?` | 提问一轮并等结果；`session_id` 省略即新建会话。`cwd` 与 `workspace_id` 互斥；三者都只在新建时有效，给了 `session_id` 再给会被拒绝 |
+| `dsh_workspaces` | `path?`、`title?` | 不带 `path` 就列工作区；带 `path` 则登记一个新工作区 |
+| `dsh_permissions` | — | 列出权限预设及其默认项 |
 | `dsh_sessions` | `limit?` | 列出会话 |
 | `dsh_wait` | `session_id`（必填）、`timeout_ms?` | 等该会话当前/下一轮结束 |
 | `dsh_cancel` | `session_id`（必填） | 中断正在跑的轮次 |
@@ -70,8 +72,12 @@ Cursor / Codex 用配置文件等价写法（Windows 下 JSON 里的反斜杠要
 node bin/dsh-rpc.mjs health            # 免鉴权探活
 node bin/dsh-rpc.mjs health --wait 15000  # 刚重启完时轮询到就绪再返回
 node bin/dsh-rpc.mjs ping              # 带 token 的真实调用
+node bin/dsh-rpc.mjs workspaces        # 列出 DSH 侧栏里的工作区
+node bin/dsh-rpc.mjs permissions       # 列出可用的权限预设（* 为默认）
 node bin/dsh-rpc.mjs ask "只回复两个字：收到" --cwd . --json
+node bin/dsh-rpc.mjs ask "看看这个工作区" --workspace ws-xxxx --json
 node bin/dsh-rpc.mjs ask "接着上一句" --session session-xxxx --json
+node bin/dsh-rpc.mjs ask "换 Opus 想想" --session session-xxxx --model anthropic/opus-4.6 --effort high
 node bin/dsh-rpc.mjs prompt "长时间任务…" --session session-xxxx
 node bin/dsh-rpc.mjs wait --session session-xxxx --timeout 600000
 node bin/dsh-rpc.mjs cancel --session session-xxxx
@@ -153,9 +159,13 @@ console.log(answer.text, answer.usage);
 | `dsh.discover` | — | 插件版本、传输地址、方法目录、结果结构说明 |
 | `dsh.ping` | — | `{ok, plugin, version, protocol, origin, tokenSource, activeRuns}` |
 | `dsh.models` | — | `{default, routableProviders, groups[], failures[]}` |
+| `dsh.workspaces.list` | — | `{total, items:[{id, title, path, status, sessions, createdAt, updatedAt}]}`，`status` 为 `ok` / `missing-dir` / `unknown` |
+| `dsh.workspaces.create` | `path, title?` | `{id, title, path}`：把目录登记成工作区（同路径幂等复用） |
+| `dsh.permissions.catalog` | — | `{options:[{value, name, description?}], defaultPreset}`：每个预设=沙箱模式+审批策略 |
+| `dsh.sessions.configure` | `sessionId, model?, reasoningEffort?, permissionPreset?` | `{sessionId, selected?, permissionPreset?}`：给已有会话换模型/推理等级/权限 |
 | `dsh.sessions.list` | `limit?` | `{total, items:[{sessionId, running, blank, cwd, updatedAt, …}]}` |
-| `dsh.sessions.create` | `cwd?, agentPreset?` | `{sessionId, agentPreset, cwd}`：`cwd` 不传就交给 Host 决定，结果回读 Host 实际挂载的目录 |
-| `dsh.sessions.ask` | `text, sessionId?, cwd?, agentPreset?, mode?, timeoutMs?` | 见下方**轮次结果**；`sessionId` 省略时新建会话，`created:true`。同一会话已有 bridge 在等轮次时返回 `-32004` |
+| `dsh.sessions.create` | `workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?` | `{sessionId, agentPreset, cwd, selected?, permissionPreset?}`：`workspaceId` 与 `cwd` 互斥；都不传就交给 Host 决定，`cwd` 回读 Host 实际挂载的目录 |
+| `dsh.sessions.ask` | `text, sessionId?, workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?, mode?, timeoutMs?` | 见下方**轮次结果**；`sessionId` 省略时新建会话，`created:true`。同一会话已有 bridge 在等轮次时返回 `-32004` |
 | `dsh.sessions.prompt` | `sessionId, text, mode?` | `{accepted, sessionId, requestId, mode}`，立即返回、不等轮次 |
 | `dsh.sessions.wait` | `sessionId, timeoutMs?` | 等待该会话**当前/下一个**轮次结束并返回轮次结果 |
 | `dsh.sessions.cancel` | `sessionId` | `{accepted, sessionId}`：中断正在进行的轮次，保留待处理队列 |
@@ -164,6 +174,40 @@ console.log(answer.text, answer.usage);
 `mode` 取 `queue`（默认，下一轮次开始）或 `steer`（插入正在跑的轮次，当前一步之后生效）。
 
 `limit` 必须是正整数：省略时 `dsh.sessions.list` 默认 50 条、`dsh.sessions.history` 默认 40 条；`history` 的上限是 500 条。传 `0`、负数或小数会返回 `-32602`，而不是被悄悄纠正成一个别的条数。
+
+### 工作区、模型、推理等级、权限
+
+这四个都是 DSH 自己的概念，桥只做转发，不新造开关。
+
+**位置（工作区 / 目录）只在创建会话时决定。** `workspaceId` 走 `workspace.attachSession`，会话因此出现在 GUI 侧栏的对应工作区下；`cwd` 只设置目录、不挂工作区。二者互斥，同时给会被拒绝（`-32602`）。复用已有会话时再传位置参数同样被拒绝——要换位置就新建一个。`agentPreset` 同理：它决定会话用哪个 agent 预设，也只在创建时生效。
+
+CLI 和 MCP 都不在客户端预先过滤这些参数：给了就转发，由桥给出统一的拒绝理由。这样"传了但没生效"不会伪装成"传了并生效"。
+
+```powershell
+node bin/dsh-rpc.mjs workspaces                        # 先看有哪些
+node bin/dsh-rpc.mjs ask "看下这个项目" --workspace ws-1   # 进去
+```
+
+**模型与推理等级**通过 `dsh.sessions.configure` 或创建时的同名参数下发，落到 Host 的 `selectModel`：
+
+```powershell
+node bin/dsh-rpc.mjs models | head -40
+node bin/dsh-rpc.mjs ask "重新想想" --session session-xxxx --model anthropic/opus-4.6 --effort high
+```
+
+- 模型名可写 `provider/model`；只写裸 id 时，桥会去模型目录里查——唯一命中就用，命中多个就报错并列出可消歧的写法，命中零个就让你去看 `dsh.models`。**不会替你猜一个。**
+- `reasoningEffort` 必须和 `model` 同一次请求给出。Host 没有"读回当前模型"的接口，桥不猜。
+- ⚠️ **换模型会把选择存成 profile 默认**（这是 Host 自己的行为，和你在 GUI 里换模型一样）。也就是说外部 agent 换过去之后，你在 GUI 里新开的会话也会用那个模型。
+
+**权限预设**是"沙箱模式 + 审批策略"的组合（如 `read-only` / `workspace-write` / `danger-full-access` 配 `ask` / `never`）：
+
+```powershell
+node bin/dsh-rpc.mjs permissions
+node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
+```
+
+预设名会先按 Host 的 catalog 校验，未知名字直接报错并列出可选项。注意：预设只是**该会话的默认值**，不等于放行——`danger-full-access` 之类的高权限仍然取决于你在 DSH 里的审批设置。
+
 
 ### 轮次结果（`ask` / `wait`）
 
@@ -370,7 +414,7 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 
 ```powershell
 cd dsh-rpc-plugin
-node test/methods.test.mjs     # 21 个单元用例，无需 Harness
+node test/methods.test.mjs     # 37 个单元用例，无需 Harness
 node test/client.test.mjs      # 6 项客户端重试/报错用例，无需 Harness
 node test/status.test.mjs      # 6 项 /status 与路由挂载用例，无需 Harness
 node test/e2e.mjs --cwd .      # 14 项端到端检查，打真实 Harness
@@ -379,7 +423,7 @@ node test/edge.mjs             # 24 项协议/边界对抗检查，打真实 Har
 
 `npm test` 跑前三个（都不需要 Harness，适合 CI）。
 
-- **单元**用 `node:test` 与一个手写的 Host 假体（含 `follow` 流、事件总线、`user/message` 认领），覆盖轮次归属、steer、超时、abort 原因、history、cancel、并发拒绝、cwd 归属、`limit` 校验、dispatcher 错误码。必须**直接 node 运行**——`node --test` 会为每个文件 fork 子进程，在 DSH 沙箱下被 `spawn EPERM` 挡住。上次实跑：21/21（2026-11-05）。
+- **单元**用 `node:test` 与一个手写的 Host 假体（含 `follow` 流、事件总线、`user/message` 认领），覆盖轮次归属、steer、超时、abort 原因、history、cancel、并发拒绝、cwd 归属、工作区/模型/权限下发、`limit` 校验、dispatcher 错误码。必须**直接 node 运行**——`node --test` 会为每个文件 fork 子进程，在 DSH 沙箱下被 `spawn EPERM` 挡住。上次实跑：37/37（2026-11-05）。
 - **客户端**用临时 `$DSH_HOME` 与本地假服务，验证重试与报错策略：端点重发后重试一次且只投递一次、`ECONNRESET` 绝不重放、显式 `--url` 不重试、重试后的失败不被改写成"没人监听"、端点未变时报错含 `pid` 与下一步建议；另有一例直接对 `lib/transport.mjs` 钉住「从 undici 的 cause 链里取真实 errno」在各平台的形状（Linux 上 `UND_ERR_SOCKET` 会归一成 `ECONNRESET`）。上次实跑：6/6（2026-11-05）。
 - **状态页**用假 `webServer` 与假 `res` 钉住三件事：`/status` 的载荷只有聚合数据（断言 token、`sessionId`、prompt 正文都不出现）、非 loopback 一律 403 且非 GET/HEAD 得 405、以及**路由挂载契约**（同一次进程内第二代能接管上一代的路由而不撞 `duplicate exact route`；挂载中途失败会整段回滚；只有当前属主能真正卸载）。上次实跑：6/6（2026-11-05）。
 - **端到端**走的是与外部 agent 完全相同的 `lib/client.mjs`，因此跑绿即证明 plugin → Host `sessionController` → HTTP → JSON-RPC → 调用方 整条链路成立。上次实跑：14/14（2026-11-05）。
@@ -394,7 +438,11 @@ node test/edge.mjs             # 24 项协议/边界对抗检查，打真实 Har
 - **同一会话只允许一个「提问型」运行**：本插件的两个 `ask`/`prompt` 并发时第二个直接返回 `-32004`。注意这只约束本插件——GUI 或别的 agent 仍可以在同一会话插话；轮次归属靠 `user/message` 里的 `rpcId` 认领（见第 3 节），不会把别人的回答当成你的，代价是那一轮要等它跑完才能轮到你。`wait` 不受限，可随时挂上去看。
 - **`wait` 只看得见快照窗口**：`wait` 靠 `follow` 的首帧快照判断「当前/最后一轮」，窗口上限 500 条事件（`maxMessages`）。极长会话若快照已截断到目标轮次之前，可能把状态报成 `completed`（而非那一轮真实的 `aborted`/`blocked`）；要精确值就带上 `sessionId` 调 `history` 复核。
 - **批量请求串行执行**：一个 HTTP batch 里的多条 JSON-RPC **按顺序**执行（不是并发），一条慢 `ask` 会挡住同批后续请求。要并发请用多个连接。
-- **不复制审批策略**：Harness 侧仍按它自己的审批与沙箱策略执行；需要人工批准的工具有可能让该轮长时间挂起（受 `timeoutMs` 约束）。
+- **不复制审批策略**：Harness 侧仍按它自己的审批与沙箱策略执行；需要人工批准的工具有可能让该轮长时间挂起（受 `timeoutMs` 约束）。`permissionPreset` 下发的只是该会话的默认预设，不是放行。
+- **位置只在创建时决定**：`workspaceId` / `cwd` 对已有会话无效，桥会直接拒绝而不是默默忽略。换位置 = 新建会话（旧会话留在原处）。
+- **换模型会改 profile 默认**：`selectModel` 是 Host 的模型切换入口，它会把选择存成 profile 默认（和 GUI 里换模型同一行为）。外部 agent 换过之后，你在 GUI 新开的会话也会用那个模型。
+- **权限预设依赖可选服务**：本部署若没有 `permissionPresets` 服务，传 `permissionPreset` 会得到 `-32000` 并说明原因，而不是静默跳过。
+- **工作区只增不删**：桥只暴露 `workspaces.list` / `workspaces.create`；删除与改名请用 GUI，避免外部 agent 误删你侧栏里的条目。
 - **只转发 Host 允许的会话**：`sessions.list` 与 `history` 经过 Host 的 `remoteAccess` 过滤，看到的就是本进程有权看到的会话。
 - **正文截断**：单轮保留的事件有上限（4000 条），超长会话的 `text` 仍完整（来自 `assistant/message`），但 `tools` 列表可能被截断。
 - **token 泄漏面**：token 落盘在 `%USERPROFILE%\.dsh\dsh-rpc\token`，与 DSH 其它凭据同级；共享机器上注意 ACL。

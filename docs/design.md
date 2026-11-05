@@ -173,8 +173,9 @@ Host 抛 `RemoteError(code, message, details)`（`isDSHRemoteError === true`）�
 
 | 层 | 手段 | 结果 |
 | --- | --- | --- |
-| 单元 | `test/methods.test.mjs`，21 例，Host 假体（含 follow 流与事件总线、必需 signal 的断言、`user/message` 认领） | 21/21 |
+| 单元 | `test/methods.test.mjs`，37 例，Host 假体（含 follow 流与事件总线、必需 signal 的断言、`user/message` 认领、可选服务 `ctx.get` 注入） | 37/37 |
 | 客户端 | `test/client.test.mjs`，6 例，临时 `$DSH_HOME` + 本地假服务（重试一次且不重放、`ECONNRESET` 不重试、显式 url 不重试、重试后的非连接失败保持原义、过期端点报错含 `pid`），外加一例对 `lib/transport.mjs` 钉住各平台的 errno 形状 | 6/6 |
+| 状态页 | `test/status.test.mjs`，6 例，`/status` 载荷与路由寄生单元的接管/回滚 | 6/6 |
 | 端到端 | `test/e2e.mjs`，14 项，走真实 `lib/client.mjs` | 14/14 |
 | 边界 | `test/edge.mjs`，24 项协议对抗（batch、通知、超大 body、参数注入、超时钳制、并发、`limit` 语义） | 24/24 |
 | 传输 | 401 / 403 / 413 / -32601 / -32602 / health 免鉴权 | 通过 |
@@ -311,6 +312,29 @@ compression: gzip
 **已知残余风险**：本设计能防"未来的重载"，但**无法回收已经泄漏在同一进程里的路由**（`webServer` 没有反注册 API，disposer 只存在于当年那份闭包里）。遇到这种情况只能重启 DSH 让路由表重建。
 
 **验证**：`test/status.test.mjs` 六项——载荷只含聚合数据（断言 token、`sessionId`、prompt 正文都不出现）、非 loopback 403、非 GET/HEAD 405、`stats` 只记四个字段、同进程第二代接管而不撞车且只有当前属主能卸载、挂载中途失败整段回滚。
+
+## 13. 工作区、模型、推理等级、权限（2026-11-05）
+
+需求是把 DSH 当子智能体用：外部 agent 应当能像人一样先看有哪些工作区、指定一个进去，并且能安排这一轮用哪个模型、什么推理强度、什么权限。
+
+**决策九：位置用 Host 的 `workspaceId`，不用"自己记一份目录"。** 会话归属工作区靠 `workspace.attachSession`（`SessionCommandController.create` 内部调用），它同时决定目录与侧栏归属；`cwd` 只决定目录。所以两者做成互斥参数，都只在创建时生效。宿主对"同时给 workspaceId 与 cwd"本身就是报错（`session.create accepts workspaceId or cwd, not both`），桥在本地先拦一次，让调用方拿到可读的 `-32602` 而不是 Host 的错误文案。
+
+**决策十：模型/推理/权限在创建之后用 Host 的 setter 安装，不塞进 create 请求。** 三者都属于 Session 而不是 CreateRequest（`selectModel` 的入参就是 `{sessionId, provider, model, reasoningEffort?}`）。因此 `createSession` 内部的顺序是"先 create，再 `applySessionOptions`"，`ask` 在复用会话时同样先应用再投 prompt。
+
+**决策十一：裸模型 id 只在无歧义时接受。** `resolveModel` 先看有没有 `/`；没有就去 `modelCatalog().groups` 里按 `entry.id === model` 找，唯一命中才用。多个 provider 都提供同名模型时报错并给出 `provider/model` 的写法——静默选一个等于把这一轮送到调用方没指定的供应商。零命中指向 `dsh.models`。
+
+**决策十二：`reasoningEffort` 必须配 `model`。** Host 的 setter 收的是完整 selection，而"读回会话当前模型"没有公开接口。于是只有 effort 没有 model 时直接拒绝，而不是猜一个模型或悄悄忽略 effort。
+
+**决策十三：`permissionPreset` 先按 Host catalog 白名单校验，再落到活 Session 上。** `permissionPresets.set(session, name)` 要的是活的 `Session` 对象而不是 id：先 `ctx.get("sessions").get(id)`，冷会话时用 `resolveAgent` 走一遍 admission（与 `prompt` 同一条路径）再取。服务缺失时返回 `-32000` 并说明"本部署没有 permissionPresets 服务"，不静默跳过。
+
+**决策十四：CLI 与 MCP 不预筛创建期参数，一律转发、由桥拒绝。** 最初 `runAsk` 与 `dsh_ask` 在给了会话时"不转发位置参数"，本意是省一次往返，实测代价是**参数被静默丢弃**：`ask --session X --workspace Y` 照常跑了一轮（exit 0），调用方以为进了工作区。现在两边都无条件转发，由 `ask` 里唯一的守卫给出统一文案（`workspaceId`/`cwd`/`agentPreset` 三者都是创建期决定）。教训：客户端做的"善意过滤"会把矛盾藏起来，而矛盾正是调用方需要看到的。
+
+**已知副作用（文档化而非隐藏）**：`selectModel` 在宿主内部还会把选择存成 profile 默认。也就是说外部 agent 换模型之后，用户下次在 GUI 新开会话也会用那个模型。这是 Host 对"模型切换"的既有语义，桥不额外改它，但必须在 README 里写明。
+
+**刻意没做**：`workspaces.delete` / `workspaces.rename` 不暴露。侧栏条目属于用户的空间，外部 agent 误删的代价远大于省下的一次点击。
+
+**验证**：`test/methods.test.mjs` 新增 16 例覆盖上述全部拒绝路径与两条正常工作路径（workspaceId 转发而不带 cwd、workspace 与 cwd 同时出现被拒、裸 id 唯一/歧义/未知、effort 缺 model、未知 preset、服务缺失、workspace 列表的 `missing-dir` 降级、按路径注册、复用会话拒绝位置参数、ask 把 selected/permissionPreset 并入结果）。
+
 
 
 

@@ -37,13 +37,14 @@ function bus() {
   };
 }
 
-function fakeController({ script = [], historical = [], hostCwd = "/host/resolved" } = {}) {
+function fakeController({ script = [], historical = [], hostCwd = "/host/resolved", models = null } = {}) {
   const events = [...historical];
   const subscribers = new Set();
   const prompts = [];
   const created = [];
   const cancelled = [];
   const inspected = [];
+  const selections = [];
   let seq = events.length > 0 ? events[events.length - 1].seq : 0;
 
   // The real SessionController dereferences the caller signal unconditionally
@@ -64,6 +65,7 @@ function fakeController({ script = [], historical = [], hostCwd = "/host/resolve
     created,
     cancelled,
     inspected,
+    selections,
 
     async create(request) {
       created.push(request);
@@ -84,7 +86,17 @@ function fakeController({ script = [], historical = [], hostCwd = "/host/resolve
     },
 
     async modelCatalog() {
+      if (models) return models;
       return { default: { provider: "p", model: "m" }, routableProviders: ["p"], groups: [], failures: [] };
+    },
+
+    async selectModel(request) {
+      // The Host declares `selectModel(request)` without a signal argument, so the
+      // bridge must not invent one — this fake fails loudly if it ever does.
+      selections.push(request);
+      const selected = { provider: request.provider, model: request.model };
+      if (request.reasoningEffort !== undefined) selected.reasoningEffort = request.reasoningEffort;
+      return { selected };
     },
 
     async cancel(request) {
@@ -177,13 +189,41 @@ function fakeController({ script = [], historical = [], hostCwd = "/host/resolve
   return controller;
 }
 
-function build(controller, overrides = {}) {
+function build(controller, overrides = {}, services = {}) {
   return createMethods(
     { sessionController: controller, webServer: ORIGIN },
     resolveConfig(overrides),
-    {},
+    { get: (name) => services[name] },
     {},
   );
+}
+
+// The optional Host services the bridge reaches for through `ctx.get`. They are
+// genuinely optional, so a deployment that lacks them must fail with a readable
+// message rather than a TypeError.
+function fakeWorkspaces({ items = [] } = {}) {
+  return {
+    calls: [],
+    list() {
+      return items;
+    },
+    async create(path, title) {
+      this.calls.push({ path, title });
+      return { id: "ws-new", path, title: title ?? path, createdAt: 1, updatedAt: 1, sessionIds: [] };
+    },
+  };
+}
+
+function fakePermissions({ options = [], defaultPreset = null } = {}) {
+  return {
+    applied: [],
+    async catalog() {
+      return { options, defaultOptions: {}, defaultPreset };
+    },
+    set(session, name) {
+      this.applied.push({ sessionId: session?.id, name });
+    },
+  };
 }
 
 const happyScript = [
@@ -504,4 +544,197 @@ test("an explicit cwd is forwarded verbatim", async () => {
   assert.equal(result.cwd, "/tmp/work", "the echoed cwd is the one the Host attached");
   assert.deepEqual(controller.inspected, ["session-test"]);
 });
+
+// ------------------------------------------------------- workspaces & options --
+
+test("a workspace is forwarded instead of a cwd, never both", async () => {
+  const controller = fakeController({ hostCwd: "/home/dev/work" });
+  const result = await build(controller).createSession({ workspaceId: "ws-1" });
+  assert.equal(controller.created[0].workspaceId, "ws-1");
+  assert.equal("cwd" in controller.created[0], false, "the Host derives the directory from the workspace");
+  assert.equal(result.cwd, "/home/dev/work");
+});
+
+test("naming a workspace and a cwd together is refused", async () => {
+  const controller = fakeController();
+  await assert.rejects(
+    () => build(controller).createSession({ workspaceId: "ws-1", cwd: "/tmp/work" }),
+    (error) => error.code === -32602 && /cannot be combined/.test(error.message),
+  );
+  assert.equal(controller.created.length, 0, "nothing may be created when the request is contradictory");
+});
+
+const twoProviderModels = {
+  default: { provider: "alpha", model: "one" },
+  routableProviders: ["alpha", "beta"],
+  groups: [
+    { id: "alpha", name: "Alpha", models: [{ id: "one", name: "One" }, { id: "shared", name: "Shared" }] },
+    { id: "beta", name: "Beta", models: [{ id: "shared", name: "Shared" }] },
+  ],
+  failures: [],
+};
+
+test("a model switch reaches the Host with the resolved provider", async () => {
+  const controller = fakeController({ models: twoProviderModels });
+  const methods = build(controller);
+  const result = await methods.configure({ sessionId: "session-test", model: "alpha/one", reasoningEffort: "high" });
+  assert.deepEqual(controller.selections, [
+    { sessionId: "session-test", provider: "alpha", model: "one", reasoningEffort: "high" },
+  ]);
+  assert.deepEqual(result.selected, { provider: "alpha", model: "one", reasoningEffort: "high" });
+});
+
+test("a bare model id resolves when only one provider offers it", async () => {
+  const controller = fakeController({ models: twoProviderModels });
+  await build(controller).configure({ sessionId: "session-test", model: "one" });
+  assert.equal(controller.selections[0].provider, "alpha");
+});
+
+test("a bare model id offered twice names both spellings instead of guessing", async () => {
+  const controller = fakeController({ models: twoProviderModels });
+  await assert.rejects(
+    () => build(controller).configure({ sessionId: "session-test", model: "shared" }),
+    (error) => error.code === -32602 && /spell it "provider\/shared"/.test(error.message),
+  );
+  assert.equal(controller.selections.length, 0);
+});
+
+test("an unknown model is refused with a pointer to the catalog", async () => {
+  const controller = fakeController({ models: twoProviderModels });
+  await assert.rejects(
+    () => build(controller).configure({ sessionId: "session-test", model: "nope" }),
+    (error) => error.code === -32602 && /call dsh\.models/.test(error.message),
+  );
+});
+
+test("reasoning effort alone is refused, because the Host cannot read the model back", async () => {
+  const controller = fakeController({ models: twoProviderModels });
+  await assert.rejects(
+    () => build(controller).configure({ sessionId: "session-test", reasoningEffort: "high" }),
+    (error) => error.code === -32602 && /needs `model`/.test(error.message),
+  );
+  assert.equal(controller.selections.length, 0);
+});
+
+test("configure with nothing to configure says so", async () => {
+  const controller = fakeController();
+  await assert.rejects(
+    () => build(controller).configure({ sessionId: "session-test" }),
+    (error) => error.code === -32602 && /nothing to configure/.test(error.message),
+  );
+});
+
+test("a permission preset is applied to the live session object", async () => {
+  const permissions = fakePermissions({
+    options: [{ value: "read-only" }, { value: "workspace-write" }],
+    defaultPreset: "workspace-write",
+  });
+  const controller = fakeController();
+  const services = { permissionPresets: permissions, sessions: { get: (id) => ({ id }) } };
+  const result = await build(controller, {}, services).configure({
+    sessionId: "session-test",
+    permissionPreset: "read-only",
+  });
+  assert.equal(result.permissionPreset, "read-only");
+  assert.deepEqual(permissions.applied, [{ sessionId: "session-test", name: "read-only" }]);
+});
+
+test("an unknown permission preset is refused before touching the session", async () => {
+  const permissions = fakePermissions({ options: [{ value: "read-only" }] });
+  const services = { permissionPresets: permissions, sessions: { get: (id) => ({ id }) } };
+  await assert.rejects(
+    () => build(fakeController(), {}, services).configure({ sessionId: "session-test", permissionPreset: "yolo" }),
+    (error) => error.code === -32602 && /available: read-only/.test(error.message),
+  );
+  assert.equal(permissions.applied.length, 0);
+});
+
+test("a deployment without permissionPresets reports that instead of crashing", async () => {
+  await assert.rejects(
+    () => build(fakeController(), {}, {}).configure({ sessionId: "session-test", permissionPreset: "read-only" }),
+    (error) => error.code === -32000 && /no permissionPresets service/.test(error.message),
+  );
+});
+
+test("workspaces are listed with their directory status", async () => {
+  const workspaces = fakeWorkspaces({
+    items: [
+      {
+        id: "ws-1",
+        path: "/home/dev/work",
+        title: "工作",
+        createdAt: 1,
+        updatedAt: 2,
+        sessionIds: ["s1", "s2"],
+        status: async () => "ok",
+      },
+      {
+        id: "ws-2",
+        path: "/gone",
+        title: "gone",
+        createdAt: 1,
+        updatedAt: 2,
+        sessionIds: [],
+        status: async () => {
+          throw new Error("stat failed");
+        },
+      },
+    ],
+  });
+  const result = await build(fakeController(), {}, { workspaceRegistry: workspaces }).listWorkspaces({});
+  assert.equal(result.total, 2);
+  assert.deepEqual(result.items[0], {
+    id: "ws-1",
+    title: "工作",
+    path: "/home/dev/work",
+    status: "ok",
+    sessions: 2,
+    createdAt: 1,
+    updatedAt: 2,
+  });
+  assert.equal(result.items[1].status, "unknown", "a failing status probe must not fail the whole listing");
+});
+
+test("a workspace can be registered by path", async () => {
+  const workspaces = fakeWorkspaces();
+  const result = await build(fakeController(), {}, { workspaceRegistry: workspaces }).createWorkspace({
+    path: "/tmp/new",
+    title: "新",
+  });
+  assert.equal(result.id, "ws-new");
+  assert.deepEqual(workspaces.calls, [{ path: "/tmp/new", title: "新" }]);
+});
+
+test("reusing a session cannot relocate it", async () => {
+  const controller = fakeController({ script: happyScript });
+  await assert.rejects(
+    () => build(controller).ask({ sessionId: "session-test", text: "go", workspaceId: "ws-1" }),
+    (error) => error.code === -32602 && /only apply when the session is created/.test(error.message),
+  );
+  assert.equal(controller.prompts.length, 0, "a refused request must not reach the Host");
+});
+
+test("reusing a session cannot change its agent preset", async () => {
+  const controller = fakeController({ script: happyScript });
+  await assert.rejects(
+    () => build(controller).ask({ sessionId: "session-test", text: "go", agentPreset: "minimal" }),
+    (error) => error.code === -32602 && /`agentPreset` only applies when the session is created/.test(error.message),
+  );
+  assert.equal(controller.prompts.length, 0, "a refused request must not reach the Host");
+});
+
+test("ask applies options and reports them alongside the turn", async () => {
+  const controller = fakeController({ models: twoProviderModels, script: happyScript });
+  const permissions = fakePermissions({ options: [{ value: "read-only" }] });
+  const services = { permissionPresets: permissions, sessions: { get: (id) => ({ id }) } };
+  const result = await build(controller, {}, services).ask({
+    text: "go",
+    model: "alpha/one",
+    permissionPreset: "read-only",
+  });
+  assert.equal(result.status, "completed");
+  assert.deepEqual(result.selected, { provider: "alpha", model: "one" });
+  assert.equal(result.permissionPreset, "read-only");
+});
+
 

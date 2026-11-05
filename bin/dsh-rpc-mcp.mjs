@@ -28,9 +28,32 @@ const TOOLS = [
       type: "object",
       properties: {
         prompt: { type: "string", description: "Self-contained task or question for the Harness agent." },
-        cwd: { type: "string", description: "Working directory for a new session. Defaults to the Harness default." },
+        cwd: {
+          type: "string",
+          description:
+            "Working directory for a new session. Defaults to the Harness default. Exclusive with workspace_id. Refused when session_id is given — where a session lives is fixed at creation.",
+        },
+        workspace_id: {
+          type: "string",
+          description:
+            "Put a new session in one of the Harness workspaces (see dsh_workspaces). Exclusive with cwd. Refused when session_id is given.",
+        },
         session_id: { type: "string", description: "Continue an existing Harness session instead of creating one." },
-        agent_preset: { type: "string", description: "Agent preset name for a new session (e.g. standard, minimal, cordis)." },
+        agent_preset: {
+          type: "string",
+          description: "Agent preset for a new session (e.g. standard, minimal, cordis). Refused when session_id is given.",
+        },
+        model: {
+          type: "string",
+          description:
+            "Model for the next turn, as 'provider/model' or a bare id when only one provider offers it. Like switching models in the GUI, this also becomes the profile default.",
+        },
+        reasoning_effort: { type: "string", description: "Reasoning effort id; requires model in the same call." },
+        permission: {
+          type: "string",
+          description:
+            "Permission preset for the session (see dsh_permissions). Each preset expands to a sandbox mode plus an approval policy.",
+        },
         timeout_ms: {
           type: "integer",
           minimum: 1000,
@@ -41,6 +64,27 @@ const TOOLS = [
       required: ["prompt"],
       additionalProperties: false,
     },
+  },
+  {
+    name: "dsh_workspaces",
+    title: "List Harness workspaces",
+    description:
+      "List the workspaces the Harness shows in its sidebar: id, title, directory and whether the directory still exists. Pass a title with a path to register a new one.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Absolute directory to register as a workspace. Omit to list only." },
+        title: { type: "string", description: "Display title used when registering a new workspace." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "dsh_permissions",
+    title: "List Harness permission presets",
+    description:
+      "List the permission presets this Harness deployment offers, with the default marked. A preset is a sandbox mode plus an approval policy.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "dsh_sessions",
@@ -226,15 +270,63 @@ async function callTool(name, args) {
         const prompt = typeof args.prompt === "string" ? args.prompt : "";
         if (prompt.trim().length === 0) return toolError("`prompt` is required");
         const params = { text: prompt };
+        const sessionId = typeof args.session_id === "string" ? args.session_id.trim() : "";
+        if (sessionId) params.sessionId = sessionId;
+        // Location and preset are creation-only. They are forwarded even when a
+        // session was named so the bridge can refuse the contradiction — dropping
+        // them here would look like they had been honoured.
         if (typeof args.cwd === "string" && args.cwd.trim()) params.cwd = args.cwd.trim();
-        if (typeof args.session_id === "string" && args.session_id.trim()) params.sessionId = args.session_id.trim();
+        if (typeof args.workspace_id === "string" && args.workspace_id.trim()) {
+          params.workspaceId = args.workspace_id.trim();
+        }
         if (typeof args.agent_preset === "string" && args.agent_preset.trim()) {
           params.agentPreset = args.agent_preset.trim();
+        }
+        if (typeof args.model === "string" && args.model.trim()) params.model = args.model.trim();
+        if (typeof args.reasoning_effort === "string" && args.reasoning_effort.trim()) {
+          params.reasoningEffort = args.reasoning_effort.trim();
+        }
+        if (typeof args.permission === "string" && args.permission.trim()) {
+          params.permissionPreset = args.permission.trim();
         }
         if (Number.isInteger(args.timeout_ms)) params.timeoutMs = args.timeout_ms;
 
         const result = await rpcCall("dsh.sessions.ask", params, { timeoutMs: turnBudget(args.timeout_ms) });
         return toolResult(result);
+      }
+
+      case "dsh_workspaces": {
+        const path = typeof args.path === "string" ? args.path.trim() : "";
+        if (path) {
+          const title = typeof args.title === "string" ? args.title.trim() : "";
+          const created = await rpcCall("dsh.workspaces.create", title ? { path, title } : { path });
+          return {
+            content: [{ type: "text", text: `workspace ${created.id}  ${created.title}\n${created.path}` }],
+          };
+        }
+        const result = await rpcCall("dsh.workspaces.list", {});
+        const lines = (result.items ?? []).map(
+          (item) => `${item.id}  ${item.title}  [${item.status}, ${item.sessions} sessions]\n  ${item.path}`,
+        );
+        return {
+          content: [{ type: "text", text: lines.length > 0 ? lines.join("\n") : "(no workspaces registered)" }],
+        };
+      }
+
+      case "dsh_permissions": {
+        const result = await rpcCall("dsh.permissions.catalog", {});
+        const lines = (result.options ?? []).map((option) => {
+          const mark = option.value === result.defaultPreset ? "*" : " ";
+          return `${mark} ${option.value}  ${option.name}${option.description ? ` — ${option.description}` : ""}`;
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: lines.length > 0 ? lines.join("\n") : "(this deployment exposes no permission presets)",
+            },
+          ],
+        };
       }
 
       case "dsh_sessions": {
