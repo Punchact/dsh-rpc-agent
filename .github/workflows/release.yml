@@ -74,12 +74,23 @@ jobs:
         with:
           # Node 24 ships npm 11, which Trusted Publishing needs (>= 11.5.1).
           node-version: "24.x"
-          registry-url: "https://registry.npmjs.org"
+          # No `registry-url` on purpose. With it, setup-node writes an ~/.npmrc holding
+          #   //registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}
+          # and with the secret absent that expands to an empty token. npm then sees a token
+          # entry that exists but is useless, and answers ENEEDAUTH instead of falling through
+          # to the OIDC exchange. The publish step writes ~/.npmrc itself, and only when a real
+          # token exists.
           # Deliberately no dependency cache in the publishing job: a release build should not
           # reuse a download cache that something else could have poisoned.
       - run: npm ci
       - name: toolchain
-        run: node --version && npm --version
+        run: |
+          echo "node $(node --version), npm $(npm --version)"
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "OIDC: request endpoint present — id-token: write is in effect"
+          else
+            echo "OIDC: request endpoint ABSENT — id-token: write did not reach this job"
+          fi
       # No --provenance flag: npm generates provenance by itself for OIDC publishes from a public
       # repository, and refuses the flag outright for a private one.
       - name: publish
@@ -87,6 +98,13 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
+          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+            printf '//registry.npmjs.org/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > "$HOME/.npmrc"
+            echo "NPM_TOKEN is set — wrote it into ~/.npmrc (used only if OIDC is unavailable)"
+          else
+            echo "no NPM_TOKEN secret configured — relying on Trusted Publishing (OIDC)"
+          fi
+
           real=0
           if [ "${{ github.event_name }}" = "release" ]; then real=1; fi
           if [ "${{ inputs.dry_run }}" = "false" ]; then real=1; fi
@@ -95,12 +113,6 @@ jobs:
             echo "rehearsal: npm publish --access public --dry-run"
             npm publish --access public --dry-run
             exit 0
-          fi
-
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "no NPM_TOKEN secret configured — relying on Trusted Publishing (OIDC)"
-          else
-            echo "NPM_TOKEN is present; the CLI uses OIDC first and falls back to it"
           fi
 
           if npm publish --access public; then
