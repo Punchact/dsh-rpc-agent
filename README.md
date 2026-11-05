@@ -209,14 +209,24 @@ node bin/dsh-rpc.mjs ask "重新想想" --session session-xxxx --model anthropic
 - `reasoningEffort` 必须和 `model` 同一次请求给出。Host 没有"读回当前模型"的接口，桥不猜。
 - ⚠️ **换模型会把选择存成 profile 默认**（这是 Host 自己的行为，和你在 GUI 里换模型一样）。也就是说外部 agent 换过去之后，你在 GUI 里新开的会话也会用那个模型。
 
-**权限预设**是"沙箱模式 + 审批策略"的组合（如 `read-only` / `workspace-write` / `danger-full-access` 配 `ask` / `never`）：
+**权限预设**是"沙箱模式 + 审批策略"的组合：选一个预设，等于把这两个旋钮都定下来。
 
 ```powershell
 node bin/dsh-rpc.mjs permissions
 node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
 ```
 
-预设名会先按 Host 的 catalog 校验，未知名字直接报错并列出可选项。注意：预设只是**该会话的默认值**，不等于放行——`danger-full-access` 之类的高权限仍然取决于你在 DSH 里的审批设置。
+预设名会先按 Host 的 catalog 校验，未知名字直接报错并列出可选项。`dsh.permissions.catalog` 的每一项都带一句 `cost`，因为部署自带的 `description` 往往是空的。
+
+**默认不要传 `permission`，撞到沙箱限制再升一次：**
+
+1. 桥会在那一轮的结果里给出 `sandbox.denied: true` 与 `next`；
+2. 照 `next.args` 在**同一个会话**里再问一次，`permission` 换成 `danger-full-access`；
+3. **只升一次**。这一档的审批策略是 `never`，升上去之后这一轮不再有任何拦截——所以它不是"更宽的默认档"，而是"被挡住时的最后一招"，用过之后应当在回答里说明。
+
+为什么升权必须由外层来做：DSH 的沙箱会在被拒输出末尾提示"可以带 `sandbox_permissions` 重试"，但桥驱动的会话是无人值守的——`approval: ask` 时没有应答者，请求会被归一成 `unavailable`（那不放行）；`approval: never` 时系统提示词直接禁止请求升权。两条路都堵死，所以只能由调用方换个预设重新发问。
+
+另外，沙箱升权阶梯是封闭表：`read-only` 可以升到 `workspace-write` 或 `danger-full-access`，而 **`workspace-write` 只能升到 `danger-full-access`**——没有中间档可挑。
 
 
 ### 轮次结果（`ask` / `wait`）
@@ -229,11 +239,20 @@ node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
   "reason": { "kind": "completed" },
   "text": "收到",                  // 该轮正文，多段以空行连接
   "reasoning": "…",               // 可选，思考内容
-  "tools": [],                    // [{callId, name, arguments}]，该轮的工具调用
+  "tools": [],                    // [{callId, name, arguments, output?, isError?}]，该轮的工具调用
   "usage": { "inputTokens": 134981, "outputTokens": 2, "totalTokens": 134983 },
   "durationMs": 5311,
   "timedOut": false,
   "partial": false,               // true 表示流在 turn/end 之前结束，text 只是片段
+  "sandbox": {                    // 仅当这一轮被沙箱拒绝时出现
+    "denied": true,
+    "marker": "[sandbox: file access denied under workspace-write mode]"
+  },
+  "next": {                       // 仅随 sandbox 出现：文档化的唯一出路
+    "tool": "dsh_ask",
+    "reason": "The turn was blocked by the DSH sandbox. …",
+    "args": { "session_id": "session-…", "permission": "danger-full-access" }
+  },
   "requestId": "rpc-…",
   "created": true,                // 本次是否新建了会话
   "cursor": 4,
@@ -245,6 +264,8 @@ node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
 - `timeout` 表示等待超时，**不会**取消该轮——必要时再调 `dsh.sessions.cancel`。
 - `partial: true` 只出现在 `status:"unknown"` 时：事件流没等到 `turn/end` 就结束了，`text` 是半截，不要当完整回答用。
 - `cwd` 只在 `created:true` 时回填。
+- `sandbox.denied` **只认 Host 写进工具输出的固定标记**（`[sandbox: file access denied`），不从回答正文里猜同义词；工具输出取不到时，退而扫该轮正文。宁可漏报，不误报。
+- `sandbox` 与 `next` 都不是错误：`status` 与工具错误的判定不受影响，这一轮确实跑完了，只是一步动作被挡住。拿到 `next` 就照它再问一次，**不要**用同一档重试，也不要为此新开会话。
 
 **轮次归属**：`ask` 不只靠"基线轮次 + 1"的猜测。投递 prompt 后，本插件会从事件流里找自己那条 `user/message`（`source.rpcId` 等于本次请求的 `requestId`），以它落在哪一轮为准。因此**同一会话里有别人（GUI 或其他 agent）先插话时，不会把别人的回答当成你的**——那一轮的 `turn/end` 会被跳过，继续等自己那一轮。
 
