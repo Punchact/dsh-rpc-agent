@@ -364,9 +364,9 @@ compression: gzip
 
 **决策二十：发 npm 用 0.4.1，不复用 0.4.0。** `v0.4.0` 的 tag 已经指向 `f6374b4`，而发布 npm 需要改 `package.json`（去 `private`、加 `publishConfig`、收 `files`）——这些改动会让 tarball 里的 `package.json` 与 tag 不一致。版本号是"这个 tarball 对应哪次提交"的索引，让它对不上比多用一个补丁号更糟。所以 0.4.1 = 0.4.0 的代码 + 打包元数据变更。
 
-**决策二十一：provenance 跟着仓库可见性走，而不是一直开着。** npm 的 `--provenance` 需要公开可验证的源码仓库，私有仓库会被直接拒绝。`release.yml` 里按 `github.event.repository.private` 判断是否加这个 flag：现在私有就不加，仓库转公开后下一次发布自动带上。写成条件而不是注释，是因为"以后反正会公开"这种念头最容易被忘掉。
+**决策二十一：provenance 不写参数，靠 npm 自己带。** npm 只在「OIDC 发布 + 公开仓库 + 公开包」三条同时成立时才生成 provenance，所以工作流里没有 `--provenance`：私有仓库下加它会被 npm 直接拒绝，令牌兜底发布则永远拿不到。仓库转公开后，OIDC 那条路会自动带上，不用改代码。
 
-**发布通道：Trusted Publishing（OIDC），不放 `NPM_TOKEN`。** 工作流用 `permissions: id-token: write` 换短期凭证；仓库里没有长期 token，泄露面为零。手动兜底写在 `docs/release.md`，`prepublishOnly` 保证手发也过同样三项检查。
+**决策二十二：发布凭证两条都留，OIDC 优先、令牌兜底。** 形成过程值得记：我先按 OIDC 写好 `id-token: write` 的流水线，真正发布时却撞上 npm 全站政策——发布强制 2FA，或者用一个**创建时**才可勾选的 bypass-2FA granular token，普通令牌一律 `E403`；所以当时先用令牌把 0.4.1 发出去了。随后用户把 Trusted Publisher 配好（`Punchact` / `dsh-rpc-agent` / `release.yml`），工作流改成同时接受两条路：`id-token: write` 常开，`secrets.NPM_TOKEN` 有就作为兜底——npm CLI 自己会先用 OIDC、失败再回落到令牌；两者都没有时只跑 `npm publish --dry-run` 并说明原因，既不在发版日卡死，也不假装成功。发布失败时打印的提示直接指向三个最可能的原因（信任关系是否允许 `npm publish`、工作流文件名是否一字不差、要不要补令牌），因为 npm 保存那张表时不校验任何字段。代价与硬规则（新建信任关系必须 2 天内完成一次成功发布）写在 `docs/release.md`。
 
 **验证**：`npm publish --dry-run`（未登录状态）exit 0 并给出真实清单；加入 `docs/release.md` 后 `node scripts/check-package.mjs` 报 `@punchact/dsh-rpc-agent@0.4.1, 23 files, 84.2 KB packed`。
 

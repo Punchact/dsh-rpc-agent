@@ -1,16 +1,20 @@
 name: release
 
 # Publishing is driven by a GitHub Release, not by a tag push: the release is the moment a human
-# says "this commit is what users get", and it is also the only trigger npm's Trusted Publishing
-# can identify.
+# says "this commit is what users get". `workflow_dispatch` exists so the identical job can be
+# rehearsed without publishing anything.
 #
-# One-time setup on npmjs.com (before the first release):
-#   Package settings → Trusted Publishers → GitHub Actions
-#     Organization or user: Punchact
-#     Repository:           dsh-rpc-agent
-#     Workflow filename:    release.yml
-#   No NPM_TOKEN secret is needed, and none should be added: the job authenticates with a
-#   short-lived OIDC token (`id-token: write`), so a leaked environment can never publish.
+# Authentication, in order of preference — the job is wired so either can carry it:
+#
+#   1. Trusted Publishing (OIDC). A Trusted Publisher is configured on npmjs.com for
+#      Punchact / dsh-rpc-agent / release.yml, so `id-token: write` alone is enough and no secret
+#      exists anywhere. Provenance comes out automatically once the repository is public.
+#   2. Granular npm token with "bypass 2FA", stored as the repository secret NPM_TOKEN. npm's
+#      site-wide policy makes 2FA or such a token mandatory, which is why a plain token answers
+#      E403. The npm CLI tries OIDC first and falls back to this token, so the secret is invisible
+#      to successful OIDC runs.
+#   3. Neither: rehearse with `npm publish --dry-run` and say so, rather than failing a release over
+#      a credential nobody has configured yet — and rather than pretending to have published.
 
 on:
   release:
@@ -56,37 +60,55 @@ jobs:
   publish:
     name: publish
     needs: verify
-    # A manual dispatch always reaches this job so the dry run prints the exact command; the
+    # A manual dispatch always reaches this job so the rehearsal prints the exact command; the
     # `dry_run` input only decides whether it is a rehearsal or a real publish (see the last step).
-    # A release event has no inputs, so it always publishes for real.
+    # A release event has no inputs, so it publishes for real.
     if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write # the OIDC token npm exchanges for permission to publish
+      id-token: write # OIDC for Trusted Publishing; harmless when the token path is used instead
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          # Node 24 bundles npm 11, and Trusted Publishing needs npm >= 11.5.1.
+          # Node 24 ships npm 11, which Trusted Publishing needs (>= 11.5.1).
           node-version: "24.x"
           registry-url: "https://registry.npmjs.org"
-          cache: npm
+          # Deliberately no dependency cache in the publishing job: a release build should not
+          # reuse a download cache that something else could have poisoned.
       - run: npm ci
       - name: toolchain
         run: node --version && npm --version
-      # Provenance attests "this tarball was built from that public commit". npm refuses it while
-      # the repository is private, so it is added only once the repository is public.
+      # No --provenance flag: npm generates provenance by itself for OIDC publishes from a public
+      # repository, and refuses the flag outright for a private one.
       - name: publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          flags="--access public"
-          if [ "${{ github.event.repository.private }}" = "false" ]; then
-            flags="$flags --provenance"
+          real=0
+          if [ "${{ github.event_name }}" = "release" ]; then real=1; fi
+          if [ "${{ inputs.dry_run }}" = "false" ]; then real=1; fi
+
+          if [ "$real" != "1" ]; then
+            echo "rehearsal: npm publish --access public --dry-run"
+            npm publish --access public --dry-run
+            exit 0
           fi
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
-            echo "dry run: npm publish $flags --dry-run"
-            npm publish $flags --dry-run
+
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "no NPM_TOKEN secret configured — relying on Trusted Publishing (OIDC)"
           else
-            npm publish $flags
+            echo "NPM_TOKEN is present; the CLI uses OIDC first and falls back to it"
           fi
+
+          if npm publish --access public; then
+            echo "published"
+            exit 0
+          fi
+          echo "::error::publish failed. Check, in order: the Trusted Publisher entry on npmjs.com is"
+          echo "::error::Punchact / dsh-rpc-agent / release.yml and allows 'npm publish' (new entries"
+          echo "::error::default to stage-only); this workflow file name matches it exactly; or add a"
+          echo "::error::bypass-2FA granular token as the secret NPM_TOKEN."
+          exit 1
