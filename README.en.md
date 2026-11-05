@@ -215,6 +215,13 @@ The status tests pin the aggregate-only payload (no token, no session id, no pro
 
 Port-drift check (manual): point `endpoint.json` at a dead port, run `dsh-rpc ping`, and expect exit code 3 plus a message naming `nothing is listening`, the publishing `pid`, and `health --wait`. Restore the file and `ping` recovers immediately.
 
+## Maintenance
+
+- [CHANGELOG.md](./CHANGELOG.md) — what changed in each release, and why.
+- [SECURITY.md](./SECURITY.md) — how to report a vulnerability privately, the threat model, and what is out of scope.
+- [docs/release.md](./docs/release.md) — the publishing manual (credentials, tagging, the parts that cannot be undone).
+- [docs/design.md](./docs/design.md) — the decisions behind the bridge, including the ones that went wrong first.
+
 ## License
 
 MIT © 2026 Punchact. See [LICENSE](./LICENSE).

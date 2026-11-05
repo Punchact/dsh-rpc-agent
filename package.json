@@ -36,6 +36,8 @@
     "cordis.patch.yml",
     "README.md",
     "README.en.md",
+    "CHANGELOG.md",
+    "SECURITY.md",
     "LICENSE",
     "docs/"
   ],

@@ -23,6 +23,8 @@ const REQUIRED = [
   "LICENSE",
   "README.md",
   "README.en.md",
+  "CHANGELOG.md",
+  "SECURITY.md",
   "locale/en.json",
   "locale/zh.json",
   "bin/dsh-rpc.mjs",
