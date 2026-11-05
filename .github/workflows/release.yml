@@ -25,6 +25,10 @@ on:
         description: "Verify and pack, but do not publish"
         type: boolean
         default: true
+      stage:
+        description: "Diagnostic: upload as a staged publish instead of publishing to latest"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -112,6 +116,15 @@ jobs:
           if [ "$real" != "1" ]; then
             echo "rehearsal: npm publish --access public --dry-run"
             npm publish --access public --dry-run
+            exit 0
+          fi
+
+          # Diagnostic switch: `npm stage publish` is always permitted for a Trusted Publisher,
+          # while `npm publish` needs the extra "Allowed actions" tick. Staging tells the two
+          # failure modes apart — a staging publish that authenticates proves the entry matches.
+          if [ "${{ inputs.stage }}" = "true" ]; then
+            echo "diagnostic: npm stage publish --access public"
+            npm stage publish --access public
             exit 0
           fi
 
