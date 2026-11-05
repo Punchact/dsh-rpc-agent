@@ -288,5 +288,30 @@ compression: gzip
 
 **验证**：`test/client.test.mjs` 六项——端点重发后重试成功且只投递一次、`ECONNRESET` 不重试（连接计数为 1）、显式 `--url` 不重试、重试后的 401 不被改写成"没人监听"、端点未变时报错含 `pid` 与 `health --wait` 提示，外加一例对 `lib/transport.mjs` 钉住各平台 errno 形状。
 
+## 12. 设置页状态面板与路由挂载（2026-11-05）
+
+需求是"人机交互里能看到桥的当前状态"，所以做成 DSH 设置里的一个页面，而不是再加一条 CLI 命令。
+
+**为什么另开 `/status` 而不复用 `/health`。** `/health` 存在的意义是"进程活着"，一个字节都不该多给；面板要的是运行时长、`pid`、凭据来源、在跑的轮次、最近调用与聚合计数。把两者合并会让健康检查变成一份信息面更大的接口。
+
+**为什么 `/status` 不要 token。** 页面是静态浏览器模块，它拿不到 `endpoint.json`（那是 Node 侧文件），因此不可能自带 token。可选方案是让页面把 token 存进 `localStorage`，那等于把"驱动 DSH"的凭据放进一个可被任何同源脚本读到的地方——比"免 token 但只说聚合事实"更糟。于是 `/status` 与 `/health` 共用同一条边界：**只接受 loopback**，并靠"不说"来保护内容：
+
+- 不返回 token、不返回 `sessionId`（在跑的轮次只给运行 ID 前 8 位与"是否有会话"）；
+- 调用记账只存**方法名、耗时、结果码**，不存参数（`lib/stats.mjs` 的注释写明了理由）。
+
+**决策七：路由挂载用"寄生单元"，而不是直接 `register`。** 宿主的 `webServer` 只有 `register` 与其返回的 disposer，没有 unregister；而 Cordis 每次重载都会**重新 import 模块**，模块级状态全部重置。直接 `register` 会有两个后果：
+
+1. 上一代因异常没走完 cleanup，路由留在进程里，下一代 `register` 撞 `duplicate exact route`，此后**再也激活不了**（本次实测踩到：一个 `if` 写错导致同一路径挂两次，抛错发生在 `ctx.effect` 之前，四条路由全部泄漏，行状态卡在 `failed`）。
+2. 反过来，若下一代"继承"上一代的路由却不持有 disposer，那么停用插件也不会真正下线。
+
+做法：`globalThis[Symbol.for("dsh-rpc.route-cells")]` 上放一张 `path → {handler, owner, release}` 表（用 `globalThis` 而不是模块变量，正是为了跨"重新 import"存活）。每个路径只 `register` 一次一个 trampoline，`claim()` 把 `handler`/`owner` 指向最新一代；**接管的一代也会得到自己的 disposer**，卸载时只有"当前属主"才真正调用 `release()`。
+
+**决策八：挂载是原子的。** 挂载整段包在 `try/catch` 里，任一 `register` 抛错就把已挂的全部回滚再抛。否则会出现"路由挂了一半、行报失败"的分裂状态——比彻底失败更难判断。
+
+**已知残余风险**：本设计能防"未来的重载"，但**无法回收已经泄漏在同一进程里的路由**（`webServer` 没有反注册 API，disposer 只存在于当年那份闭包里）。遇到这种情况只能重启 DSH 让路由表重建。
+
+**验证**：`test/status.test.mjs` 六项——载荷只含聚合数据（断言 token、`sessionId`、prompt 正文都不出现）、非 loopback 403、非 GET/HEAD 405、`stats` 只记四个字段、同进程第二代接管而不撞车且只有当前属主能卸载、挂载中途失败整段回滚。
+
+
 
 

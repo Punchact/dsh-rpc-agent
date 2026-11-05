@@ -19,12 +19,14 @@
   "exports": {
     ".": "./index.mjs",
     "./package.json": "./package.json",
-    "./client": "./lib/client.mjs",
+    "./client": "./client.js",
+    "./http-client": "./lib/client.mjs",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
   "files": [
     "index.mjs",
+    "client.js",
     "lib/",
     "bin/",
     "locale/",
@@ -43,10 +45,17 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
     }
   },
   "scripts": {
-    "test": "node test/methods.test.mjs && node test/client.test.mjs",
+    "test": "node test/methods.test.mjs && node test/client.test.mjs && node test/status.test.mjs",
     "test:e2e": "node test/e2e.mjs",
     "test:edge": "node test/edge.mjs",
     "check:version": "node --input-type=module -e \"import {readFileSync} from 'node:fs'; const {PLUGIN_VERSION} = await import('./lib/version.mjs'); const v = JSON.parse(readFileSync('package.json','utf8')).version; if (PLUGIN_VERSION !== v) { console.error('PLUGIN_VERSION ' + PLUGIN_VERSION + ' != package.json ' + v); process.exit(1); } console.log('version ok: ' + v);\""

@@ -13,6 +13,7 @@ import { endpointPath, loadOrCreateToken, tokenPath, writeEndpoint } from "./lib
 import { resolveConfig } from "./lib/config.mjs";
 import { buildDispatcher, registerRoutes } from "./lib/http.mjs";
 import { createMethods } from "./lib/methods.mjs";
+import { createStats } from "./lib/stats.mjs";
 import { PLUGIN_NAME, PLUGIN_VERSION } from "./lib/version.mjs";
 
 export const name = "dsh-rpc";
@@ -43,6 +44,10 @@ export function apply(ctx, input = {}) {
     state,
   );
   const dispatch = buildDispatcher(methods);
+  // Call accounting feeds the Settings page. `stats` lives next to the routes
+  // because that is the only layer that sees every admitted call, including the
+  // ones that fail before reaching a method.
+  const stats = createStats({ startedAt: Date.now(), pid: process.pid });
   const routes = registerRoutes({
     webServer: ctx.webServer,
     config,
@@ -51,6 +56,7 @@ export function apply(ctx, input = {}) {
     state,
     ctx,
     log,
+    stats,
   });
 
   // Publish the endpoint so out-of-process callers (CLI, MCP bridge, curl) can

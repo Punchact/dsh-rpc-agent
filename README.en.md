@@ -140,18 +140,32 @@ A session started from the CLI is a **real Harness session**, so it appears in t
 - Keep the returned `sessionId` to `wait`, read `history`, continue, or take over in the GUI.
 - The GUI does not pop up. If a turn hits an approval prompt nobody answers, it waits until `timeoutMs` and `ask` returns `status:"timeout"` **without** cancelling the turn.
 
+## The status panel in Settings
+
+Once installed, Settings grows a **“RPC Bridge”** page: an online/offline light, version, endpoint, credential source, uptime, `pid`, Node version, whether remote callers are allowed, the runs in flight (run id prefix, has-session, has-prompt, age), the last 12 calls (time, method, duration, outcome) and per-method counters. It refreshes every two seconds.
+
+It reads **`GET /dsh-rpc/status`**, which sits on the same trust boundary as `/health`: **loopback only, no token**, because browser code cannot read the token in `endpoint.json`. In exchange the endpoint must stay silent about anything a caller said:
+
+- no token, no `sessionId` (in-flight runs expose only an 8-character run id and a boolean),
+- no arguments — only method name, duration and result code are recorded (`lib/stats.mjs`).
+
+The panel is read-only and disappears with the plugin. It asks a fixed path `/dsh-rpc/status`, kept as an alias when you reconfigure `path`, and the payload always reports the live `origin`.
+
 ## Verify
 
 ```powershell
 node test/methods.test.mjs   # 21 unit tests, no Harness needed
 node test/client.test.mjs    # 6 client retry/error tests, no Harness needed
+node test/status.test.mjs    # 6 status/route-mounting tests, no Harness needed
 node test/e2e.mjs --cwd .    # 14 end-to-end checks against a live Harness
 node test/edge.mjs           # 24 protocol/edge checks against a live Harness
 ```
 
 Run the files directly, not through `node --test`: that forks a child process, which some sandboxes forbid.
 
-Last run (2026-11-05): unit 21/21, client 6/6, end-to-end 14/14, edge 24/24.
+Last run (2026-11-05): unit 21/21, client 6/6, status 6/6, end-to-end 14/14, edge 24/24.
+
+The status tests pin the aggregate-only payload (no token, no session id, no prompt text), the 403/405 guards, and the route-mounting contract: a second generation inside one process takes over the routes a previous one left mounted instead of colliding, a failed mount rolls back completely, and only the current owner can unmount.
 
 Port-drift check (manual): point `endpoint.json` at a dead port, run `dsh-rpc ping`, and expect exit code 3 plus a message naming `nothing is listening`, the publishing `pid`, and `health --wait`. Restore the file and `ping` recovers immediately.
 
