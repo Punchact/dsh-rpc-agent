@@ -2,7 +2,7 @@
 
 [English](./README.en.md) · 非官方项目
 
-> 仓库名是 `dsh-rpc-agent`；插件包名、命令行与端点路径仍是 `dsh-rpc`（`@punchact/dsh-rpc`、`dsh-rpc`、`/dsh-rpc`）。改包名要让已安装的 profile 重新链接，所以留到下一次重装时一起做。
+> 仓库与插件包名都是 `dsh-rpc-agent`。命令行（`dsh-rpc`、`dsh-rpc-mcp`）、端点路径（`/dsh-rpc`）、状态目录（`~/.dsh/dsh-rpc`）与 `DSH_RPC_*` 环境变量保持不变——它们是运行时契约，改了会让已装好的配置和已配对的 token 一起失效。
 
 把 DeepSeek Harness 变成本机可调用的 **RPC 服务**：任何本地 agent（Claude Code、Codex CLI、Cursor、Trae、自己写的脚本）都能把任务交给 DSH，拿回它的最终回答。
 
@@ -29,7 +29,7 @@ dsh-rpc CLI ───────────────────┼──�
 | **MCP 工具** | Claude Code、Cursor、Codex 等支持 MCP 的 agent | `bin/dsh-rpc-mcp.mjs` |
 | **CLI** | 人在终端里试、脚本里 `$(...)` 取值 | `bin/dsh-rpc.mjs` |
 | **HTTP JSON-RPC** | 任何语言的进程 | `POST http://127.0.0.1:<port>/dsh-rpc` |
-| **JS 客户端库** | Node 侧集成 | `import { rpcCall, rpcStream } from "@punchact/dsh-rpc/client"` |
+| **JS 客户端库** | Node 侧集成 | `import { rpcCall, rpcStream } from "@punchact/dsh-rpc-agent/http-client"` |
 
 ### MCP（推荐）
 
@@ -285,7 +285,7 @@ JSON-RPC 标准码之外，本插件用 `-3200x` 段表达业务语义：
 ```yaml
 - insert:
     - id: dsh-rpc-bridge
-      name: '@punchact/dsh-rpc'
+      name: '@punchact/dsh-rpc-agent'
       config:
         token: ''              # 留空则自动生成并落盘
         allowRemote: false     # 允许非 loopback 来源（默认关）

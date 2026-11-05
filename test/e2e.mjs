@@ -46,7 +46,7 @@ let sessionId = "";
 
 await check("ping over the authenticated channel", async () => {
   const value = await rpcCall("dsh.ping", {}, options);
-  assert(value?.plugin === "dsh-rpc", "ping did not identify the plugin");
+  assert(value?.plugin === "dsh-rpc-agent", "ping did not identify the plugin");
   return `${value.plugin} ${value.version}`;
 });
 

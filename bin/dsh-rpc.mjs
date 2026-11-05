@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Command-line client for @punchact/dsh-rpc.
+// Command-line client for @punchact/dsh-rpc-agent.
 //
 //   node bin/dsh-rpc.mjs ask "explain this repository" --cwd . --json
 //   node bin/dsh-rpc.mjs ping

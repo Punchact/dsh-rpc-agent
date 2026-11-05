@@ -1,4 +1,4 @@
-// @punchact/dsh-rpc — loopback JSON-RPC bridge for DeepSeek Harness.
+// @punchact/dsh-rpc-agent — loopback JSON-RPC bridge for DeepSeek Harness.
 //
 // Design constraints that shaped this file:
 //  * Zero dependencies. A bundle installed into a profile must not need a peer
@@ -86,7 +86,7 @@ export function apply(ctx, input = {}) {
   ctx.effect(() => () => routes.dispose(), "dsh-rpc.routes");
 
   log.info?.(
-    `[dsh-rpc] ${PLUGIN_NAME} ${PLUGIN_VERSION} ready at ${state.endpointUrl ?? config.path} ` +
+    `[dsh-rpc-agent] ${PLUGIN_NAME} ${PLUGIN_VERSION} ready at ${state.endpointUrl ?? config.path} ` +
       `(token: ${state.tokenSource}, loopback_only=${!config.allowRemote})`,
   );
 }

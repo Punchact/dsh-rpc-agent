@@ -92,7 +92,7 @@ test("the status route answers loopback with an aggregate-only payload", async (
     assert.equal(res.status, 200);
     const body = res.json();
     assert.equal(body.ok, true);
-    assert.equal(body.plugin, "dsh-rpc");
+    assert.equal(body.plugin, "dsh-rpc-agent");
     assert.equal(body.origin, "http://127.0.0.1:3820");
     assert.equal(body.path, "/dsh-rpc");
     assert.equal(body.pid, 4242);

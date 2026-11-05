@@ -497,7 +497,7 @@ test("dispatcher rejects unknown methods and exposes the catalog", async () => {
   const dispatch = buildDispatcher(build(fakeController({ script: happyScript })));
 
   const catalog = await dispatch("dsh.discover", {});
-  assert.equal(catalog.plugin, "dsh-rpc");
+  assert.equal(catalog.plugin, "dsh-rpc-agent");
   assert.equal(catalog.methods.some((entry) => entry.name === "dsh.sessions.ask"), true);
 
   await assert.rejects(() => dispatch("dsh.nope", {}), (error) => error.code === -32601);

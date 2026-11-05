@@ -1,4 +1,4 @@
-// @punchact/dsh-rpc — Settings page.
+// @punchact/dsh-rpc-agent — Settings page.
 //
 // A browser module: the Host loads it into the Web UI and we register one entry
 // in `settings.section`, so the bridge's live state is visible where a person
@@ -14,7 +14,7 @@
 //    loopback-only, so this page cannot become a way to read someone's session.
 
 window.__ModuleLoader__.load({
-  id: "@punchact/dsh-rpc",
+  id: "@punchact/dsh-rpc-agent",
   factory(require) {
     const React = require("react");
     const h = React.createElement;
@@ -343,7 +343,7 @@ window.__ModuleLoader__.load({
       const body = rows
         .map(([key, value]) => `        ${key}: ${typeof value === "string" ? JSON.stringify(value) : value}`)
         .join("\n");
-      return `- insert:\n    - id: dsh-rpc-bridge\n      name: '@punchact/dsh-rpc'\n      config:\n${body}`;
+      return `- insert:\n    - id: dsh-rpc-bridge\n      name: '@punchact/dsh-rpc-agent'\n      config:\n${body}`;
     }
 
     // -------------------------------------------------------------- component --

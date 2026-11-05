@@ -2,7 +2,7 @@
 
 [中文](./README.md) · Unofficial project
 
-> The repository is `dsh-rpc-agent`; the package name, CLI and endpoint path stay `dsh-rpc` (`@punchact/dsh-rpc`, `dsh-rpc`, `/dsh-rpc`). Renaming the package means relinking an installed profile, so it waits for the next reinstall.
+> The repository and the package are both `dsh-rpc-agent`. The CLI names (`dsh-rpc`, `dsh-rpc-mcp`), the endpoint path (`/dsh-rpc`), the state directory (`~/.dsh/dsh-rpc`) and the `DSH_RPC_*` environment variables stay as they are: they are runtime contracts, and changing them would invalidate installed configs and paired tokens together.
 
 A loopback **JSON-RPC bridge** that lets any local agent — Claude Code, Cursor, Codex CLI, Trae, or your own script — hand a task to [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) and get its final answer back.
 

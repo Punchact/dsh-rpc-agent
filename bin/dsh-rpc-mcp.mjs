@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// MCP (Model Context Protocol) stdio bridge for @punchact/dsh-rpc.
+// MCP (Model Context Protocol) stdio bridge for @punchact/dsh-rpc-agent.
 //
 // Point any MCP-capable agent at this script and it gains a `dsh_ask` tool that
 // hands the task to DeepSeek Harness — a full agent with its own tools, skills,

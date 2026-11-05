@@ -5,5 +5,5 @@
 # them itself (the plugin exports no schemastery `Config`, to stay dependency-free).
 - insert:
     - id: dsh-rpc-bridge
-      name: '@punchact/dsh-rpc'
+      name: '@punchact/dsh-rpc-agent'
       config: {}

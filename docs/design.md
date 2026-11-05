@@ -153,7 +153,7 @@ Host 抛 `RemoteError(code, message, details)`（`isDSHRemoteError === true`）�
 | Host 侧 `cancel` 不抛异常 | `agent.cancel(cause, {keepInbox:true})` 只做 `inbox.clear()` + `phase.abort.abort(cause)`；`SessionController.cancel(request)` 只有一个参数 |
 | `follow` 的迭代器在 abort 时**正常结束**而不是抛错 | 所以"是否超时"只能由自己的 deadline 决定，不能靠 catch 分支 |
 | 改了 `lib/*.mjs` 但行为不变 | 宿主 import 过就不再看文件。`plugin_manager` 把该行 `set_plugin(enabled:false)` 再 `true`，会重新 import（`application: "applied"`），无需重启 Harness |
-| `cordis_inspect_query` 查配置要传 `{name:"@punchact/dsh-rpc"}`，查服务要传 `{service:"webServer"}` | Service provider 的入参键是 `service`，Config provider 才是 `name`；`additionalProperties:false`，传错直接被拒 |
+| `cordis_inspect_query` 查配置要传 `{name:"@punchact/dsh-rpc-agent"}`，查服务要传 `{service:"webServer"}` | Service provider 的入参键是 `service`，Config provider 才是 `name`；`additionalProperties:false`，传错直接被拒 |
 | 插件行 `status: "absent"` | 正常。插件不导出 `Config` schema，所以没有可校验的 config 契约 |
 | `node --test test/` 报 `spawn EPERM` | DSH 沙箱禁掉 Node 子进程的管道 stdio。单元测试要 `node test/methods.test.mjs` 在进程内跑 |
 
@@ -347,7 +347,7 @@ compression: gzip
 
 **决策十五：`create` 拒绝调用方自带的 `sessionId`。** 会话 id 由 Host 分配，`SessionCommandController.create` 里那个 `sessionId` 字段不是"指定 id"的入口：传了它，返回的是另一个 id，而调用方从回复里看不出差别——这是最难自查的一类失败模式（"我以为我指定了 id"）。现在直接 `-32602` 并说明该用 `dsh.sessions.ask` 续用既有会话。冒烟测试同步断言 `create` 的 params 里**没有** `sessionId`，防止方法目录与实现再次漂移。
 
-**决策十六：包名三处必须一致，由冒烟测试守。** 一个插件里同一个名字出现在四个地方：`package.json` 的 `name`、`cordis.patch.yml` 里行的 `name`、`client.js` 里 `window.__ModuleLoader__.load({ id })`。前两个决定宿主能不能装配，第三个决定浏览器模块的注册 id；手写时靠人肉同步，而我们改过一次包名（早期的名字已不在历史里，现在是 `@punchact/dsh-rpc`）。`test/catalog.smoke.mjs` 现在把四处一起读出来比对（第四个是面板里那段可粘贴的配置片段，它同样写着要加载哪个包名），并且改成"收集 failures 后统一非零退出"——原来的实现只在方法名不符时失败，其余检查只打印，等于没有断言。
+**决策十六：包名三处必须一致，由冒烟测试守。** 一个插件里同一个名字出现在四个地方：`package.json` 的 `name`、`cordis.patch.yml` 里行的 `name`、`client.js` 里 `window.__ModuleLoader__.load({ id })`。前两个决定宿主能不能装配，第三个决定浏览器模块的注册 id；手写时靠人肉同步，而我们改过两次包名（早期的名字已不在历史里，现在是 `@punchact/dsh-rpc-agent`）。`test/catalog.smoke.mjs` 现在把四处一起读出来比对（第四个是面板里那段可粘贴的配置片段，它同样写着要加载哪个包名），并且改成"收集 failures 后统一非零退出"——原来的实现只在方法名不符时失败，其余检查只打印，等于没有断言。
 
 **决策十七：同会话并发默认拒绝，`queue: true` 才排队。** 宿主允许一个会话上排多轮，所以"两个 `ask` 同时进一个会话"不会报错，只会让两个调用方都算出 `baseline+1` 并各自认领——上一版靠 `rpcId` 认领把"别人的回答"挡住了，但结果是其中一方白等一轮。现在 `prompting.set(sessionId, slot)` 改成 `{runId, done, finish}`：第二个提问型运行默认拿 `-32004` 并附具体建议（`queue: true` / `dsh.sessions.wait` / 换会话），选择排队则 `await waitForPromptSlot()`，在前一个 `finish()` 或自己的 deadline 处放行。排队期间 `ping` 与状态页能看见 `state: "queued"`，所以"卡住了"是可观测的而不是需要猜。默认值保持"拒绝"而不是"排队"：静默排队会把超时归因推给调用方看不清的别人。
 
