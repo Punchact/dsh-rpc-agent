@@ -35,22 +35,26 @@ dsh-rpc CLI ───────────────────┼──�
 
 ### MCP（推荐）
 
+`bin/` 指**包内**的 `bin/` 目录。从 npm 装（第 6 节的推荐路线，桌面端默认 profile）时它在：
+
 ```powershell
-claude mcp add dsh -- node "<path-to-your-clone>\bin\dsh-rpc-mcp.mjs"
+claude mcp add dsh -- node "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\bin\dsh-rpc-mcp.mjs"
 ```
 
-Cursor / Codex 用配置文件等价写法（Windows 下 JSON 里的反斜杠要转义；macOS/Linux 用 `/`）：
+Cursor / Codex 用配置文件等价写法（把 `args` 换成同一个路径；Windows 下 JSON 里的反斜杠要转义）：
 
 ```json
 {
   "mcpServers": {
     "dsh": {
       "command": "node",
-      "args": ["<path-to-your-clone>/bin/dsh-rpc-mcp.mjs"]
+      "args": ["C:\\Users\\<you>\\.dsh\\profiles\\desktop\\node_modules\\@punchact\\dsh-rpc-agent\\bin\\dsh-rpc-mcp.mjs"]
     }
   }
 }
 ```
+
+若你走的是本地克隆那条路线，把上面的路径换成 `<path-to-your-clone>\bin\dsh-rpc-mcp.mjs` 即可；本节与后面的 CLI 示例都写作 `node bin/...`，等价于"在当前目录位于包内时执行"。
 
 暴露 7 个工具：`dsh_ask`、`dsh_workspaces`、`dsh_permissions`、`dsh_sessions`、`dsh_wait`、`dsh_cancel`、`dsh_status`。`dsh_ask` 返回 Harness 的正文，加一行 `— session … · turn … · completed · 5.2s` 元信息。
 
@@ -110,11 +114,13 @@ Invoke-RestMethod -Method Post -Uri $endpoint `
 ### JS 客户端库
 
 ```js
-import { rpcCall } from "./dsh-rpc-plugin/lib/client.mjs";
+import { rpcCall } from "@punchact/dsh-rpc-agent/http-client";
 
 const answer = await rpcCall("dsh.sessions.ask", { text: "总结一下这个仓库", cwd: process.cwd() });
 console.log(answer.text, answer.usage);
 ```
+
+这个子路径由 `exports` 声明（`"./http-client": "./lib/client.mjs"`）。从 npm 装的包直接这么写；在本地克隆里等价于 `import … from "<path-to-your-clone>/lib/client.mjs"`。
 
 `rpcCall` 直接 resolve 成方法的 `result`；失败时抛出的 Error 带 `code` / `data` / `status`，可直接按错误码分支。
 
@@ -138,8 +144,8 @@ console.log(answer.text, answer.usage);
   "url": "http://127.0.0.1:3820/dsh-rpc",
   "origin": "http://127.0.0.1:3820",
   "path": "/dsh-rpc",
-  "version": "0.1.0",
-  "plugin": "dsh-rpc",
+  "version": "0.4.4",                        // 正在运行的那份插件自报的版本
+  "plugin": "dsh-rpc-agent",
   "pid": 12345,                              // 写这个文件的 Host 进程
   "startedAt": "2026-11-05T01:05:58.000Z",   // 该进程的启动时刻
   "updatedAt": "2026-11-05T01:06:31.924Z"    // 本次写入时刻
@@ -318,7 +324,19 @@ dsh plugin add @punchact/dsh-rpc-agent
 plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent" })
 ```
 
-非默认 profile 加 `--profile <name>`（桌面端是 `desktop`）。
+非默认 profile 加 `--profile <name>`（桌面端是 `desktop`）。要钉版本就写全：`dsh plugin add @punchact/dsh-rpc-agent@0.4.4`；不写则取 `latest`。
+
+三件在 npm 路线上容易踩的事：
+
+1. **装进来的是拷贝，不是链接。** 装完之后改本地工作区的源码**不会**影响运行中的插件——那是本地目录路线的行为。要边改边试就改用下面那条路线。
+2. **刚发布的版本可能被 pnpm 的冷静期拦下。** 实测：0.4.4 发布当天用注册表 spec 装会失败（`minimumReleaseAge` 未满）。要么改用已过冷静期的版本，要么在 profile 的 `pnpm-workspace.yaml` 里显式放行，例如：
+   ```yaml
+   minimumReleaseAgeExclude:
+     - '@punchact/dsh-rpc-agent@0.1 || 0.4.4'
+   ```
+3. **想确认装的是哪一份**：用 `cordis_inspect_query`（`Config.listConfigs`，`input: {"entry":"include:dsh-rpc-bridge"}`）看返回的 `packageDir`——指向 `<profile>\node_modules\@punchact\dsh-rpc-agent` 就是 npm 路线，指向你的工作区就是链接路线。**版本号本身不能当证据**，它读的是包里那个 `package.json`；也可以比 `index.mjs` 的 inode 是否与工作区相同。
+
+版本历史见 [Releases](https://github.com/Punchact/dsh-rpc-agent/releases)；0.4.4 起每版由 OIDC 发布并带 SLSA provenance。
 
 **从本地目录装（改源码时用）**：
 
@@ -437,10 +455,10 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 
 ```powershell
 cd dsh-rpc-plugin
-node test/methods.test.mjs     # 40 个单元用例，无需 Harness
+node test/methods.test.mjs     # 41 个单元用例，无需 Harness
 node test/client.test.mjs      # 6 项客户端重试/报错用例，无需 Harness
 node test/status.test.mjs      # 6 项 /status 与路由挂载用例，无需 Harness
-node test/catalog.smoke.mjs    # 方法目录与三处包名一致性
+node test/catalog.smoke.mjs    # 方法目录与四处包名一致性
 npm ci && node test/host.test.mjs   # 1 项真宿主集成用例（真 WebServer，需装 devDependencies）
 node test/e2e.mjs --cwd .      # 14 项端到端检查，打真实 Harness
 node test/edge.mjs             # 24 项协议/边界对抗检查，打真实 Harness
@@ -485,5 +503,7 @@ node test/edge.mjs             # 24 项协议/边界对抗检查，打真实 Har
 | `-32004 … already has a bridge run waiting for its turn` | 同一会话已有 `ask`/`prompt` 在等轮次；换一个会话，或等它结束（`wait` 可并行观察） |
 | `3 · 连不上` | Harness 没在跑，或插件的行被禁用；`node bin/dsh-rpc.mjs health` 先探活 |
 | 改了源码但行为没变 | 宿主缓存了模块：`set_plugin` 关一次再开 |
+| 改了源码但行为没变（npm 装的） | npm 路线装的是拷贝，与你的工作区无关；要边改边试请改用第 6 节的本地目录安装 |
+| 安装时报冷静期/版本取不到 | 刚发布的版本可能还在 `minimumReleaseAge` 窗口内；钉一个已过窗口的版本，或按第 6 节在 profile 的 `pnpm-workspace.yaml` 放行 |
 | `Cannot read properties of undefined (reading 'throwIfAborted')` | 旧版本把 Host 的 `prompt/list` 用 `undefined` 调用；已修（Host 这些方法的 `signal` 是必需的） |
 | 插件行状态 `absent` | 正常：插件不导出 `Config` schema，`cordis_inspect_query` 里没有 config 契约 |

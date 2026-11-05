@@ -33,7 +33,27 @@ Or ask the Harness directly:
 plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent" })
 ```
 
-Add `--profile <name>` for a non-default profile (the desktop app is `desktop`).
+Add `--profile <name>` for a non-default profile (the desktop app is `desktop`). To pin a version, spell it out:
+`dsh plugin add @punchact/dsh-rpc-agent@0.4.4`; without one you get `latest`.
+
+Three things that bite on the npm route:
+
+1. **The install is a copy, not a link.** Editing your local clone afterwards does **not** change the running
+   plugin — that is the clone route's behaviour. Use the clone route while you iterate.
+2. **A fresh release may be held back by pnpm's release age.** Measured: installing 0.4.4 from a registry spec
+   on its release day failed because `minimumReleaseAge` had not elapsed. Either pin a version that has aged
+   past the window, or allow it explicitly in the profile's `pnpm-workspace.yaml`:
+   ```yaml
+   minimumReleaseAgeExclude:
+     - '@punchact/dsh-rpc-agent@0.1 || 0.4.4'
+   ```
+3. **To tell which copy is live**, ask `cordis_inspect_query` (`Config.listConfigs`,
+   `input: {"entry":"include:dsh-rpc-bridge"}`) for `packageDir`: `<profile>\node_modules\@punchact\dsh-rpc-agent`
+   means the npm route, your own checkout means the link route. The reported version is **not** evidence on its
+   own — it is read from whichever `package.json` is loaded.
+
+Release history: [Releases](https://github.com/Punchact/dsh-rpc-agent/releases). Since 0.4.4 every release is
+published over OIDC and carries SLSA provenance.
 
 **From a local clone (while you edit the source).**
 
@@ -59,9 +79,27 @@ Maintainers: see [docs/release.md](./docs/release.md).
 
 ### MCP (recommended)
 
+`bin/` means the **package's** own `bin/` directory. With the npm route (recommended, default desktop profile) it is:
+
 ```powershell
-claude mcp add dsh -- node "<path-to-your-clone>\bin\dsh-rpc-mcp.mjs"
+claude mcp add dsh -- node "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\bin\dsh-rpc-mcp.mjs"
 ```
+
+Cursor / Codex use the equivalent config file, with `args` set to that same path:
+
+```json
+{
+  "mcpServers": {
+    "dsh": {
+      "command": "node",
+      "args": ["C:\\Users\\<you>\\.dsh\\profiles\\desktop\\node_modules\\@punchact\\dsh-rpc-agent\\bin\\dsh-rpc-mcp.mjs"]
+    }
+  }
+}
+```
+
+On the clone route, substitute `<path-to-your-clone>\bin\dsh-rpc-mcp.mjs`. The CLI examples below are written as
+`node bin/...`, i.e. "run it from inside the package".
 
 Seven tools: `dsh_ask`, `dsh_workspaces`, `dsh_permissions`, `dsh_sessions`, `dsh_wait`, `dsh_cancel`, `dsh_status`. Arguments are snake_case (`prompt`, `session_id`, `cwd`, `workspace_id`, `agent_preset`, `model`, `reasoning_effort`, `permission`, `timeout_ms`). The MCP server shares no context with the Harness session — pass the returned `session_id` to continue one.
 
@@ -95,7 +133,7 @@ Invoke-RestMethod -Method Post -Uri $endpoint `
 ### JavaScript
 
 ```js
-import { rpcCall } from "./dsh-rpc-plugin/lib/client.mjs";
+import { rpcCall } from "@punchact/dsh-rpc-agent/http-client";
 
 const answer = await rpcCall("dsh.sessions.ask", { text: "summarize this repo", cwd: process.cwd() });
 console.log(answer.text, answer.usage);
@@ -194,10 +232,10 @@ The panel is read-only and disappears with the plugin. It asks a fixed path `/ds
 ## Verify
 
 ```powershell
-node test/methods.test.mjs     # 40 unit tests, no Harness needed
+node test/methods.test.mjs     # 41 unit tests, no Harness needed
 node test/client.test.mjs      # 6 client retry/error tests, no Harness needed
 node test/status.test.mjs      # 6 status/route-mounting tests, no Harness needed
-node test/catalog.smoke.mjs    # method catalogue + the three package names must agree
+node test/catalog.smoke.mjs    # method catalogue + the four package-name sites must agree
 npm ci && node test/host.test.mjs   # 1 real-Host integration test (real WebServer; needs devDependencies)
 node test/e2e.mjs --cwd .      # 14 end-to-end checks against a live Harness
 node test/edge.mjs             # 24 protocol/edge checks against a live Harness
