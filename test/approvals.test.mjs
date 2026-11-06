@@ -81,7 +81,11 @@ test("only a string sandbox_permissions counts as an escalation", () => {
   assert.equal(escalationOf({ sandbox_permissions: "danger-full-access" }), "danger-full-access");
   assert.equal(escalationOf({ sandbox_permissions: "  workspace-write  " }), "workspace-write");
   assert.equal(escalationOf({ sandbox_permissions: "" }), "");
-  assert.equal(escalationOf({ sandbox_permissions: 1 }), "", "a number is not a mode");
+  assert.equal(
+    escalationOf({ sandbox_permissions: 1 }),
+    "non-string:1",
+    "a non-string is carried as a refusal, never as a pass",
+  );
   assert.equal(escalationOf({}), "");
   assert.equal(escalationOf(undefined), "");
 });
@@ -104,11 +108,11 @@ test("an escalation from a bridge-owned session is refused before it becomes a p
   });
 
   const next = delegateTo({ kind: "allow" });
-  const decision = await gate(exec("session-owned", { sandbox_permissions: "danger-full-access" }), next);
+  const decision = await gate.pre(exec("session-owned", { sandbox_permissions: "danger-full-access" }), next);
 
   assert.equal(decision.kind, "deny");
   assert.match(decision.reason, /danger-full-access/);
-  assert.match(decision.reason, /has no human to answer an approval prompt/);
+  assert.match(decision.reason, /nobody is attached to this session to approve one/);
   assert.equal(decision.info.name, "DshRpcApprovalDenied");
   assert.equal(decision.info.code, "APPROVAL_DENIED_BY_BRIDGE");
   assert.equal(next.calls(), 0, "refusing the call means the tool body never runs");
@@ -126,7 +130,7 @@ test("an ordinary call from a bridge-owned session runs untouched", async () => 
     onDeny: () => assert.fail("nothing was escalated, so nothing may be counted"),
   });
   const next = delegateTo({ kind: "allow" });
-  assert.deepEqual(await gate(allow("session-owned"), next), { kind: "allow" });
+  assert.deepEqual(await gate.pre(allow("session-owned"), next), { kind: "allow" });
   assert.equal(next.calls(), 1);
 });
 
@@ -137,7 +141,7 @@ test("a session this bridge did not create keeps its own answerer", async () => 
     onDeny: () => assert.fail("must not count a denial it never made"),
   });
   const next = delegateTo({ kind: "allow" });
-  assert.deepEqual(await gate(exec("session-human", { sandbox_permissions: "danger-full-access" }), next), {
+  assert.deepEqual(await gate.pre(exec("session-human", { sandbox_permissions: "danger-full-access" }), next), {
     kind: "allow",
   });
   assert.equal(next.calls(), 1);
@@ -148,7 +152,7 @@ test("an unreadable call is delegated instead of guessed at", async () => {
   const next = delegateTo({ kind: "allow" });
   // No agent, no session id: ownership cannot be established, so the safe
   // direction is silence.
-  assert.deepEqual(await gate({ name: "bash", arguments: { sandbox_permissions: "danger-full-access" } }, next), {
+  assert.deepEqual(await gate.pre({ name: "bash", arguments: { sandbox_permissions: "danger-full-access" } }, next), {
     kind: "allow",
   });
   assert.equal(next.calls(), 1);
@@ -162,7 +166,7 @@ test("accounting cannot change the answer", async () => {
       throw new Error("counter exploded");
     },
   });
-  const decision = await gate(
+  const decision = await gate.pre(
     exec("session-owned", { sandbox_permissions: "danger-full-access" }),
     delegateTo({ kind: "allow" }),
   );

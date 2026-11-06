@@ -86,7 +86,7 @@ export function apply(ctx, input = {}) {
   // answerers inside the agent's own composition. Measured on a live session — a
   // listener on this context (and on the root context) was never called while the
   // GUI kept the dialog open. The pre-execute waterfall is global, so it can.
-  const escalateOrPass = createApprovalGate({
+  const gate = createApprovalGate({
     mode: config.approvals.mode,
     isOwned: isOwnedSession,
     onDeny: () => stats.recordApproval("denied"),
@@ -108,9 +108,13 @@ export function apply(ctx, input = {}) {
     store: approvals,
     log,
   });
-  if (escalateOrPass) {
+  if (gate) {
     if (typeof ctx.on === "function") {
-      ctx.on("tools/pre-execute", escalateOrPass, { prepend: true });
+      ctx.on("tools/pre-execute", gate.pre, { prepend: true });
+      // `allow-once` widens the preset only for the approved call, so the gate
+      // has to see that call finish. Its own safety timer restores the preset
+      // even when the tool never reports.
+      ctx.on("tools/post-execute", gate.post);
       log.info?.(
         `[dsh-rpc] approvals.mode=${config.approvals.mode}: ` +
           (config.approvals.mode === "delegate"

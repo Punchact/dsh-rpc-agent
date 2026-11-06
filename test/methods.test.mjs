@@ -845,7 +845,7 @@ test("a deployment without permissionPresets reports that instead of crashing", 
   );
 });
 
-test("a sandbox refusal is reported as a fact plus the one documented escalation", async () => {
+test("a sandbox refusal is reported as a fact, and the preset stays the caller's decision", async () => {
   const controller = fakeController({
     script: [
       { kind: "start", turn: 1 },
@@ -867,7 +867,12 @@ test("a sandbox refusal is reported as a fact plus the one documented escalation
   assert.equal(result.sandbox.denied, true);
   assert.equal(result.sandbox.marker, "[sandbox: file access denied under workspace-write mode]");
   assert.equal(result.sandbox.source, "tool");
-  assert.deepEqual(result.next.args, { session_id: "session-test", permission: "danger-full-access" });
+  // The bridge names the decision but does not make it: handing back a ready-made
+  // "retry with danger-full-access" call would let the blocked agent's own wording
+  // steer it. Only the session id travels; `permission` is the caller's to add.
+  assert.deepEqual(result.next.args, { session_id: "session-test" });
+  assert.match(result.next.reason, /caller's decision/);
+  assert.doesNotMatch(JSON.stringify(result.next), /danger-full-access/);
   assert.equal(result.next.tool, "dsh_ask");
   // The refusal is not an error: the turn ran and the tool error keeps its own flag.
   assert.equal(result.tools[0].isError, true);

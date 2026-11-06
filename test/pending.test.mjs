@@ -41,13 +41,14 @@ test("a pending request can be listed, answered, and is then gone", async () => 
   const store = createPendingStore({ deadlineMs: 5_000 });
   const { approvalId, packet, promise } = store.open({ sessionId: "s1", toolName: "bash" });
 
-  assert.equal(approvalId, "apv-1");
+  assert.match(approvalId, /^apv-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, "ids are unguessable, not a counter");
   assert.equal(packet.sessionId, "s1");
   assert.ok(packet.expiresAt > packet.createdAt);
   assert.equal(store.size(), 1);
   assert.deepEqual(
     store.list("s1").map((item) => item.approvalId),
-    ["apv-1"],
+    [approvalId],
+    "the listing reports the id the caller was given",
   );
   assert.deepEqual(store.list("other"), []);
 
@@ -99,8 +100,8 @@ test("the store keeps a bounded number of pending requests", async () => {
 
 test("delegate without a store or a preset applier degrades to deny", () => {
   const gate = createApprovalGate({ mode: "delegate", isOwned: () => true });
-  assert.equal(typeof gate, "function");
-  return Promise.resolve(gate(escalation(), () => Promise.resolve({ kind: "allow" }))).then((decision) => {
+  assert.equal(typeof gate.pre, "function");
+  return Promise.resolve(gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }))).then((decision) => {
     assert.equal(decision.kind, "deny");
   });
 });
@@ -121,7 +122,7 @@ test("an allowed escalation widens the preset and lets the call run", async () =
   });
 
   let passed = 0;
-  const pending = gate(escalation(), () => {
+  const pending = gate.pre(escalation(), () => {
     passed += 1;
     return Promise.resolve({ kind: "allow" });
   });
@@ -142,7 +143,7 @@ test("a rejected escalation never reaches the tool", async () => {
   const gate = createApprovalGate({ mode: "delegate", isOwned: () => true, store, applyPreset: async () => {} });
 
   let passed = 0;
-  const pending = gate(escalation(), () => {
+  const pending = gate.pre(escalation(), () => {
     passed += 1;
     return Promise.resolve({ kind: "allow" });
   });
@@ -158,7 +159,7 @@ test("a rejected escalation never reaches the tool", async () => {
 test("an expired escalation is refused with its own reason", async () => {
   const store = createPendingStore({ deadlineMs: 10 });
   const gate = createApprovalGate({ mode: "delegate", isOwned: () => true, store, applyPreset: async () => {} });
-  const decision = await gate(escalation(), () => Promise.resolve({ kind: "allow" }));
+  const decision = await gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }));
   assert.equal(decision.kind, "deny");
   assert.match(decision.reason, /did not answer within the deadline/);
 });
@@ -166,7 +167,7 @@ test("an expired escalation is refused with its own reason", async () => {
 test("an escalation outside the documented ladder is refused without asking", async () => {
   const store = createPendingStore({ deadlineMs: 5_000 });
   const gate = createApprovalGate({ mode: "delegate", isOwned: () => true, store, applyPreset: async () => {} });
-  const decision = await gate(escalation("root"), () => Promise.resolve({ kind: "allow" }));
+  const decision = await gate.pre(escalation("root"), () => Promise.resolve({ kind: "allow" }));
   assert.equal(decision.kind, "deny");
   assert.match(decision.reason, /Only workspace-write and danger-full-access may be requested/);
   assert.equal(store.size(), 0);
@@ -176,14 +177,18 @@ test("a session stops being asked after its allowance budget is spent", async ()
   const store = createPendingStore({ deadlineMs: 5_000 });
   const gate = createApprovalGate({ mode: "delegate", isOwned: () => true, store, applyPreset: async () => {} });
 
-  for (let i = 0; i < 3; i += 1) {
-    const pending = gate(escalation(), () => Promise.resolve({ kind: "allow" }));
+  const runOnce = async () => {
+    const pending = gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }));
     await tick();
     store.resolve(store.list()[0].approvalId, "allow-once");
     assert.deepEqual(await pending, { kind: "allow" });
-  }
+    // The call finishes: the gate puts the preset back and clears `widened`.
+    await gate.post(escalation(), () => Promise.resolve({ kind: "allow" }));
+  };
 
-  const fourth = await gate(escalation(), () => Promise.resolve({ kind: "allow" }));
+  for (let i = 0; i < 3; i += 1) await runOnce();
+
+  const fourth = await gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }));
   assert.equal(fourth.kind, "deny");
   assert.match(fourth.reason, /already used its 3 delegated escalations/);
   assert.equal(store.size(), 0);
@@ -192,7 +197,7 @@ test("a session stops being asked after its allowance budget is spent", async ()
 test("a session this bridge did not create keeps its own answerer", async () => {
   const store = createPendingStore({ deadlineMs: 5_000 });
   const gate = createApprovalGate({ mode: "delegate", isOwned: () => false, store, applyPreset: async () => {} });
-  const decision = await gate(escalation(), () => Promise.resolve({ kind: "allowed-once" }));
+  const decision = await gate.pre(escalation(), () => Promise.resolve({ kind: "allowed-once" }));
   assert.deepEqual(decision, { kind: "allowed-once" });
   assert.equal(store.size(), 0);
 });
@@ -268,7 +273,7 @@ test("the gate refuses as soon as the held call is cancelled", async () => {
     store,
     applyPreset: async () => "danger-full-access",
   });
-  const held = gate({ ...escalation(), signal: controller.signal }, () => Promise.resolve({ kind: "allow" }));
+  const held = gate.pre({ ...escalation(), signal: controller.signal }, () => Promise.resolve({ kind: "allow" }));
   await tick();
   assert.equal(store.size(), 1, "the call is being held while nobody has answered");
   controller.abort();
@@ -287,7 +292,7 @@ test("the decision packet carries the session's live preset", async () => {
     applyPreset: async () => "danger-full-access",
     currentPreset: () => "workspace-write",
   });
-  const held = gate(escalation(), () => Promise.resolve({ kind: "allow" }));
+  const held = gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }));
   await tick();
   const [packet] = store.list();
   assert.equal(packet.preset, "workspace-write", "a caller judging the request needs the current ceiling");
@@ -306,10 +311,131 @@ test("a preset reader that throws leaves the field null instead of failing the c
       throw new Error("no permissionPresets service");
     },
   });
-  const held = gate(escalation(), () => Promise.resolve({ kind: "allow" }));
+  const held = gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }));
   await tick();
   const [packet] = store.list();
   assert.equal(packet.preset, null);
   store.resolve(packet.approvalId, "reject");
   assert.equal((await held).kind, "deny");
+});
+
+// ------------------------------------------------- one call, not a session ----
+
+const harness = (overrides = {}) => {
+  const store = createPendingStore({ deadlineMs: 5_000 });
+  const widened = [];
+  const gate = createApprovalGate({
+    mode: "delegate",
+    isOwned: () => true,
+    store,
+    applyPreset: async (sessionId, name) => {
+      widened.push([sessionId, name]);
+    },
+    currentPreset: () => "workspace-write",
+    ...overrides,
+  });
+  return { store, widened, gate };
+};
+
+test("allow-once widens the session only while the approved call runs", async () => {
+  const { store, widened, gate } = harness();
+  const held = gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }));
+  await tick();
+  store.resolve(store.list()[0].approvalId, "allow-once");
+  assert.deepEqual(await held, { kind: "allow" });
+  assert.deepEqual(widened, [["session-mine", "danger-full-access"]]);
+  assert.deepEqual(gate.widenedSessions(), ["session-mine"]);
+
+  await gate.post(escalation(), () => Promise.resolve({ kind: "allow" }));
+  assert.deepEqual(widened, [
+    ["session-mine", "danger-full-access"],
+    ["session-mine", "workspace-write"],
+  ]);
+  assert.deepEqual(gate.widenedSessions(), [], "the session is back to its own preset");
+});
+
+test("a downstream refusal never leaves the session widened", async () => {
+  const { store, widened, gate } = harness();
+  const held = gate.pre(escalation(), () => Promise.resolve({ kind: "deny", reason: "blocked downstream" }));
+  await tick();
+  store.resolve(store.list()[0].approvalId, "allow-once");
+  assert.equal((await held).kind, "deny");
+  assert.deepEqual(widened, [
+    ["session-mine", "danger-full-access"],
+    ["session-mine", "workspace-write"],
+  ]);
+  assert.deepEqual(gate.widenedSessions(), []);
+});
+
+test("escalations racing in one tick spend one allowance and ask once", async () => {
+  const { store, gate } = harness();
+  const calls = Array.from({ length: 5 }, () =>
+    gate.pre(escalation(), () => Promise.resolve({ kind: "allow" })),
+  );
+  await tick();
+  assert.equal(store.size(), 1, "one question, not five");
+  const decisions = await Promise.all(
+    calls.map(async (call, index) => {
+      if (index === 0) {
+        store.resolve(store.list()[0].approvalId, "allow-once");
+      }
+      return call;
+    }),
+  );
+  const denied = decisions.filter((decision) => decision.kind === "deny");
+  assert.equal(denied.length, 4);
+  for (const decision of denied) assert.match(decision.reason, /Another escalated call is already running/);
+});
+
+test("a call that is already cancelled never becomes a question", async () => {
+  const { store, gate } = harness();
+  const controller = new AbortController();
+  controller.abort();
+  const decision = await gate.pre({ ...escalation(), signal: controller.signal }, () =>
+    Promise.resolve({ kind: "allow" }),
+  );
+  assert.equal(decision.kind, "deny");
+  assert.match(decision.reason, /cancelled/);
+  assert.equal(store.size(), 0);
+});
+
+test("the packet carries the whole call, not just one field", async () => {
+  const { store, gate } = harness();
+  const held = gate.pre(
+    exec("session-mine", {
+      path: "safe.txt",
+      content: "EXFIL --token=SUPERSECRET",
+      sandbox_permissions: "danger-full-access",
+      sandbox_justification: "need to write outside",
+    }),
+    () => new Promise(() => {}),
+  );
+  await tick();
+  const packet = store.list()[0];
+  assert.equal(packet.argv, "safe.txt");
+  assert.match(packet.args, /EXFIL/, "content is part of what the caller judges");
+  assert.doesNotMatch(packet.args, /SUPERSECRET/, "credential-shaped values are masked");
+  assert.equal(packet.untrusted, true);
+  store.resolve(packet.approvalId, "reject");
+  await held;
+  void gate;
+});
+
+test("waitMs is validated instead of quietly clamped", async () => {
+  const store = createPendingStore({ deadlineMs: 5_000 });
+  const methods = createMethods(
+    { sessionController: null, webServer: null, approvals: store },
+    resolveConfig({ approvals: { mode: "delegate" } }),
+    {},
+    {},
+  );
+  for (const bad of [1.5, -1, 200_000, "100"]) {
+    await assert.rejects(
+      () => methods.approvalsPending({ waitMs: bad }),
+      (error) => error.code === -32602 && /waitMs/.test(error.message),
+      `${JSON.stringify(bad)} is not a duration`,
+    );
+  }
+  const ok = await methods.approvalsPending({ waitMs: 0 });
+  assert.equal(ok.timedOut, true);
 });
