@@ -280,7 +280,7 @@ node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
 ```
 
 - `status` 一律来自该轮自己的 `turn/end` 原因，**不会**把被取消的轮次报成 `completed`。
-- `timeout` 表示等待超时，**不会**取消该轮——必要时再调 `dsh.sessions.cancel`。
+- `timeout` 表示等待超时，**不会**取消该轮——必要时再调 `dsh.sessions.cancel`。这类结果没有 `turn/end` 可引用，`reason` 于是由桥给出 `{kind:"timeout", message:"…it keeps running"}`，而不是留空。
 - `partial: true` 只出现在 `status:"unknown"` 时：事件流没等到 `turn/end` 就结束了，`text` 是半截，不要当完整回答用。
 - `cwd` 只在 `created:true` 时回填。
 - `sandbox.denied` **只认 Host 写进工具输出的固定标记**（`[sandbox: file access denied`），不从回答正文里猜同义词；工具输出取不到时，退而扫该轮正文。宁可漏报，不误报。

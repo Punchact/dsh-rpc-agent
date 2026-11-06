@@ -992,3 +992,13 @@ test("wait without since still replays the whole turn", async () => {
   assert.equal(result.text, "旧答案");
   assert.equal(result.since, undefined, "no since means no delta marker");
 });
+
+test("a timed-out wait still says why, instead of leaving reason null", async () => {
+  const controller = fakeController({ script: [{ kind: "start", turn: 1 }, { kind: "text", turn: 1, text: "还没完" }] });
+  const result = await build(controller).ask({ text: "slow", timeoutMs: 60 });
+
+  assert.equal(result.status, "timeout");
+  assert.equal(result.timedOut, true);
+  assert.equal(result.reason?.kind, "timeout");
+  assert.match(result.reason?.message ?? "", /keeps running/);
+});
