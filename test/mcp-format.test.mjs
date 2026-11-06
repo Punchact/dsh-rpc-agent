@@ -200,3 +200,40 @@ test("a failed call is an error and says what to do next", () => {
   const custom = formatToolError("boom", undefined, "call tools/list for the supported names");
   assert.match(textOf(custom), /next: call tools\/list/);
 });
+
+test("a handle names the session without inventing a turn number", () => {
+  const result = formatToolResult({
+    sessionId: "session-h",
+    turn: null,
+    status: "running",
+    accepted: true,
+    text: "",
+    requestId: "rpc-1",
+  });
+  const text = textOf(result);
+  assert.match(text, /^session session-h/);
+  assert.match(text, /outcome: running \(accepted, not waited\)/);
+  // A placeholder ("turn ?") looks like data and invites a caller to wait on it.
+  assert.doesNotMatch(text, /· turn/);
+});
+
+test("a completed turn does not repeat its own outcome as a reason", () => {
+  const done = formatToolResult({ sessionId: "s", turn: 1, status: "completed", text: "好", reason: { kind: "completed" } });
+  assert.doesNotMatch(textOf(done), /reason:/);
+
+  // Endings that need explaining still carry it.
+  const stopped = formatToolResult({ sessionId: "s", turn: 1, status: "aborted", text: "", reason: { kind: "aborted", reason: { kind: "user" } } });
+  assert.match(textOf(stopped), /reason: \{"kind":"aborted"/);
+});
+
+test("an error does not dump data the message already carries", () => {
+  const busy = formatToolError("session s is already running a turn", { sessionId: "s", next: { tool: "dsh_wait" } }, -32004);
+  const text = textOf(busy);
+  assert.doesNotMatch(text, /\{"sessionId"/);
+  assert.doesNotMatch(text, /"next":/);
+  assert.match(text, /next: the session is busy/);
+
+  // Anything the message does not say survives, labelled.
+  const invalid = formatToolError("bad value", { field: "mode", value: "nope" }, -32602);
+  assert.match(textOf(invalid), /data: \{"field":"mode","value":"nope"\}/);
+});
