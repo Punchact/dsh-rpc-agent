@@ -1273,3 +1273,13 @@ test("a budget below the slice is not reported as sliced", async () => {
     clearTimeout(keepAlive);
   }
 });
+
+test("discover publishes the running config, so clients stop copying defaults", async () => {
+  const controller = fakeController({ script: [] });
+  const methods = build(controller);
+  const info = await methods.discover();
+  assert.equal(info.plugin, "dsh-rpc-agent");
+  assert.ok(info.config, "discover must carry the config the MCP layer reads");
+  assert.equal(info.config.defaultTimeoutMs, 600_000);
+  assert.equal(info.config.maxWaitSliceMs, 240_000, "the slice ceiling is part of the contract");
+});

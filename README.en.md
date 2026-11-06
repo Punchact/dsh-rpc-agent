@@ -158,7 +158,7 @@ A single session eventually becomes a context burden, so after **200 `ask` calls
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `dsh.discover` | — | version, transport address, method catalog |
+| `dsh.discover` | — | version, running config (`defaultTimeoutMs`, `maxWaitSliceMs`), transport address, method catalog |
 | `dsh.ping` | — | `{ok, plugin, version, protocol, origin, tokenSource, activeRuns}` |
 | `dsh.models` | — | routable providers and models |
 | `dsh.workspaces.list` | — | `{total, items:[{id, title, path, status, sessions, …}]}`, `status` ∈ `ok` / `missing-dir` / `unknown` |
