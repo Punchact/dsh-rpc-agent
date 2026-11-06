@@ -22,6 +22,8 @@ dsh-rpc CLI ───────────────────┼──�
 
 **其他文档**：[变更记录](./CHANGELOG.md) · [安全策略](./SECURITY.md) · [发版手册](./docs/release.md) · [设计说明](./docs/design.md)
 
+**版本**：npm 上最新发布的是 [`0.7.6`](https://www.npmjs.com/package/@punchact/dsh-rpc-agent)（`npm view @punchact/dsh-rpc-agent version` 可查；注册表刚更新时 `npm view` 可能滞后一两分钟）。本文件描述的是**仓库当前代码**，两版之间的差异见 [CHANGELOG](./CHANGELOG.md) 顶部。
+
 ---
 
 ## 1. 四条接入路径
@@ -159,7 +161,7 @@ console.log(answer.text, answer.usage);
   "url": "http://127.0.0.1:3820/dsh-rpc",
   "origin": "http://127.0.0.1:3820",
   "path": "/dsh-rpc",
-  "version": "0.4.4",                        // 正在运行的那份插件自报的版本
+  "version": "0.7.6",                        // 正在运行的那份插件自报的版本
   "plugin": "dsh-rpc-agent",
   "pid": 12345,                              // 写这个文件的 Host 进程
   "startedAt": "2026-11-05T01:05:58.000Z",   // 该进程的启动时刻
@@ -444,19 +446,19 @@ dsh plugin add @punchact/dsh-rpc-agent
 plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent" })
 ```
 
-非默认 profile 加 `--profile <name>`（桌面端是 `desktop`）。要钉版本就写全：`dsh plugin add @punchact/dsh-rpc-agent@0.4.4`；不写则取 `latest`。
+非默认 profile 加 `--profile <name>`（桌面端是 `desktop`）。要钉版本就写全：`dsh plugin add @punchact/dsh-rpc-agent@0.7.6`；不写则取 `latest`。
 
 三件在 npm 路线上容易踩的事：
 
 1. **装进来的是拷贝，不是链接。** 装完之后改本地工作区的源码**不会**影响运行中的插件——那是本地目录路线的行为。要边改边试就改用下面那条路线。
-2. **刚发布的版本可能被 pnpm 的冷静期拦下。** 实测：0.4.4 发布当天用注册表 spec 装会失败（`minimumReleaseAge` 未满）。要么改用已过冷静期的版本，要么在 profile 的 `pnpm-workspace.yaml` 里显式放行，例如：
+2. **刚发布的版本可能被 pnpm 的冷静期拦下。** 实测：新版本发布当天用注册表 spec 装会失败（`minimumReleaseAge` 未满）。要么改用已过冷静期的版本，要么在 profile 的 `pnpm-workspace.yaml` 里显式放行——pnpm 有时会自己追加这一行，写法是：
    ```yaml
    minimumReleaseAgeExclude:
-     - '@punchact/dsh-rpc-agent@0.1 || 0.4.4'
+     - '@punchact/dsh-rpc-agent@0.4.1 || 0.4.4 || 0.5.3 || 0.7.6'
    ```
 3. **想确认装的是哪一份**：用 `cordis_inspect_query`（`Config.listConfigs`，`input: {"entry":"include:dsh-rpc-bridge"}`）看返回的 `packageDir`——指向 `<profile>\node_modules\@punchact\dsh-rpc-agent` 就是 npm 路线，指向你的工作区就是链接路线。**版本号本身不能当证据**，它读的是包里那个 `package.json`；也可以比 `index.mjs` 的 inode 是否与工作区相同。
 
-版本历史见 [Releases](https://github.com/Punchact/dsh-rpc-agent/releases)；0.4.4 起每版由 OIDC 发布并带 SLSA provenance。
+版本历史见 [Releases](https://github.com/Punchact/dsh-rpc-agent/releases)；**0.4.4 起每版都由 OIDC 发布并带 SLSA provenance**（`/-/npm/v1/attestations/@punchact%2Fdsh-rpc-agent@<版本>` 返回 200）。注意 `0.4.1` / `0.4.2` 已被撤回，注册表上取不到——它们是发布流程早期的失败版本。
 
 **从本地目录装（改源码时用）**：
 
@@ -579,24 +581,31 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 
 ```powershell
 cd dsh-rpc-plugin
-node test/methods.test.mjs     # 71 个单元用例，无需 Harness
-node test/mcp-format.test.mjs  # 18 项结果渲染用例（note/next/截断/去重），无需 Harness
-node test/wait.test.mjs        # 6 项分片等待用例（真 HTTP 桩），无需 Harness
-node test/abort.test.mjs       # 7 项中止链路用例（真 socket / 进程内登记表），无需 Harness
-node test/registry.test.mjs    # 8 项粘性会话表用例，无需 Harness
-node test/client.test.mjs      # 6 项客户端重试/报错用例，无需 Harness
-node test/status.test.mjs      # 6 项 /status 与路由挂载用例，无需 Harness
-node test/catalog.smoke.mjs    # 方法目录与四处包名一致性
-npm ci && node test/host.test.mjs   # 1 项真宿主集成用例（真 WebServer，需装 devDependencies）
-node test/e2e.mjs --cwd .      # 14 项端到端检查，打真实 Harness
-node test/edge.mjs             # 24 项协议/边界对抗检查，打真实 Harness
+npm test                       # 一次跑完下面十段（共 182 例），不需要 Harness、也不需要 npm install
+
+node test/methods.test.mjs      #  76 例：轮次归属、steer、超时、abort 原因、history、cancel、参数契约…
+node test/mcp-format.test.mjs   #  19 例：结果渲染（note / next / 截断 / 去重 / 待批）
+node test/registry.test.mjs     #   8 例：粘性会话表读写、损坏降级、轮换
+node test/pending.test.mjs      #  36 例：待批存储、长轮询、取消收回、额度预占、事务边界
+node test/approvals.test.mjs    #  11 例：配置校验、gate 的 deny/delegate 分支、所有权、白名单
+node test/approval-state.test.mjs # 8 例：台账跨重启、按字段合并、TTL、孤儿收回
+node test/wait.test.mjs         #   6 例：分片等待（真 HTTP 桩）
+node test/abort.test.mjs        #   7 例：中止链路（真 socket / 进程内登记表）
+node test/client.test.mjs       #   6 例：客户端重试与报错
+node test/status.test.mjs       #   6 例：/status 载荷与路由挂载契约
+node test/catalog.smoke.mjs     # 方法目录与四处包名一致性
+
+npm ci && node test/host.test.mjs    # 1 例：真宿主集成（真 WebServer，需 devDependencies）
+node test/e2e.mjs --cwd .            # 14 例：端到端，打真实 Harness
+node test/edge.mjs                   # 24 例：协议/边界对抗，打真实 Harness
 ```
 
-`npm test` 依次跑上面八段（都不需要 Harness，也不需要 `npm install`）；`npm run test:host` 跑真宿主集成那一项；`npm run test:e2e` / `npm run test:edge` 要活的 Harness。
+`npm test` 按固定顺序跑前十个套件（共 182 例，都不需要 Harness，也不需要 `npm install`）；`npm run test:host` 跑真宿主集成那一项；`npm run test:e2e` / `npm run test:edge` 要活的 Harness。**别用 `node --test`**：它会为每个文件 fork 子进程，在 DSH 沙箱里被 `spawn EPERM` 挡住。
 
-- **单元**用 `node:test` 与一个手写的 Host 假体（含 `follow` 流、事件总线、`user/message` 认领），覆盖轮次归属、steer、超时、abort 原因、history、cancel、并发拒绝与 `queue` 排队、创建期的参数契约（含拒绝调用方自带 `sessionId`）、cwd 归属、工作区/模型/权限下发、`limit` 校验、dispatcher 错误码。必须**直接 node 运行**——`node --test` 会为每个文件 fork 子进程，在 DSH 沙箱下被 `spawn EPERM` 挡住。上次实跑：71/71（2026-11-06）。
-- **结果渲染 / 分片等待 / 中止 / 粘性会话**各有独立套件：渲染套件钉住 `note:` 与 `next:` 的每一种结局、长正文截断与字段去重；等待套件用真 HTTP 桩验证"预算切成多片、片内不越界"；中止套件用真 socket 验证"调用方断开会让本次调用中止"，并钉住"被中止的调用不算错误"；注册表套件覆盖粘性会话表的读写、损坏降级与轮换。上次实跑：18/18、6/6、7/7、8/8（2026-11-06）。
+- **单元**用 `node:test` 与一个手写的 Host 假体（含 `follow` 流、事件总线、`user/message` 认领），覆盖轮次归属、steer、超时、abort 原因、history、cancel、并发拒绝与 `queue` 排队、创建期的参数契约（含拒绝调用方自带 `sessionId`）、cwd 归属、工作区/模型/权限下发、`limit` 校验、dispatcher 错误码。必须**直接 node 运行**——`node --test` 会为每个文件 fork 子进程，在 DSH 沙箱下被 `spawn EPERM` 挡住。上次实跑：76/76（2026-11-06）。
+- **结果渲染 / 分片等待 / 中止 / 粘性会话**各有独立套件：渲染套件钉住 `note:` 与 `next:` 的每一种结局、长正文截断与字段去重；等待套件用真 HTTP 桩验证"预算切成多片、片内不越界"；中止套件用真 socket 验证"调用方断开会让本次调用中止"，并钉住"被中止的调用不算错误"；注册表套件覆盖粘性会话表的读写、损坏降级与轮换。上次实跑：19/19、6/6、7/7、8/8（2026-11-06）。
 - **客户端**用临时 `$DSH_HOME` 与本地假服务，验证重试与报错策略：端点重发后重试一次且只投递一次、`ECONNRESET` 绝不重放、显式 `--url` 不重试、重试后的失败不被改写成"没人监听"、端点未变时报错含 `pid` 与下一步建议；另有一例直接对 `lib/transport.mjs` 钉住「从 undici 的 cause 链里取真实 errno」在各平台的形状（Linux 上 `UND_ERR_SOCKET` 会归一成 `ECONNRESET`）。上次实跑：6/6（2026-11-06）。
+- **审批闸门与台账**各有独立套件：`approvals` 钉住配置校验与 gate 的 `deny`/`delegate` 分支（含“读不出会话归属就绝不认领”）、`pending` 钉住待批存储与事务边界（下游抛错要还回预设、同 tick 并发只问一次、取消要收回请求）、`approval-state` 钉住台账跨重启与按字段合并。它们与变异验证一起构成审批链路的守门。上次实跑：11/11、36/36、8/8（2026-11-06）。
 - **状态页**用假 `webServer` 与假 `res` 钉住三件事：`/status` 的载荷只有聚合数据（断言 token、`sessionId`、prompt 正文都不出现）、非 loopback 一律 403 且非 GET/HEAD 得 405、以及**路由挂载契约**（同一次进程内第二代能接管上一代的路由而不撞 `duplicate exact route`；挂载中途失败会整段回滚；只有当前属主能真正卸载）。上次实跑：6/6（2026-11-06）。
 - **真宿主集成**不用假 `webServer`：`new Context()` + `ctx.plugin(WebServer, {host:'127.0.0.1', port: 0})` 起真监听，再 `apply()`，然后真发 HTTP 断言 `/health` 200、无 token 的 RPC 401、`/status` 的 `origin` 与真实监听一致、前缀内未注册路径 404，**最后跑插件自己的 disposer 并断言 `/health` 与 `/status` 都变 404**。这是唯一能抓住"上一代路由残留导致重载失败"这一真实事故的测试。上次实跑：1/1（2026-11-06）。
 - **端到端**走的是与外部 agent 完全相同的 `lib/client.mjs`，因此跑绿即证明 plugin → Host `sessionController` → HTTP → JSON-RPC → 调用方 整条链路成立。上次实跑：14/14（2026-11-05）。
@@ -618,7 +627,8 @@ node test/edge.mjs             # 24 项协议/边界对抗检查，打真实 Har
 - **工作区只增不删**：桥只暴露 `workspaces.list` / `workspaces.create`；删除与改名请用 GUI，避免外部 agent 误删你侧栏里的条目。
 - **只转发 Host 允许的会话**：`sessions.list` 与 `history` 经过 Host 的 `remoteAccess` 过滤，看到的就是本进程有权看到的会话。
 - **正文截断**：单轮保留的事件有上限（4000 条），超长会话的 `text` 仍完整（来自 `assistant/message`），但 `tools` 列表可能被截断。
-- **token 泄漏面**：token 落盘在 `%USERPROFILE%\.dsh\dsh-rpc\token`，与 DSH 其它凭据同级；共享机器上注意 ACL。
+- **token 泄漏面**：token 落盘在 `%USERPROFILE%\.dsh\dsh-rpc\token`，与 DSH 其它凭据同级；共享机器上注意 ACL。**本桥创建的子会话读得到它**：子代理与调用方是同一个系统用户，`workspace-write` 沙箱也允许读用户目录（2026-11-06 实测：子会话读到 token 后能直接 `POST /dsh-rpc` 调 `dsh.ping`）。所以 `approvals.delegate` 的批准权防的是**误操作与提示注入**，不防“同机同用户的进程自己想升权”。
+- **审批闸门只拦一条路**：`approvals.mode` 的 `deny` / `delegate` 拦的是**工具参数里的 `sandbox_permissions`**。通过 `dsh.sessions.configure` 直接改会话预设、或新建会话时指定 `permissionPreset`，走的是另一条路——`approvals.mode` 不是 `off` 时前者被禁止、也不再允许把会话改成 `danger-full-access`，但**新建**会话时由调用方自己选的预设不受闸门约束（那是派发方的决定，不是子代理的）。
 - **未声明 `Config` schema**：插件用手写校验读 row 的 `config`，而不是导出 `Config`（保持零依赖，避免在 profile 里依赖 schemastery 的 peer 解析）。代价是 `cordis_inspect_query` 里这行显示 `status: absent`，也没有可视化表单；配置项与默认值见第 5 节。
 
 ---
