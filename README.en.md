@@ -178,9 +178,11 @@ A **turn result** carries `sessionId`, `turn`, `status` (`completed` / `aborted`
 
 `status` always comes from that turn's own `turn/end` reason. `partial: true` means the event stream ended before `turn/end`, so `text` is a fragment. A `timeout` does **not** cancel the turn; since there is no `turn/end` to quote, the bridge fills `reason` with `{kind:"timeout", message:"… it keeps running"}` rather than leaving it null.
 
-**Not waiting** — `ask` with `wait:false` returns a handle instead of a turn result: `{sessionId, requestId, status:"running", turn:null, text:"", accepted:true, queued:true, cursor}`. The turn keeps running in the Harness and `dsh_wait` collects it. Use it when your own tool timeout is shorter than the work. The handle deliberately does **not** occupy the bridge's turn slot, so there is a millisecond-wide window before `dsh_wait` takes over; a second `ask` in that window is refused with `-32004` rather than silently queued.
+**Not waiting** — `ask` with `wait:false` returns a handle instead of a turn result: `{sessionId, requestId, mode, status:"running", turn:null, text:"", accepted:true}`. The turn keeps running in the Harness and `dsh_wait` collects it. Use it when your own tool timeout is shorter than the work. The handle deliberately does **not** occupy the bridge's turn slot, so there is a millisecond-wide window before `dsh_wait` takes over; a second `ask` in that window is refused with `-32004` rather than silently queued.
 
-**Deltas** — `wait` accepts `since`: with it, only events after that sequence are returned (so `text` is just that slice), while `status`, `turn` and `tools` still describe the whole turn and `cursor` still advances. Poll with `since: <last cursor>`; never re-send the prompt.
+**Mutually exclusive** — `queue: true` asks to wait for the turn slot, `wait: false` never waits; combining them is refused with `-32602` instead of silently dropping one.
+
+**Deltas** — `wait` accepts `since`: with it, only events after that sequence are returned (so `text` is just that slice), while `status`, `turn`, `tools`, `usage` and `sandbox` still describe the whole turn — the delta narrows the prose only — and `cursor` still advances. Poll with `since: <last cursor>`; never re-send the prompt.
 
 **How MCP renders this** — a tool result is an error **only when the call itself failed** (with a code and a `next:` hint). The turn's `status` goes into an `outcome:` line, and `timeout` / `partial` / `accepted` add:
 

@@ -15,10 +15,10 @@
 ### 新增
 
 - `dsh_ask`（及 `dsh.sessions.ask`）新增 `wait`，默认 `true`。`wait:false` 立刻返回句柄
-  `{sessionId, requestId, status:"running", accepted:true, queued:true, cursor}`，任务在 DSH 里继续跑，
+  `{sessionId, requestId, mode, status:"running", turn:null, text:"", accepted:true}`，任务在 DSH 里继续跑，
   用 `dsh_wait` 收结果——给"调用方自己的工具超时短于这轮任务"的场景用。
 - `dsh_wait`（及 `dsh.sessions.wait`）新增 `since` 游标：只返回该序号之后的事件（`text` 随之只含这段），
-  `status`/`turn`/`tools` 仍描述整轮，`cursor` 照常前进。轮询进度用它，不要重投。
+  `status`/`turn`/`tools`/`usage`/`sandbox` 仍描述整轮（增量只收窄正文），`cursor` 照常前进。轮询进度用它，不要重投。
 
 ### 修复
 
@@ -30,6 +30,7 @@
 - 失败的调用也带 `next:`：按 JSON-RPC 码给出下一步（`-32003` 查会话、`-32004` 跟随或排队、
   `-32005` 放弃等槽、`-32006` 取消）。
 - `wait` 在"没有可等的轮次、直接返回上一轮"这条路径上补上了 `since` 收窄（原先只有等待路径支持）。
+- `queue: true` 与 `wait: false` 相矛盾时直接返回 `-32602`，不再悄悄忽略其中一个。
 - `timeout` 结果不再留空的 `reason`：等待超时时那一轮没有 `turn/end` 可引用，现在由桥填
   `{kind:"timeout", message:"… it keeps running"}`，调用方不必再从"没有原因"里猜发生了什么。
 

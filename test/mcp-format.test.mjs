@@ -69,7 +69,6 @@ test("an accepted non-blocking ask hands back a handle and a next step", () => {
     status: "running",
     text: "",
     accepted: true,
-    queued: true,
   });
   assert.equal(result.isError, false);
   const text = textOf(result);
@@ -91,8 +90,10 @@ test("a failed call is an error and says what to do next", () => {
   const busy = formatToolError("session s is already running a turn", { sessionId: "s" }, -32004);
   assert.equal(busy.isError, true);
   assert.match(textOf(busy), /already running a turn/);
-  assert.match(textOf(busy), /next: call dsh_wait\(\{ session_id \}\)/);
+  assert.match(textOf(busy), /next: the session is busy .*dsh_wait\(\{ session_id \}\)/);
 
+  const badArgs = formatToolError("`queue` has no meaning with `wait: false`", undefined, -32602);
+  assert.match(textOf(badArgs), /next: fix the arguments/);
   const unknown = formatToolError("boom", undefined, -32099);
   assert.match(textOf(unknown), /next: retry once/);
 

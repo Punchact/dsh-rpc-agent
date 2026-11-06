@@ -950,6 +950,16 @@ test("ask with wait:false hands back a handle instead of waiting for the turn", 
   assert.equal(controller.prompts.length, 1, "the prompt must still be submitted");
 });
 
+test("queue and wait:false are refused together instead of silently ignoring one", async () => {
+  const controller = fakeController({ script: happyScript });
+
+  await assert.rejects(
+    () => build(controller).ask({ text: "x", wait: false, queue: true }),
+    (error) => error.code === -32602 && /queue.*wait: false/.test(error.message),
+  );
+  assert.equal(controller.prompts.length, 0, "a contradictory request must not reach the Host");
+});
+
 test("a non-blocking ask refuses to stack onto a turn that is already running", async () => {
   const controller = fakeController({ script: happyScript });
   controller.list = async (_request, signal) => {
@@ -983,6 +993,39 @@ test("wait with since returns only what happened after that cursor", async () =>
   assert.equal(result.turn, 1);
   assert.equal(result.text, "", "the text before the cursor must not be replayed");
   assert.ok(result.cursor >= 3, `cursor must still advance (got ${result.cursor})`);
+});
+
+const historicalTurnWithTool = [
+  { type: "turn/start", seq: 1, time: 1, data: { turn: 1 } },
+  { type: "tool/call", seq: 2, time: 2, data: { turn: 1, step: 1, callId: "c1", name: "bash", arguments: { command: "ls" } } },
+  {
+    type: "tool/result",
+    seq: 3,
+    time: 3,
+    data: { turn: 1, step: 1, callId: "c1", message: { toolCallId: "c1", content: [{ type: "text", text: "a.txt" }] } },
+  },
+  {
+    type: "assistant/message",
+    seq: 4,
+    time: 4,
+    data: { turn: 1, step: 2, message: { content: [{ type: "text", text: "旧答案" }] } },
+  },
+  { type: "turn/end", seq: 5, time: 5, data: { turn: 1, reason: { kind: "completed" } } },
+];
+
+/**
+ * A delta is about the prose. Reporting an empty tool list next to a delta
+ * would let a polling caller conclude the turn did nothing, when in fact it
+ * ran commands before the cursor.
+ */
+test("a delta answer still reports the whole turn's tool calls", async () => {
+  const controller = fakeController({ historical: historicalTurnWithTool });
+  const result = await build(controller).wait({ sessionId: "session-test", since: 4 });
+
+  assert.equal(result.text, "", "earlier text must not be replayed");
+  assert.equal(result.tools.length, 1, "a delta must not hide the tool call it excluded");
+  assert.equal(result.tools[0].name, "bash");
+  assert.equal(result.tools[0].output, "a.txt");
 });
 
 test("wait without since still replays the whole turn", async () => {

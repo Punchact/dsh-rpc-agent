@@ -272,7 +272,7 @@ node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
   "turn": null,                   // 句柄里不带轮次号，用 wait 收的时候才知道
   "text": "",
   "accepted": true,
-  "queued": true,
+  "mode": "queue",                // 这一句是以 queue 还是 steer 投递的
   "created": false,
   "cwd": "…",
   "permissionPreset": "read-only"           // 若本次应用过预设
@@ -286,7 +286,8 @@ node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
 - `sandbox.denied` **只认 Host 写进工具输出的固定标记**（`[sandbox: file access denied`），不从回答正文里猜同义词；工具输出取不到时，退而扫该轮正文。宁可漏报，不误报。
 - `sandbox` 与 `next` 都不是错误：`status` 与工具错误的判定不受影响，这一轮确实跑完了，只是一步动作被挡住。拿到 `next` 就照它再问一次，**不要**用同一档重试，也不要为此新开会话。
 - `wait:false` 是给"自己的工具超时比这轮任务短"的调用方用的：它立刻返回句柄（上面第二个示例），任务在 DSH 里继续跑，结果靠 `dsh_wait` 收。**句柄不占轮次槽位**，也不登记为本插件正在等待的运行；因此在它跑起来到 `dsh_wait` 接手之间有一个毫秒级的窗口，同一会话此时再来一次 `ask` 会被 `-32004` 挡住而不是悄悄排队。
-- `since` 让 `wait` 只回增量：不传就是整轮（默认），传了就只返回 `seq > since` 的事件，`text` 随之只含这段；`status`/`turn`/`tools` 仍然描述整轮，`cursor` 照常前进。轮询进度用 `since: <上次的 cursor>`，不要重投。
+- `queue: true` 与 `wait: false` 是互斥的两个要求：前者要"等轮次空出来"，后者根本不等待。同时给会返回 `-32602`，而不是悄悄忽略其中一个。
+- `since` 让 `wait` 只回增量：不传就是整轮（默认），传了就只返回 `seq > since` 的事件，`text` 随之只含这段；`status`/`turn`/`tools`/`usage`/`sandbox` 仍然描述整轮（增量只收窄正文与事件），`cursor` 照常前进。轮询进度用 `since: <上次的 cursor>`，不要重投。
 
 **MCP 层怎么渲染**（`bin/dsh-rpc-mcp.mjs`）：工具结果**只在调用本身失败时**才是错误（错误码 + `next:` 提示）。轮次的 `status` 一律写进正文的 `outcome:` 行，`timeout`/`partial`/`accepted` 再追加一行
 
