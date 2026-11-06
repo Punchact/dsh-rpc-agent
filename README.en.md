@@ -1,23 +1,46 @@
 # dsh-rpc-agent
 
-[中文](./README.md) · unofficial
+> Turn the DeepSeek Harness on this machine into a callable RPC / MCP service: Claude Code, Cursor, Codex, Trae, or your own script can hand a task to DSH and get the answer back.
 
-> The repository and the package are both named `dsh-rpc-agent`. The CLI names (`dsh-rpc`, `dsh-rpc-mcp`), the
-> endpoint path (`/dsh-rpc`), the state directory (`~/.dsh/dsh-rpc`) and the `DSH_RPC_*` variables never change —
-> they are the runtime contract, and renaming them would break every installed configuration and paired token.
+[![npm version](https://img.shields.io/npm/v/@punchact/dsh-rpc-agent)](https://www.npmjs.com/package/@punchact/dsh-rpc-agent)
+[![npm downloads](https://img.shields.io/npm/dm/@punchact/dsh-rpc-agent)](https://www.npmjs.com/package/@punchact/dsh-rpc-agent)
+[![install size](https://packagephobia.com/badge?p=@punchact/dsh-rpc-agent)](https://packagephobia.com/result?p=@punchact/dsh-rpc-agent)
+[![node](https://img.shields.io/node/v/@punchact/dsh-rpc-agent)](https://nodejs.org/)
+[![license](https://img.shields.io/npm/l/@punchact/dsh-rpc-agent)](./LICENSE)
 
-Turns DeepSeek Harness into an **RPC service** any local agent can call: Claude Code, Codex CLI, Cursor, Trae, or
-your own script hands DSH a task and gets its final answer back.
+[中文](./README.md) · [Design notes](./docs/design.md) · [Changelog](./CHANGELOG.md) · [Release guide](./docs/release.md) · [Security policy](./SECURITY.md)
 
-> **This project is not affiliated with DeepSeek.** It is a third-party plugin maintained independently, neither
-> endorsed nor supported by DeepSeek. Read §7 before you use it: holding this plugin's token is holding permission
-> to drive DSH on this machine.
+> [!IMPORTANT]
+> **Not affiliated with DeepSeek.** This is a third-party plugin, maintained independently by the community; DeepSeek does not endorse it.
+>
+> **Holding the token is holding the right to make DSH act on this machine.** Read [Security model](#security-model) before you install.
+
+## 60-second start
+
+```powershell
+# 1. Install into the DSH profile (the desktop profile is called "desktop")
+dsh plugin add @punchact/dsh-rpc-agent
+
+# 2. Check that it is running. The port can change on every launch; this prints the current address
+node "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\bin\dsh-rpc.mjs" ping
+
+# 3. Register the MCP entry with your agent (Claude Code here; Cursor/Codex below)
+claude mcp add dsh -- node "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\bin\dsh-rpc-mcp.mjs"
+```
+
+Then tell your agent "use `dsh_ask` to ask DSH: reply with exactly two words: received", or use the CLI directly:
+
+```powershell
+# the dsh-rpc.mjs path from the step above, kept in a variable to save typing
+$cli = "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\bin\dsh-rpc.mjs"
+node $cli ask "reply with exactly two words: received" --cwd . --json
+```
+
+`ask` is **non-blocking** by default: it returns a handle immediately. Read the result with `dsh_wait` / `wait --session …`. That is deliberate — a caller's tool call usually has a hard 300-second ceiling, so long work has to be "take the order now, deliver later".
 
 ## What it is
 
-DSH is not a model here — it is a **complete agent**, with its own tools, skills, MCP servers, sandbox and session
-context. The plugin does one thin thing: turn one sentence arriving over HTTP or MCP into one Host prompt, and hand
-the result back.
+DSH is not a model here, it is a **whole agent** — with its own tools, skills, MCP servers, sandbox and session context. This plugin does one thin thing: it turns a sentence arriving over HTTP or MCP into one Host prompt, and turns the result back.
 
 ```
 client (Claude Code / Cursor / Codex / CLI / your script)
@@ -27,53 +50,93 @@ client (Claude Code / Cursor / Codex / CLI / your script)
 http://127.0.0.1:<port>/dsh-rpc   ->   DSH agent
 ```
 
-The port is **not fixed**: DSH gets one from the OS at each start, so it changes after a restart. `node bin/dsh-rpc.mjs
-ping` prints the current `origin`; the plugin also writes it to `endpoint.json`, which clients re-read on every call
-(see §8).
+The port is **not fixed**: DSH gets one from the OS on every launch, and it changes after a restart. The `origin` printed by `ping` is the current address; the plugin also writes it to `endpoint.json`, which clients re-read on every call (see [Ports and connection stability](#ports-and-connection-stability)).
 
-## Contents
+**What it is not:**
 
-1. [Four ways in](#1-four-ways-in)
-2. [Endpoint and credentials](#2-endpoint-and-credentials)
-3. [Methods](#3-methods)
-4. [Error codes](#4-error-codes)
-5. [Configuration](#5-configuration)
-6. [Install and update](#6-install-and-update)
-7. [Security model](#7-security-model)
-8. [Ports and connection stability](#8-ports-and-connection-stability)
-9. [Following a CLI task in the GUI](#9-following-a-cli-task-in-the-gui)
-10. [Status panel in Settings](#10-status-panel-in-settings)
-11. [Verification](#11-verification)
-12. [Known edges](#12-known-edges)
-13. [Troubleshooting](#13-troubleshooting)
+| You might want it for | A better fit |
+| --- | --- |
+| Asking one question and reading the answer | Just ask in the DSH GUI; no need for a hop |
+| Scheduled, background, alerting jobs | DSH's own scheduling, not this plugin's job |
+| Driving this DSH from another machine | This plugin is built for loopback; `allowRemote` only relaxes the allow-list, it adds no authentication |
 
-Other documents: [CHANGELOG](./CHANGELOG.md) · [SECURITY](./SECURITY.md) · [release handbook](./docs/release.md) ·
-[design notes](./docs/design.md)
+Repository and package name are both `dsh-rpc-agent`; the commands (`dsh-rpc`, `dsh-rpc-mcp`), the endpoint path (`/dsh-rpc`), the state directory (`~/.dsh/dsh-rpc`) and the `DSH_RPC_*` environment variables are runtime contract — renaming them breaks installed configs and paired tokens together.
 
-**Version**: the latest published build is [`0.7.7`](https://www.npmjs.com/package/@punchact/dsh-rpc-agent). This
-file describes **the code in the repository**; differences between the two are at the top of the CHANGELOG.
+## Highlights
 
----
+- **Zero runtime dependencies**: one package added to the profile, no peer-resolution or version conflicts.
+- **Real sessions**: it goes through the Host's `sessionController`, so the same turn shows up in the GUI sidebar, can be taken over there, and carries its own log and usage.
+- **Long work is never mistaken for failure**: non-blocking handles, `wait` deltas, and explicit `outcome:` / `note:` / `next:` lines that do not trigger a caller's retry policy.
+- **Nothing lost across restarts**: the sticky-session table, the escalation ledger, and any "widening not yet returned" debt are all on disk.
+- **Unattended sessions cannot hang forever**: three `approvals.mode` settings; `delegate` hands the escalation decision to the caller.
+- **A caller that hangs up stops the call, not your work**: abort ≠ cancel; the turn keeps running in the GUI.
+- **The port follows the launcher**: `endpoint.json` plus `health --wait`, so no client hard-codes an address.
+- **Every promise is guarded by a test**: 182 unit cases, mutation checks, and a real-host integration test.
 
-## 1. Four ways in
+## Install and update
+
+**From npm (recommended).** This package is a standard DSH bundle; installing from the registry and from a local directory go through the same pnpm path:
+
+```bash
+dsh plugin add @punchact/dsh-rpc-agent
+```
+
+Or say it inside DSH:
+
+```js
+plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent" })
+```
+
+For a non-default profile add `--profile <name>`; pin a version by writing `@punchact/dsh-rpc-agent@0.7.7` (omitting it means `latest`). The latest on npm is [`0.7.7`](https://www.npmjs.com/package/@punchact/dsh-rpc-agent); this file describes **the code in the repository**, and differences are listed at the top of the [CHANGELOG](./CHANGELOG.md).
+
+Three things that bite on the npm route:
+
+1. **What gets installed is a copy, not a link.** Editing your local checkout afterwards does **not** affect the running plugin. To iterate, use the local-directory route below.
+2. **A fresh release can be held back by pnpm's cooling-off window.** Installing a registry spec on release day fails (`minimumReleaseAge` not satisfied). Either pin a version past the window, or allow it explicitly in the profile's `pnpm-workspace.yaml` — pnpm sometimes appends that line itself:
+
+   ```yaml
+   minimumReleaseAgeExclude:
+     - '@punchact/dsh-rpc-agent@0.4.1 || 0.4.4 || 0.5.3 || 0.7.6 || 0.7.7'
+   ```
+
+3. **To confirm which copy is installed**: use `cordis_inspect_query` (`Config.listConfigs`, `input: {"entry":"include:dsh-rpc-bridge"}`) and look at `packageDir` — pointing at `<profile>\node_modules\@punchact\dsh-rpc-agent` means the npm route, pointing at your checkout means the link route. **The version number is not evidence**; it is read from the `package.json` inside the package.
+
+Version history is in [Releases](https://github.com/Punchact/dsh-rpc-agent/releases); **since 0.4.4 every release is published over OIDC and carries SLSA provenance** (`/-/npm/v1/attestations/@punchact%2Fdsh-rpc-agent@<version>` returns 200). `0.4.1` and `0.4.2` were unpublished and cannot be fetched.
+
+**From a local directory (when you are editing the source)**:
+
+```js
+plugin_manager({ action: "install_bundle", target: "<absolute-path-to-your-clone>" })
+```
+
+- This install is a **link to that directory**; edits need no reinstall.
+- But the host does not re-`import` on file changes. To pick up new `lib/*.mjs`, toggle the plugin row off and on:
+
+```js
+plugin_manager({ action: "set_plugin", target: "include:dsh-rpc-bridge", enabled: false })
+plugin_manager({ action: "set_plugin", target: "include:dsh-rpc-bridge", enabled: true  })
+```
+
+`bin/` and `test/` are separate processes and need no reload. The release flow lives in [docs/release.md](./docs/release.md).
+
+## Four ways in
 
 | Way | Good for | Entry point |
 | --- | --- | --- |
-| MCP tools | Claude Code, Cursor, Codex and other MCP clients | `bin/dsh-rpc-mcp.mjs` |
-| CLI | Trying things by hand, shell substitution | `bin/dsh-rpc.mjs` |
-| HTTP JSON-RPC | Any process, any language | `POST /dsh-rpc` |
-| JS client | Node-side integration | `@punchact/dsh-rpc-agent/http-client` |
+| MCP tools | Claude Code, Cursor, Codex and other MCP-capable agents | `bin/dsh-rpc-mcp.mjs` |
+| CLI | Trying things in a terminal, taking values in scripts | `bin/dsh-rpc.mjs` |
+| HTTP JSON-RPC | A process in any language | `POST /dsh-rpc` |
+| JS client library | Node-side integration | `@punchact/dsh-rpc-agent/http-client` |
 
-### 1.1 MCP (recommended)
+### MCP (recommended)
 
-`bin/` means **the package's** `bin/` directory. Installed from npm (the recommended route, §6) it lives under
-`%USERPROFILE%\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\`.
+`bin/` means the **in-package** `bin/` directory. With an npm install it lives under `%USERPROFILE%\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\`.
 
 ```powershell
 claude mcp add dsh -- node "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\bin\dsh-rpc-mcp.mjs"
 ```
 
-Cursor / Codex use the equivalent config-file form (remember JSON escaping on Windows):
+Cursor / Codex use the equivalent config form (backslashes in JSON must be escaped on Windows):
 
 ```json
 {
@@ -86,203 +149,167 @@ Cursor / Codex use the equivalent config-file form (remember JSON escaping on Wi
 }
 ```
 
-Installing from a local clone instead? Swap the path for `<path-to-your-clone>\bin\dsh-rpc-mcp.mjs`. Everywhere
-else this document writes `node bin/...`, meaning "run it with the current directory inside the package".
+On the local-checkout route, replace the path with `<path-to-your-clone>\bin\dsh-rpc-mcp.mjs`. The rest of this document writes `node bin/...`, which means "run from inside the package".
 
-It exposes **9 tools**:
+**Nine tools** are exposed:
 
 | Tool | Purpose |
 | --- | --- |
-| `dsh_ask` | Ask one question or hand over one task; returns a handle unless you ask it to wait |
-| `dsh_wait` | Wait for that session's turn and collect the result |
-| `dsh_cancel` | Abort the turn that is running |
+| `dsh_ask` | Ask a question or hand over a task; non-blocking by default, returns a handle |
+| `dsh_wait` | Wait for this session's current turn and collect the result |
+| `dsh_cancel` | Cancel the turn that is running |
 | `dsh_sessions` | List sessions (filter by directory, sort by time) |
 | `dsh_workspaces` | List workspaces, or register a new one |
 | `dsh_permissions` | List permission presets (sandbox mode + approval policy) |
 | `dsh_status` | Confirm the endpoint and token are readable |
-| `dsh_approvals_pending` | List escalation requests waiting for your decision |
+| `dsh_approvals_pending` | List escalation requests waiting for your answer |
 | `dsh_approvals_resolve` | Answer one escalation request |
 
-Arguments are snake_case (the MCP convention), unlike the HTTP layer. The common `dsh_ask` arguments:
+Parameters are snake_case (the MCP convention), unlike the HTTP layer. Common `dsh_ask` parameters:
 
-| Argument | Meaning |
+| Parameter | Meaning |
 | --- | --- |
-| `prompt` (**required**) | The sentence handed to DSH; it must stand on its own |
-| `project?` | Sticky-session key (1.1.1) |
+| `prompt` (**required**) | The sentence to hand to DSH; it must be self-contained |
+| `project?` | Key for sticky sessions (see below) |
 | `session_id?` | Reuse an existing session |
-| `wait?` | **Defaults to `false`**: a handle comes back at once; `true` blocks for the turn |
-| `mode?` | `turn` (default) / `steer` / `queue` — see §3 |
-| `cwd?` / `workspace_id?` / `agent_preset?` | Create-time only; the first two are mutually exclusive |
-| `model?` / `reasoning_effort?` / `permission?` | Session-level settings; also valid when reusing |
+| `wait?` | **Default `false`**: return a handle at once; `true` blocks until the turn ends |
+| `mode?` | `turn` (default) / `steer` / `queue` |
+| `cwd?` / `workspace_id?` / `agent_preset?` | Only meaningful when creating a session; the first two are mutually exclusive |
+| `model?` / `reasoning_effort?` / `permission?` | Session-level settings, also changeable when reusing a session |
 | `timeout_ms?` | Wait budget for this turn |
 
-The first line of a `dsh_ask` result is always `session <id>`, then the body, then one
-`— outcome: … · turn … · 5.2s` metadata line. A wrong argument name is reported plainly: passing `text` to
-`dsh_ask` yields `` `prompt` is required `` with `isError: true`.
+The first line of a `dsh_ask` result is always `session <id>`, followed by the body and one `— outcome: … · turn … · 5.2s` meta line. Misspelled parameters produce a blunt message: passing `text` to `dsh_ask` yields `` `prompt` is required `` with `isError: true`.
 
-The MCP server and the Harness session **share no context** — the prompt you give `dsh_ask` must be
-self-contained.
+The MCP server and the Harness session it drives **do not share context** — a `dsh_ask` prompt must be self-contained.
 
-#### 1.1.1 Sticky sessions
+### Sticky sessions
 
-Without `session_id`, `dsh_ask` does not blindly create a session: it looks up `${client name}::${project ?? cwd}`
-in `~/.dsh/dsh-rpc/sessions.json`, and if that session still exists and is not blank it **reuses it**; otherwise it
-creates one and writes the entry back. The second call for the same `project` therefore lands in the same session —
-that is how "one project, one session" works.
+Without a `session_id`, `dsh_ask` does not blindly create a session: it looks up `${client name}::${project ?? cwd}` in `~/.dsh/dsh-rpc/sessions.json`, and if the entry still exists and is not a blank session it **continues in that same session**; otherwise it creates one and writes it back. The second call with the same `project` lands in the previous session — that is "one project, one session".
 
-| Argument | Values | Meaning |
+| Parameter | Values | Meaning |
 | --- | --- | --- |
-| `project` | any stable label | The sticky key; falls back to `cwd` |
-| `reuse` | `auto` (default) / `never` / `latest` | Use the recorded session / always create / take that project's most recent by `updatedAt` |
+| `project` | any stable label | The sticky key; falls back to `cwd` when omitted |
+| `reuse` | `auto` (default) / `never` / `latest` | Use the recorded session / always create / take the most recent by `updatedAt` |
 
-Two boundaries: **clients never inherit each other's sessions** (`clientInfo.name` is part of the namespace), and a
-recorded session that was deleted or is still blank means "create a new one", not an error. The table is written
-atomically with mode 0600; a corrupt file simply means "no record".
+Two edges: **different clients do not inherit each other** (`clientInfo.name` is part of the namespace), and a recorded session that was deleted or is still blank is recreated rather than reported as an error. The table is written atomically with 0600; corruption degrades to "no records".
 
-One session eventually becomes a context burden, so after **200** `ask` deliveries on the same key the plugin
-rotates: it creates a new session and reports the old id as `previousSessionId` (`rotated: true`). That threshold
-counts **this bridge's deliveries**, not Host messages — the Host has no cheap counter.
+One session eventually becomes a context burden, so after **200** `ask` calls on the same key it rotates: a new session is created and the old id is returned as `previousSessionId` (with `rotated: true`). That threshold counts **deliveries from this bridge**, not the host's total messages — the host offers no cheap counter.
 
-### 1.2 CLI
+### CLI
 
 ```powershell
-node bin/dsh-rpc.mjs health                  # unauthenticated liveness
+node bin/dsh-rpc.mjs health                  # unauthenticated liveness probe
 node bin/dsh-rpc.mjs health --wait 15000     # poll until ready after a restart
-node bin/dsh-rpc.mjs ping                    # a real, token-bearing call
-node bin/dsh-rpc.mjs workspaces              # workspaces shown in the sidebar
-node bin/dsh-rpc.mjs permissions             # permission presets (* = default)
-node bin/dsh-rpc.mjs ask "只回复两个字：收到" --cwd . --json
+node bin/dsh-rpc.mjs ping                    # a real call with the token
+node bin/dsh-rpc.mjs workspaces              # workspaces from the sidebar
+node bin/dsh-rpc.mjs permissions             # permission presets (* marks the default)
+node bin/dsh-rpc.mjs ask "reply with exactly two words: received" --cwd . --json
 node bin/dsh-rpc.mjs ask "look at this workspace" --workspace ws-xxxx --json
-node bin/dsh-rpc.mjs ask "continue from there" --session session-xxxx --json
+node bin/dsh-rpc.mjs ask "continue" --session session-xxxx --json
 node bin/dsh-rpc.mjs ask "think with Opus" --session session-xxxx --model anthropic/opus-4.6 --effort high
-node bin/dsh-rpc.mjs prompt "long running task…" --session session-xxxx
+node bin/dsh-rpc.mjs prompt "a long task…" --session session-xxxx
 node bin/dsh-rpc.mjs wait --session session-xxxx --timeout 600000
-node bin/dsh-rpc.mjs wait --session session-xxxx --since 42   # only events after cursor 42
+node bin/dsh-rpc.mjs wait --session session-xxxx --since 42   # only the delta after cursor 42
 node bin/dsh-rpc.mjs history --session session-xxxx --limit 20
 node bin/dsh-rpc.mjs sessions --limit 10
 node bin/dsh-rpc.mjs models                  # models DSH can route to
-node bin/dsh-rpc.mjs discover                # self-description: methods, transport, shapes
+node bin/dsh-rpc.mjs discover                # self-description: methods, transport, result shape
 node bin/dsh-rpc.mjs cancel --session session-xxxx
 node bin/dsh-rpc.mjs call dsh.sessions.history '{"sessionId":"session-xxxx"}' --timeout 30000
 ```
 
-Exit codes: `0` done · `1` failed or the turn did not end cleanly · `2` usage error · `3` cannot reach the Harness.
+Exit codes: `0` finished · `1` failed or the turn did not end normally · `2` usage error · `3` cannot reach the Harness.
 
-### 1.3 Plain HTTP
+### Plain HTTP
 
 ```powershell
 $endpoint = (Get-Content "$env:USERPROFILE\.dsh\dsh-rpc\endpoint.json" -Raw | ConvertFrom-Json).url
 $token    = (Get-Content "$env:USERPROFILE\.dsh\dsh-rpc\token" -Raw).Trim()
 $body = @{ jsonrpc = "2.0"; id = 1; method = "dsh.sessions.ask";
-           params = @{ text = "reply with one word: ok"; cwd = "C:\path\to\work" } } | ConvertTo-Json -Depth 6
+           params = @{ text = "reply with exactly two words: received"; cwd = "C:\path\to\work" } } | ConvertTo-Json -Depth 6
 Invoke-RestMethod -Method Post -Uri $endpoint `
   -Headers @{ Authorization = "Bearer $token" } -ContentType application/json -Body $body
 ```
 
-`endpoint.json` is rewritten at every start, so reading the address this way needs no knowledge of the port.
+`endpoint.json` is rewritten by the plugin on every launch, so finding the address this way never requires knowing the port.
 
-### 1.4 JS client
+### JS client library
 
 ```js
 import { rpcCall } from "@punchact/dsh-rpc-agent/http-client";
 
-const answer = await rpcCall("dsh.sessions.ask", { text: "summarize this repository", cwd: process.cwd() });
+const answer = await rpcCall("dsh.sessions.ask", { text: "summarise this repository", cwd: process.cwd() });
 console.log(answer.text, answer.usage);
 ```
 
-The subpath is declared in `exports` (`"./http-client": "./lib/client.mjs"`); in a local clone it is
-`import … from "<path-to-your-clone>/lib/client.mjs"`.
+That subpath is declared in `exports` (`"./http-client": "./lib/client.mjs"`); in a local checkout it is `import … from "<path-to-your-clone>/lib/client.mjs"`. `rpcCall` resolves to the method's `result`; on failure the thrown Error carries `code` / `data` / `status`, so you can branch on the code.
 
-`rpcCall` resolves to the method's `result`; on failure it throws an Error carrying `code` / `data` / `status`, so
-you can branch on the code.
+## Methods
 
----
+Every method lives under the `dsh.` namespace; the CLI aliases `ping` / `discover` / `ask` / `models` also work as JSON-RPC methods directly.
 
-## 2. Endpoint and credentials
-
-| Item | Value |
-| --- | --- |
-| RPC endpoint | `POST /dsh-rpc` (JSON-RPC 2.0) |
-| Streaming endpoint | `POST /dsh-rpc/stream` (NDJSON) |
-| Liveness | `GET /dsh-rpc/health` (**unauthenticated**) |
-| Credential | `Authorization: Bearer <token>` or `X-DSH-RPC-Token: <token>` |
-| Token file | `%USERPROFILE%\.dsh\dsh-rpc\token` (32 random bytes as hex, 0600) |
-| Endpoint description | `%USERPROFILE%\.dsh\dsh-rpc\endpoint.json` (rewritten each start) |
-
-A full address looks like `http://127.0.0.1:<port>/dsh-rpc`. `<port>` is chosen by DSH and may differ after a
-restart. `endpoint.json`:
-
-```jsonc
-{
-  "url": "http://127.0.0.1:3820/dsh-rpc",
-  "origin": "http://127.0.0.1:3820",
-  "path": "/dsh-rpc",
-  "version": "0.7.7",                        // the version the running plugin reports
-  "plugin": "dsh-rpc-agent",
-  "pid": 12345,                              // the Host process that wrote this file
-  "startedAt": "2026-11-05T01:05:58.000Z",   // when that process started
-  "updatedAt": "2026-11-05T01:06:31.924Z"    // when this file was written
-}
-```
-
-`pid` and `startedAt` tell a client whether the Harness restarted: both unchanged yet unreachable means it is not
-port drift.
-
-- **The token is generated for you**: created and stored on first activation; the CLI and MCP server read it
-  automatically.
-- **Loopback only**: by default `127.0.0.1` / `::1` / `::ffff:127.0.0.1` are accepted and everything else gets 403.
-  Expose it to a LAN only by explicitly setting `allowRemote`.
-- **Health is deliberately unauthenticated**: it returns `{ok, plugin, version, protocol, authenticated}` and nothing
-  about sessions or configuration.
-
----
-
-## 3. Methods
-
-Every method lives under the `dsh.` namespace; the aliases `ping` / `discover` / `ask` / `models` also work as
-JSON-RPC method names.
-
-### 3.1 Method table
-
-| Method | Arguments | Returns |
+| Method | Parameters | Returns |
 | --- | --- | --- |
-| `dsh.discover` | — | version, runtime config, transport, method catalogue |
+| `dsh.discover` | — | Version, running config, transport address, method catalogue |
 | `dsh.ping` | — | `{ok, plugin, version, protocol, origin, tokenSource, activeRuns}` |
 | `dsh.models` | — | `{default, routableProviders, groups[], failures[]}` |
-| `dsh.workspaces.list` | — | `{total, items[]}` with id / title / path / status / session count |
+| `dsh.workspaces.list` | — | `{total, items[]}`, each with id / title / path / status / session count |
 | `dsh.workspaces.create` | `path, title?` | `{id, title, path}`; idempotent per path |
-| `dsh.permissions.catalog` | — | `{options[], defaultPreset}`, each option carrying a `cost` line |
+| `dsh.permissions.catalog` | — | `{options[], defaultPreset}`, each with a one-line `cost` |
 | `dsh.approvals.pending` | `sessionId?, waitMs?` | `{pending[], count, timedOut, mode, deadlineMs}` |
 | `dsh.approvals.resolve` | `approvalId, decision, note?` | `{approvalId, sessionId, toolName, decision, note}` |
-| `dsh.sessions.configure` | `sessionId, model?, reasoningEffort?, permissionPreset?` | the settings applied |
+| `dsh.sessions.configure` | `sessionId, model?, reasoningEffort?, permissionPreset?` | The settings that were applied |
 | `dsh.sessions.list` | `limit?, cwd?, sort?` | `{total, sort, cwd, items[]}` |
 | `dsh.sessions.create` | `workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?` | `{sessionId, agentPreset, cwd, …}` |
-| `dsh.sessions.ask` | see below | a turn result, or a handle with `wait:false` |
-| `dsh.sessions.prompt` | `sessionId, text, mode?, model?, …` | `{accepted, sessionId, requestId, mode}`, returns at once |
-| `dsh.sessions.wait` | `sessionId, timeoutMs?, since?` | a turn result |
+| `dsh.sessions.ask` | see below | A turn result, or a handle (`wait:false`) |
+| `dsh.sessions.prompt` | `sessionId, text, mode?, model?, …` | `{accepted, sessionId, requestId, mode}`, returned at once |
+| `dsh.sessions.wait` | `sessionId, timeoutMs?, since?` | A turn result |
 | `dsh.sessions.cancel` | `sessionId` | `{accepted, sessionId}` |
 | `dsh.sessions.history` | `sessionId, limit?` | `{cursor, turn, running, messageCount, records[]}` |
 
-Semantics that are easy to get wrong:
+Semantics that are easy to trip over:
 
-- **`dsh.sessions.create` refuses `sessionId`**: the Host allocates ids; passing one is `-32602`, never a silent swap.
-- **`dsh.sessions.list` usually reports `createdAt: null`**: measured here, the Host's `list()` only returns
-  `updatedAt`, so sorting by `createdAt` degrades to host order.
-- **`dsh.sessions.ask` defaults `wait` to `true`** (only the MCP tool `dsh_ask` defaults to `false` — protocol
-  methods keep their shape across minors). A second bridge run on the same session gets `-32004`; add `queue: true`
-  to wait its turn.
-- **`dsh.sessions.prompt` does not hold the session**: it returns immediately and does not wait, so a concurrent
-  `ask` can still take that turn — pair it with `dsh.sessions.wait`. Session-level settings such as `model` do apply
-  here.
-- **`limit` must be a positive integer**: `list` defaults to 50, `history` to 40 with a ceiling of 500. `0`,
-  negatives or fractions return `-32602` instead of being quietly corrected.
+- **`dsh.sessions.create` does not accept `sessionId`**: the id is assigned by the Host; passing one returns `-32602` rather than silently swapping in a different id.
+- **`dsh.sessions.list` usually reports `createdAt: null`**: measured on this machine, the host's `list()` only returns `updatedAt`, so sorting by `createdAt` keeps the host's original order.
+- **`dsh.sessions.ask` has `wait: true` by default** (only the MCP tool `dsh_ask` defaults to `false` — protocol methods keep their shape across minor versions). When another bridge run is already waiting on that session the default answer is `-32004`; add `queue: true` to wait for it to finish.
+- **`dsh.sessions.prompt` does not hold the session**: it returns at once without waiting for the turn, so a concurrent `ask` can still take that turn — pair it with `dsh.sessions.wait` when you need the result. Session-level settings such as `model` do take effect here.
+- **`limit` must be a positive integer**: 50 by default for `list`, 40 for `history`, maximum 500. Passing `0`, a negative number or a fraction returns `-32602`; nothing is quietly corrected.
 
-`mode` is `turn` (default: deliver only when the session is idle; otherwise `-32004` plus `data.next`), `steer`
-(inject into the running turn) or `queue` (start after the current turn). `turn` is the bridge's own rule — the
-Host only knows `steer`/`queue`, so the bridge decides from a baseline snapshot before delivering. Anything else is
-`-32602`, never a silent downgrade.
+`mode` is `turn` (default: deliver only when the session is idle; if it is running you get `-32004` plus `data.next`), `steer` (join the running turn) or `queue` (wait for it to finish). `turn` is the bridge's own judgement — the host only knows `steer` / `queue`, so the bridge decides from a baseline snapshot before delivering. Any other value returns `-32602` rather than degrading silently.
 
-### 3.2 Turn result
+**Error codes** (`error.data` keeps the host's original `kind` and `details`):
+
+| code | Meaning |
+| --- | --- |
+| `-32700` | Body is not valid JSON |
+| `-32600` | Not a valid JSON-RPC request |
+| `-32601` | Unknown method |
+| `-32602` | Invalid parameters (missing field, empty text, bad sessionId…) |
+| `-32603` | Internal plugin error |
+| `-32000` | Host-side failure (unclassified) |
+| `-32001` | Missing or wrong token |
+| `-32002` | Origin is not loopback and `allowRemote` is off |
+| `-32003` | Session not found (host `session/not-found`) |
+| `-32004` | Session busy: `session/agent-busy`, `session/writer-held`, `session/conflict`, or another bridge run already waiting |
+| `-32005` | Wait timed out |
+| `-32006` | Call cancelled |
+
+**At the MCP layer**: a tool result is an error **only when the call itself failed** (error code plus a `next:` hint). A turn's `status` always goes into the body as an `outcome:` line; every reason other than `completed` also gets a `note:` (plain-language explanation) and `next:` (what to do). Meeting a `kind` this plugin does not know is not an exception — the host's `TurnEndReasonMap` is merge-extensible, so such outcomes are downgraded to "unverified, check `dsh_sessions()` first" and never dressed up as `completed`.
+
+### Streaming endpoint
+
+`POST /dsh-rpc/stream`, same body as `ask`, responds with one JSON object per line:
+
+```jsonc
+{ "type": "session", "sessionId": "session-…", "cwd": "…", "agentPreset": null }   // only when a session is created
+{ "type": "progress", "frame": { "type": "event", "event": { "type": "turn/start" } } }
+{ "type": "result", "sessionId": "session-…", "status": "completed" }              // the last frame
+{ "type": "error", "error": { "kind": "…", "message": "…" } }                      // or this frame
+```
+
+If the client disconnects, that wait is aborted (the turn inside the Harness is not cancelled).
+
+## Turn results and waiting
 
 `ask` (blocking) and `wait` return the same shape:
 
@@ -292,32 +319,32 @@ Host only knows `steer`/`queue`, so the bridge decides from a baseline snapshot 
   "turn": 2,
   "status": "completed",          // completed | aborted | blocked | error | max-tokens | interrupted | forked | idle | timeout | unknown | waiting-approval
   "reason": { "kind": "completed" },
-  "text": "ok",                   // the turn's text; paragraphs joined by blank lines
-  "reasoning": "…",               // optional
+  "text": "received",             // the turn's body text; multiple parts joined with blank lines
+  "reasoning": "…",               // optional thinking text
   "tools": [],                    // [{callId, name, arguments, output?, isError?}]
   "usage": { "inputTokens": 134981, "outputTokens": 2, "totalTokens": 134983 },
   "durationMs": 5311,
   "timedOut": false,
   "partial": false,               // true when the stream ended before turn/end; text is a fragment
-  "sandbox": {                    // only when the turn was refused by the sandbox
+  "sandbox": {                    // only when this turn was blocked by the sandbox
     "denied": true,
     "marker": "[sandbox: file access denied under workspace-write mode]",
-    "source": "tool"              // "tool" = read from tool output (reliable); "text" = only from the reply
+    "source": "tool"              // "tool" = read from tool output (reliable); "text" = only seen in the answer
   },
-  "next": {                       // accompanies sandbox or waiting-approval
+  "next": {                       // appears with sandbox or waiting-approval
     "tool": "dsh_ask",
     "reason": "The turn was blocked by the DSH sandbox. …",
     "args": { "session_id": "session-…" }
   },
   "requestId": "rpc-…",
-  "created": true,                // did this call create the session
+  "created": true,                // whether this call created the session
   "cursor": 4,
-  "since": 4,                     // present only if you passed since
+  "since": 4,                     // only present when since was passed
   "turnStartedAt": 1793807450349
 }
 ```
 
-An `ask` with `wait:false` (**the MCP `dsh_ask` default**) returns a **handle** instead, with different fields:
+`ask` with `wait:false` (**the default for the MCP tool `dsh_ask`**) returns a **handle** instead:
 
 ```jsonc
 {
@@ -327,540 +354,318 @@ An `ask` with `wait:false` (**the MCP `dsh_ask` default**) returns a **handle** 
   "turn": null,                   // a handle carries no turn number
   "text": "",
   "accepted": true,
-  "mode": "queue",                // delivered as queue or steer
+  "mode": "queue",                // whether this sentence went in as queue or steer
   "created": false,
   "cwd": "…",
   "permissionPreset": "read-only"
 }
 ```
 
-Rules for reading results:
+Conventions for reading results:
 
-- `status` always comes from that turn's own `turn/end` reason. A cancelled turn is **never** reported as `completed`.
-- If `turn/end` arrives **without a `reason`**, `status` is `unknown` and `reason` is
-  `{kind:"unknown", message:"the Host ended the turn without a reason; treat this outcome as unverified"}`. `reason`
-  is required in the TypeScript union but not checked at runtime — reporting an undescribable outcome as success is
-  the hardest kind of bug to hunt.
-- `timeout` means the wait expired; it does **not** cancel the turn. Those results have no `turn/end` to cite, so the
-  bridge supplies `{kind:"timeout", message:"…it keeps running"}`.
-- `partial: true` only appears with `status:"unknown"`: the event stream ended without `turn/end`, so `text` is a
-  fragment.
+- `status` always comes from that turn's own `turn/end` reason; **a cancelled turn is never reported as `completed`**.
+- If `turn/end` carries **no `reason`**, `status` is `unknown` and `reason` is `{kind:"unknown", message:"the Host ended the turn without a reason; treat this outcome as unverified"}`. The type says `reason` is required, but that is a TypeScript union — nothing validates it at runtime. Reporting an indescribable outcome as success is the hardest kind of bug to chase.
+- `timeout` means the wait expired and **does not** cancel the turn; such a result has no `turn/end` to cite, so the bridge supplies `reason: {kind:"timeout", message:"…it keeps running"}`.
+- `partial: true` only appears with `status:"unknown"`: the event stream ended before `turn/end`, so `text` is half a turn.
 - `cwd` is filled in only when `created:true`.
-- `waiting-approval` appears only with `approvals.mode=delegate` while a turn waits for your answer — see 5.1.
+- `waiting-approval` appears only with `approvals.mode=delegate`, when the turn is waiting for your answer — see [Permissions and escalation](#permissions-and-escalation).
 
-Tool `output` is truncated at 4000 characters per call with a shared 20000-character budget per turn; excess is
-replaced by `… (omitted, N chars: this turn's tool-output budget of 20000 is spent)`.
+`tools[].output` is truncated at 4000 characters per entry with a 20000-character budget per turn; overflow is written as `… (omitted, N chars: this turn's tool-output budget of 20000 is spent)`.
 
-### 3.3 Waiting, deltas and deadlines
+### `since` returns only the delta
 
-- **`since` returns only the delta**: without it you get the whole turn; with it you get events where `seq > since`
-  and `text` covers just that slice, while `status`/`turn`/`tools`/`usage`/`sandbox` still describe the whole turn
-  and `cursor` keeps advancing. Poll progress with `since: <last cursor>`; do not resend the prompt.
-- **Waiting is a sliced loop**: one HTTP response cannot stay quiet for five minutes (Node's built-in fetch has a
-  300-second `headersTimeout`; measured here: `fetch failed` at 303.9 s), so the bridge slices a wait into
-  `maxWaitSliceMs` (default **120000**, ceiling 240000) and returns `status:"timeout"` with `sliceMs`/`requestedMs`
-  for the caller to continue. **The CLI and the MCP tools already loop for you** — pass the total budget. If you
-  write your own client, slice it yourself or never request more than 300 seconds.
-- `waitedMs` is wall clock: the final slice is raised to a 1000 ms floor, so it can exceed the budget by up to a
-  second; `slices` is the number of requests actually made.
-- **The answer is written by our deadline, not by the Host**: every read races the run's deadline, and the closing
-  cleanup (unregistering the event stream) waits at most one second — a stuck Host costs us one delay, not the
-  answer.
-- **"Not finished" is not a failure**: `status:"timeout"` only means this slice expired; the turn keeps running
-  inside the Harness. Resending is re-asking, which creates sessions and repeats side effects. Use `wait`/`history`
-  for progress.
-- **Turn ownership**: after delivering the prompt the plugin looks for its own `user/message` in the stream
-  (`source.rpcId` equals this call's `requestId`) and takes that turn as its own. So **when somebody else speaks in
-  the same session, their answer is never mistaken for yours** — that `turn/end` is skipped and the bridge keeps
-  waiting for its own.
+Without it you get the whole turn; with it you get only events whose `seq > since`, and `text` narrows to that span. **`status` / `turn` / `tools` / `usage` / `sandbox` still describe the whole turn**, and `cursor` keeps advancing. Poll progress with `since: <last cursor>`; do not resend the prompt.
 
-### 3.4 Workspaces, models, effort, permissions
+### Sliced waiting and deadlines
 
-All four are DSH concepts; the bridge only forwards them and invents no new switches.
+- **A single HTTP request does not survive five minutes**: Node's built-in `fetch` has a 300-second `headersTimeout`; measured, it fails at 303.9 s with `fetch failed`. So the bridge cuts a wait into `maxWaitSliceMs` (default **120000**, ceiling 240000) and returns `status:"timeout"` with `sliceMs` / `requestedMs` for the caller to continue. **The CLI and the MCP tools already loop for you** — pass the total budget; if you write your own client, either slice or never request a wait longer than 300 seconds.
+- `waitedMs` is wall clock: a final slice shorter than 1 second is raised to the 1000 ms floor, so it can exceed the budget by up to a second; `slices` is the number of requests.
+- **Our deadline writes the answer, the host does not**: every event read races this run's deadline, and the trailing cleanup (unsubscribing from the host's event stream) is bounded at one second — a stuck host costs us one delay, not the answer.
+- **"Not done yet" is not failure**: `status:"timeout"` only says this slice expired; the turn keeps running in the Harness. Resending means asking again — extra sessions and repeated side effects. Use `wait` / `history` for progress.
+- **Turn ownership**: after delivering a prompt, the plugin looks for its own `user/message` in the event stream (`source.rpcId` equals this call's `requestId`) and anchors on the turn it lands in. So **when someone else speaks in that session, their answer is never taken for yours** — that turn's `turn/end` is skipped and waiting continues for your own turn.
 
-**Location (workspace vs directory) is decided at creation.** `workspaceId` goes through `workspace.attachSession`,
-so the session shows up under that workspace in the GUI sidebar; `cwd` only sets the directory. They are mutually
-exclusive and passing both is `-32602`. Passing a location again when reusing a session is refused too — a new
-location means a new session. `agentPreset` behaves the same way.
+## Workspaces, models, reasoning effort
 
-Neither the CLI nor the MCP server pre-filters these: they forward what you give and let the bridge produce one
-consistent refusal, so "passed but ignored" can never masquerade as "passed and applied".
+These are DSH's own concepts; the bridge only forwards them and invents no new switches.
+
+**Location (workspace / directory) is decided only at creation time.** `workspaceId` goes through `workspace.attachSession`, so the session appears under that workspace in the GUI sidebar; `cwd` only sets a directory and attaches no workspace. They are mutually exclusive and passing both is rejected (`-32602`). Passing a location parameter together with an existing session is rejected the same way — to move, create a new session. `agentPreset` behaves identically.
+
+Neither the CLI nor the MCP server filters these on the client side: they are forwarded, and the bridge gives one uniform rejection. That way "passed but ignored" never disguises itself as "passed and applied".
 
 ```powershell
 node bin/dsh-rpc.mjs workspaces                            # see what exists
-node bin/dsh-rpc.mjs ask "look at this project" --workspace ws-1
+node bin/dsh-rpc.mjs ask "look at this project" --workspace ws-1   # go in
 node bin/dsh-rpc.mjs models | head -40
 node bin/dsh-rpc.mjs ask "think again" --session session-xxxx --model anthropic/opus-4.6 --effort high
+```
+
+**Model names** may be written as `provider/model`; a bare id is looked up in the model catalogue — a unique match is used, several matches produce an error listing the disambiguating forms, zero matches tells you to run `dsh.models`. **It never guesses.** `reasoningEffort` must be given in the same request as `model`: the Host offers no "read back the current model" call.
+
+> [!WARNING]
+> **Switching models stores the choice as the profile default** (host behaviour, identical to switching models in the GUI). After an external agent switches, sessions you open in the GUI use that model too.
+
+## Permissions and escalation
+
+A **permission preset** bundles a sandbox mode with an approval policy; the name is validated against the Host's catalogue first, and an unknown name errors with the available options. Each entry carries a one-line `cost`, because the deployment's own `description` is usually empty.
+
+**Do not pass `permission` by default; escalate once after you are actually blocked:**
+
+1. The bridge reports `sandbox.denied: true` and a `next` in that turn's result;
+2. `next.args` carries only `session_id`: **the decision to retry with `danger-full-access` is yours**, the bridge neither makes it for you nor stuffs that parameter into the returned value (otherwise a blocked agent could talk itself into an escalation with its own wording);
+3. **Escalate once.** That preset's approval policy is `never`, so after escalating nothing blocks that turn — it is not "a wider default", it is "the last resort when blocked", and you should say so in your answer.
+
+Why escalation has to come from the caller: DSH's sandbox appends a hint to a denied output saying it may retry with `sandbox_permissions`, but sessions driven by this bridge are unattended — under `approval: ask` there is no answerer, so the request normalises to `unavailable` (which does not allow), and under `approval: never` the system prompt forbids asking for escalation at all. Both roads are closed, so only the caller can switch presets and ask again.
+
+The escalation ladder is a closed table: `read-only` may go to `workspace-write` or `danger-full-access`, while **`workspace-write` may only go to `danger-full-access`** — there is no middle rung.
+
+```powershell
 node bin/dsh-rpc.mjs permissions
 node bin/dsh-rpc.mjs ask "run the tests" --permission workspace-write
 ```
 
-**Model names** may be `provider/model`; a bare id is looked up in the catalogue — one match is used, several
-produce an error listing the unambiguous spellings, none tells you to look at `dsh.models`. **It never guesses.**
-`reasoningEffort` must accompany `model` in the same request: the Host has no "read back the current model" call.
+### Unattended sessions and escalation (`approvals`)
 
-> ⚠️ **Switching the model stores it as the profile default** (Host behaviour, same as switching in the GUI). After
-> an external agent switches, sessions you open in the GUI will use that model too.
+Sessions created by this bridge have nobody sitting in front of the GUI. The moment a model asks for an escalation by carrying `sandbox_permissions`, the host suspends that call waiting for an answer — **how long depends on whether an answerer exists**, and a bridge-created child session has none. Measured twice on this machine: after `approval/asked` no `approval/decided` ever arrived, and the caller timed out on its 120-second budget every time.
 
-**Permission presets** bundle "sandbox mode + approval policy"; names are validated against the Host catalogue and
-unknown ones are rejected with the options listed. Each carries a `cost` line because the deployment's own
-`description` is often empty.
+Three modes:
 
-**Do not pass `permission` by default — escalate once only if you get blocked**:
+| Mode | Behaviour |
+| --- | --- |
+| `off` (default) | The bridge installs no gate; the host's own fail-closed behaviour stands |
+| `deny` | The bridge refuses "escalate in place" ahead of the tool, at `tools/pre-execute` |
+| `delegate` | The decision is handed to the agent that dispatched the task |
 
-1. The turn result carries `sandbox.denied: true` and `next`;
-2. `next.args` carries only `session_id`: **deciding to re-ask with `danger-full-access` is yours to make**. The
-   bridge neither decides for you nor stuffs that argument into the result (otherwise a blocked agent could talk its
-   way into an escalation);
-3. **Escalate once.** That preset's approval policy is `never`, so nothing blocks that turn afterwards — it is not a
-   "wider default", it is the last resort when blocked, and you should say so in your answer.
+**`deny`** only tightens, never widens: in a session this bridge created, a call carrying `sandbox_permissions` is refused before dispatch and the model immediately sees
 
-With `approvals.mode=delegate` the gate stops the escalation before the tool runs and hands it to you (5.1) — then
-you do not re-ask with another preset, you answer the pending request.
-
-Why escalation must happen outside: DSH appends a hint that you may retry with `sandbox_permissions`, but a
-bridge-driven session is unattended — under `approval: ask` there is no answerer, so the request normalises to
-`unavailable` (which does not allow), and under `approval: never` the system prompt forbids asking at all. Both
-roads are closed, so only the caller can re-ask under a different preset.
-
-The ladder is a closed table: `read-only` may rise to `workspace-write` or `danger-full-access`, while
-**`workspace-write` may only rise to `danger-full-access`** — there is no middle rung.
-
-### 3.5 Streaming endpoint
-
-`POST /dsh-rpc/stream` takes the same body as `ask` and answers one JSON per line:
-
-```jsonc
-{ "type": "session", "sessionId": "session-…", "cwd": "…", "agentPreset": null }   // only when created
-{ "type": "progress", "frame": { "type": "event", "event": { "type": "turn/start" } } }
-{ "type": "result", "sessionId": "session-…", "status": "completed" }              // last frame
-{ "type": "error", "error": { "kind": "…", "message": "…" } }                      // or this frame
+```
+approvals.mode=deny refused a sandbox escalation to "danger-full-access" for tool "pwsh"; the call was not executed.
 ```
 
-When the client disconnects, that wait is aborted (the Harness turn is not cancelled).
+Calls that do not escalate are untouched; sessions this process did not create (including the one a human is watching in the GUI) are left to their own answerer. Refusals are counted in `/status` under `calls.approvals.denied`.
 
----
+**`delegate`** suspends the request; the caller answers with two methods:
 
-## 4. Error codes
-
-Beyond the JSON-RPC standard codes, this plugin uses `-3200x` for business semantics:
-
-| code | Meaning |
+| Method | Purpose |
 | --- | --- |
-| `-32700` | body is not valid JSON |
-| `-32600` | not a valid JSON-RPC request |
-| `-32601` | unknown method |
-| `-32602` | invalid arguments (missing field, empty text, bad sessionId…) |
-| `-32603` | internal plugin error |
-| `-32000` | Host-side failure (unclassified) |
-| `-32001` | token missing or wrong |
-| `-32002` | origin is not loopback and `allowRemote` is off |
-| `-32003` | session not found (Host `session/not-found`) |
-| `-32004` | session busy: Host `session/agent-busy` / `writer-held` / `conflict`, or another bridge run already waiting on it |
-| `-32005` | wait timed out |
-| `-32006` | call was cancelled |
+| `dsh.approvals.pending({ sessionId?, waitMs? })` | List pending requests; `waitMs` turns it into a long poll of up to 120 seconds |
+| `dsh.approvals.resolve({ approvalId, decision, note? })` | Answer one: `allow-once` or `reject` |
 
-`error.data` keeps the Host's own `kind` and `details`.
+Points that matter:
 
-**MCP layer**: a tool result is an error **only when the call itself failed** (code plus a `next:` hint). A turn's
-`status` always goes into the `outcome:` line; every end reason other than `completed` also gets a `note:` (plain
-language) and a `next:` (what to do). An unknown `kind` is not an exception — the Host's `TurnEndReasonMap` is
-merge-extensible, so such outcomes degrade to "unverified, check `dsh_sessions()` first" and never masquerade as
-`completed`.
+- **A turn stopped on a pending approval returns at once**: `dsh_ask` / `dsh_wait` return `status: "waiting-approval"` with `pendingApproval` and a `next` pointing at `dsh_approvals_resolve`. Otherwise the caller sits inside the loop of "answering its own question".
+- **No answer means refusal**: when `deadlineMs` expires the request is treated as rejected; it is never allowed by default.
+- **The widening lasts only for the approved call**: the host has no "allow once" interface, so the session preset is the only lever the bridge holds. It switches the preset temporarily and restores it as soon as the call finishes (`tools/post-execute`), with a five-minute fallback timer. A downstream listener throwing, the result handler throwing and a host cancellation all restore it; `dispose()` covers plugin unload.
+- **Counted per session, at most 3 per session**: only one escalated call may run in a session at a time (concurrent requests in the same tick produce a single pending record), and other non-escalating calls in the window are **held** until it closes, so nothing rides along for free.
+- **Only `workspace-write` and `danger-full-access` may be requested**; anything else is refused without asking.
+- While `approvals.mode` is not `off`, `dsh.sessions.configure` cannot raise a session straight to `danger-full-access`, and cannot touch a session this bridge does not own.
+- Allows and refusals are counted in `/status` under `calls.approvals.allowed` / `calls.approvals.denied`.
 
----
+Decision packet fields: `approvalId` (a random UUID, not enumerable), `sessionId`, `toolName`, `callId`, `escalation`, `argv` (a digest of the command or path), `args` (the **whole argument object** as redacted JSON, credential-shaped values masked, capped at 4000 characters), `argsTruncated`, `cwd`, `preset` (the session's **current** preset, null when unreadable), `reason` (the sub-agent's own words, truncated to 500 characters), `untrusted: true`, `createdAt`, `expiresAt`.
 
-## 5. Configuration
+**After a restart**: escalations used per session, the sessions this bridge owns, and any debt of "this widening was not returned" all live in `$DSH_HOME/dsh-rpc/approvals.json` (0600, written via `.tmp` then rename). A restart neither resets the allowance nor silences the gate for old sessions; if the process is killed before a widening is returned, the next start reads that ledger and puts the preset back (a failure is only logged as a warning). The file is not written while `approvals.mode=off`.
 
-Configured through the `config` block of a `cordis.patch.yml` row; every key has a default:
+> [!NOTE]
+> **Why not `ctx.on("approval/request")`**: the approval service dispatches through `scopeTarget(req.agent, req.agent)`, which only reaches answerers "inside that agent's own composition". Measured by registering once in the plugin context and once in the root context: on a real escalation the listener **was never called** (the GUI panel kept waiting), whereas `tools/pre-execute` is a global waterfall that covers every agent.
+
+## Configuration
+
+Configured through the `config` of `cordis.patch.yml`; every key has a default:
 
 ```yaml
 - insert:
     - id: dsh-rpc-bridge
       name: '@punchact/dsh-rpc-agent'
       config:
-        token: ''              # empty means generate and store one
+        token: ''              # leave empty to generate and persist one
         allowRemote: false     # accept non-loopback origins
-        defaultCwd: ''         # used when ask has no cwd, then the process cwd
+        defaultCwd: ''         # used when ask has no cwd; then the process cwd
         defaultAgentPreset: '' # default preset for new sessions
         defaultTimeoutMs: 600000
-        maxWaitSliceMs: 120000 # one response's wait length, see §8
-        historyBudgetMs: 30000 # how long one history snapshot may take
+        maxWaitSliceMs: 120000 # length of one wait response
+        historyBudgetMs: 30000 # longest a history snapshot may take
         maxBodyBytes: 1048576
         maxSessions: 200       # concurrent waits
         approvals:
           mode: off            # off (default) | deny | delegate
-          deadlineMs: 60000    # delegate: how long to wait for an answer
+          deadlineMs: 60000    # delegate: how long to wait for the caller's answer; expiry counts as a refusal
 ```
 
-Other keys: `enabled`, `tokenFile`, `path` (default `/dsh-rpc`), `logRequests`.
+Other keys: `enabled`, `tokenFile` (custom token path), `path` (default `/dsh-rpc`), `logRequests`. The `DSH_RPC_TOKEN` environment variable overrides the token (higher priority than the file), which suits CI or setups that cannot persist a file.
 
-`DSH_RPC_TOKEN` overrides the token (it wins over the file), which suits CI or hosts that should not write secrets
-to disk.
+## Security model
 
-### 5.1 Unattended sessions and escalations (`approvals`)
+**In one sentence: this plugin's bearer token is the right to make DSH act on this machine.**
 
-Sessions the bridge creates have nobody sitting in front of the GUI. As soon as a model asks for an escalation with
-`sandbox_permissions`, the Host suspends that call waiting for an answer — **and how long it waits depends on
-whether an answerer exists**, which a bridge-created session does not have. Measured twice on this machine:
-`approval/asked` with no `approval/decided` afterwards, and the caller timing out against its 120-second budget
-every time.
+A process holding the token can create sessions and deliver prompts, so DSH will use **its own** tools to read files, write files, run commands and reach the network — bounded by DSH's sandbox and approval policy, not by this plugin. The plugin does exactly two things: pass the request to the Host, pass the result back. It widens no permission and reviews no content.
 
-Three modes:
-
-| Mode | Behaviour |
+| Surface | State |
 | --- | --- |
-| `off` (default) | no gate; the Host's own fail-closed behaviour stands |
-| `deny` | the bridge refuses in-place escalations in a `tools/pre-execute` gate |
-| `delegate` | the decision goes to whoever dispatched the task |
+| Transport | loopback + Bearer token; by default only `127.0.0.1` / `::1` / `::ffff:127.0.0.1`, everything else 403 |
+| Token storage | `%USERPROFILE%\.dsh\dsh-rpc\token`, 32 random bytes on first start, 0600 |
+| Token comparison | SHA-256 plus a timing-safe compare, no early byte-wise return |
+| Unauthenticated endpoint | `GET /health`, returns only `{ok, plugin, version, protocol, authenticated}` |
+| Request body cap | 1 MiB (configurable), 413 beyond it; never reads unbounded into memory |
+| Origin check | from the socket's `remoteAddress`, never from `X-Forwarded-For` |
 
-**`deny`** only tightens, never widens: in sessions this bridge created, a call carrying `sandbox_permissions` is
-refused before dispatch and the model immediately receives
+**What it deliberately does not do**: no transport encryption (loopback only, no external interface), no rate limiting, no request signing, no prompt logging by default (`logRequests` logs only request heads when explicitly enabled).
 
-```
-approvals.mode=deny refused a sandbox escalation to "danger-full-access" for tool "pwsh"; the call was not executed.
-```
+**If you expose it to the LAN**: `allowRemote: true` only turns off the loopback allow-list; it adds **no** authentication strength. Such a deployment belongs behind a TLS-terminating proxy with its own access control.
 
-Calls that do not escalate are untouched; sessions this process did not create (including ones a human is watching)
-are passed through to their own answerers. Refusals are counted at `/status` under `calls.approvals.denied`.
+**Shared machines**: the token file is the credential. Do not paste it into shell history, CI plain-text variables or chat logs; if you suspect a leak, delete the file and reload the plugin — a new token is generated and the old one stops working immediately.
 
-**`delegate`** suspends the request and lets the caller answer with two methods:
+## Ports and connection stability
 
-| Method | Purpose |
-| --- | --- |
-| `dsh.approvals.pending({ sessionId?, waitMs? })` | list pending requests; `waitMs` turns it into a long poll of up to 120 seconds |
-| `dsh.approvals.resolve({ approvalId, decision, note? })` | answer one: `allow-once` or `reject` |
+DSH's web port is decided by the launcher, and the desktop app lets the OS pick it, so it **changes after a restart**. This plugin does not fix a port.
 
-The details that matter:
+**Why not pin it in the patch**: the `dsh-web-app` webserver row reads `ctx.webStartup.port ?? 3080` through `!!js`, and a `cordis.patch.yml` override **replaces the whole row config** — pinning the port means restating `host` / `tls` / `compression` and silently losing any key a future version adds. DSH would also fail to start when the port is taken.
 
-- **A turn waiting on you returns immediately**: `dsh_ask`/`dsh_wait` return `status: "waiting-approval"` plus
-  `pendingApproval` and a `next` pointing at `dsh_approvals_resolve`. Otherwise the caller would be stuck answering
-  a question it cannot see.
-- **No answer is a refusal**: expiry at `deadlineMs` counts as reject; it never auto-allows.
-- **Widening lasts only for the approved call**: the Host has no "allow once" interface, so the only lever is the
-  session-level preset — after approval the bridge switches it and restores it the moment that call finishes
-  (`tools/post-execute`), with a five-minute fallback timer. Downstream answerer throwing, result processing
-  throwing, or the Host cancelling all restore it too; `dispose()` covers plugin unload.
-- **Counted per session, at most 3**: only one escalated call may run per session at a time (concurrent requests in
-  the same tick produce one pending record), and non-escalating calls during that window are **held** rather than
-  allowed to ride along.
-- **Only `workspace-write` and `danger-full-access` may be requested**; anything else is refused without asking.
-- With `approvals.mode` not `off`, `dsh.sessions.configure` cannot push a session straight to `danger-full-access`,
-  nor touch a session this bridge does not own.
-- Allows and refusals are counted at `/status` under `calls.approvals.allowed` / `calls.approvals.denied`.
+**The plugin publishes the endpoint**: on every activation it calls `ctx.webServer.getOrigin()` and writes the real address into `endpoint.json`; clients (CLI / MCP / `lib/client.mjs`) **re-read it on every call** and never cache it.
 
-Decision packet fields: `approvalId` (random UUID, unguessable), `sessionId`, `toolName`, `callId`, `escalation`,
-`argv` (command or path digest), `args` (the **whole argument object** as redacted JSON — credential-shaped values
-masked, capped at 4000 characters), `argsTruncated`, `cwd`, `preset` (the session's **current** preset, null when
-unreadable), `reason` (the sub-agent's own words, capped at 500 characters), `untrusted: true`, `createdAt`,
-`expiresAt`.
-
-**Across restarts**: the per-session allowances, the sessions this bridge owns, and any widening not yet restored
-live in `$DSH_HOME/dsh-rpc/approvals.json` (0600, atomic `.tmp` + rename). A restart therefore does not reset
-allowances and does not leave the gate deaf to older sessions; if the process is killed before restoring, the next
-start reads the ledger and puts the preset back (failures only log a warning). Nothing is written while
-`approvals.mode=off`.
-
-> **Why not `ctx.on("approval/request")`**: the approval service dispatches through `scopeTarget(req.agent,
-> req.agent)`, which only reaches answerers inside that agent's own composition. Measured: registering in both the
-> plugin context and the root context, the listener **was never called** on a real escalation (the GUI panel was
-> still waiting), whereas `tools/pre-execute` is a global waterfall covering every agent.
-
-**Known edges**: only in-place escalations carrying `sandbox_permissions` are intercepted; `allow-once` is a
-session-wide widening rather than a strictly single-use permit, so the 3-use cap is a guardrail rather than exact
-accounting; a new session still gets a fresh three.
-
----
-
-## 6. Install and update
-
-**From npm (recommended).** This is a standard DSH bundle, so registry and local-directory installs share the same
-pnpm path:
-
-```bash
-dsh plugin add @punchact/dsh-rpc-agent
+```jsonc
+{
+  "url": "http://127.0.0.1:3820/dsh-rpc",
+  "origin": "http://127.0.0.1:3820",
+  "path": "/dsh-rpc",
+  "version": "0.7.7",                        // the version the running copy reports
+  "plugin": "dsh-rpc-agent",
+  "pid": 12345,                              // the Host process that wrote this file
+  "startedAt": "2026-11-05T01:05:58.000Z",   // when that process started
+  "updatedAt": "2026-11-05T01:06:31.924Z"    // when it was last written
+}
 ```
 
-Or from inside DSH:
+`pid` and `startedAt` let a client tell whether the Harness restarted: if neither changed and you still cannot connect, it is not port drift.
 
-```js
-plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent" })
-```
+**Only one error is retried during a restart window**: clients re-read the endpoint and retry once, and only for `ECONNREFUSED` (TCP refused, request never left). `ECONNRESET` / `EPIPE` / timeouts are **not** retried, because the bytes may already have been accepted and a resend risks delivering the prompt twice. An explicit `--url` or `DSH_RPC_URL` is not retried either.
 
-For a non-default profile add `--profile <name>` (`desktop` on the desktop app). To pin a version, spell it out:
-`dsh plugin add @punchact/dsh-rpc-agent@0.7.7`; otherwise `latest` is used.
-
-Three things that bite on the npm route:
-
-1. **What lands is a copy, not a link.** Editing your workspace sources afterwards does **not** affect the running
-   plugin. Use the local-directory route below if you want that.
-2. **A fresh release may be held back by pnpm's release-age policy.** Installing by registry spec on release day
-   fails while `minimumReleaseAge` is unmet. Either pin a version that has aged out, or allow it explicitly in the
-   profile's `pnpm-workspace.yaml` — pnpm sometimes appends this line itself:
-
-   ```yaml
-   minimumReleaseAgeExclude:
-     - '@punchact/dsh-rpc-agent@0.4.1 || 0.4.4 || 0.5.3 || 0.7.6 || 0.7.7'
-   ```
-
-3. **To see which copy is loaded**: call `cordis_inspect_query` (`Config.listConfigs`,
-   `input: {"entry":"include:dsh-rpc-bridge"}`) and read `packageDir` — `<profile>\node_modules\@punchact\dsh-rpc-agent`
-   means npm, your workspace means the link route. **The version string is not evidence**; it comes from whichever
-   `package.json` was loaded.
-
-Release history lives in [Releases](https://github.com/Punchact/dsh-rpc-agent/releases); **every version since 0.4.4
-is published by OIDC with SLSA provenance**
-(`/-/npm/v1/attestations/@punchact%2Fdsh-rpc-agent@<version>` returns 200). `0.4.1` / `0.4.2` were withdrawn and are
-no longer on the registry.
-
-**From a local directory (while editing)**:
-
-```js
-plugin_manager({ action: "install_bundle",
-                 target: "<absolute-path-to-your-clone>" })
-```
-
-- This installs a **link** to that directory, so source edits need no reinstall.
-- But the Host does not re-`import` on file changes; to pick up new `lib/*.mjs`, toggle the plugin row off and on:
-
-```js
-plugin_manager({ action: "set_plugin", target: "include:dsh-rpc-bridge", enabled: false })
-plugin_manager({ action: "set_plugin", target: "include:dsh-rpc-bridge", enabled: true  })
-```
-
-`bin/` and `test/` are separate processes and need no reload. The release flow is documented in
-[docs/release.md](./docs/release.md).
-
----
-
-## 7. Security model
-
-**In one sentence: this plugin's bearer token is permission to make DSH act on this machine.**
-
-Any process holding the token can create sessions and deliver prompts, and DSH will then use **its own** tools to
-read files, write files, run commands and reach the network — constrained by DSH's sandbox and approval policy, but
-not by this plugin. The plugin does exactly two things: hand the request to the Host and hand the result back. It
-widens no permission and reviews no content.
-
-| Surface | Current state |
-| --- | --- |
-| Transport | loopback + Bearer token; only `127.0.0.1` / `::1` / `::ffff:127.0.0.1` by default, everything else 403 |
-| Token storage | `%USERPROFILE%\.dsh\dsh-rpc\token`, 32 random bytes generated at first start, 0600 |
-| Token comparison | SHA-256 plus timing-safe comparison, no byte-wise early return |
-| Unauthenticated endpoint | `GET /health` returning `{ok, plugin, version, protocol, authenticated}` |
-| Request body limit | 1 MiB (configurable); oversized bodies get 413 instead of being read into memory |
-| Origin check | the socket's `remoteAddress`; `X-Forwarded-For` is ignored |
-
-**Deliberately absent**: transport encryption (loopback only, no external interface bound), rate limiting, request
-signing, and prompt logging (`logRequests` logs only headers when explicitly enabled).
-
-**Exposing it to a LAN**: `allowRemote: true` merely disables the loopback allow-list and adds **no** authentication
-strength. Such a deployment belongs behind a TLS-terminating proxy with its own access control.
-
-**Shared machines**: the token file *is* the credential. Do not paste it into shell history, plaintext CI variables
-or chat logs. If you suspect a leak, delete the file and reload the plugin — a new token is generated and the old
-one stops working immediately.
-
----
-
-## 8. Ports and connection stability
-
-DSH's web server port is chosen by the launcher (the desktop app lets the OS pick), so it **changes after a
-restart**. This plugin does not pin it.
-
-**Why not hard-code it in the patch**: the `dsh-web-app` webserver row reads `ctx.webStartup.port ?? 3080` through
-`!!js`, and a `cordis.patch.yml` override **replaces the whole config row** — hard-coding would mean restating
-`host`, `tls`, `compression` and friends, and silently dropping any key an upstream upgrade adds. A pinned port also
-blocks DSH entirely when it is taken.
-
-**The plugin publishes the endpoint**: on each activation it calls `ctx.webServer.getOrigin()` and writes the real
-address to `endpoint.json`; clients (CLI / MCP / `lib/client.mjs`) **re-read it on every call** and never cache.
-
-**Only one error is retried during a restart window**: clients re-read the endpoint and retry once on
-`ECONNREFUSED` (TCP refused, the request never left); `ECONNRESET` / `EPIPE` / timeouts are **not** retried, because
-the bytes may already be accepted and a resend could deliver the prompt twice. An explicit `--url` or `DSH_RPC_URL`
-is never retried either.
-
-**Chaining commands across a restart**:
+**Chaining after a restart**:
 
 ```powershell
 node bin/dsh-rpc.mjs health --wait 15000; if ($?) { node bin/dsh-rpc.mjs ask "keep going" --session session-xxxx }
 ```
 
-`--wait` re-reads the endpoint every 250 ms and probes until ready (exit 0 with the elapsed time), timing out with
-exit 3.
+`--wait` re-reads the endpoint every 250 ms and probes; it returns 0 (printing the elapsed time) when ready and 3 on timeout.
 
-**Cases that still fail**: the plugin not yet active while the Harness is starting (the `endpoint.json` still holds
-the previous address), and multiple instances running at once (single file, last writer wins). Use `--url`
-explicitly for both.
+**Still-failing cases**: the Harness is starting and the plugin has not activated yet (`endpoint.json` still holds the previous address); several instances running at once (one file, last write wins). Pass `--url` explicitly for both.
 
-**After the caller disconnects**: a non-streaming request aborts when the socket closes — event iteration stops and
-the run slot is released, but **the turn is not cancelled**. It keeps running in the Host and can still be collected
-with `wait` (and is visible in the GUI). That is the difference between abort and cancel.
+**After the caller hangs up**: a non-streaming request aborts that call when the socket closes — the event iteration stops and the run slot is released — but **the turn is not cancelled**; it keeps running in the Host and can still be collected with `wait` (and seen in the GUI). That is the difference between abort and cancel.
 
-**How aborted calls are accounted**: under `calls.outcomes` in `/status`, not `errors` — `timeouts` means "the
-budget ran out", `cancelledByClient` means "the caller left first".
+**How an aborted call is counted**: in `/status` under `calls.outcomes`, not `errors` — `timeouts` means "the budget ran out", `cancelledByClient` means "the caller left first".
 
----
+## Follow along in the GUI
 
-## 9. Following a CLI task in the GUI
+The CLI's stdout lives only in the terminal that ran it — that is the **caller process'** output. But the turn being driven **is a real session inside the Harness**, so it also shows up in the GUI:
 
-A CLI's stdout lives only in the terminal that ran it — that is the **caller's** output. But the turn being driven
-**is a real Harness session**, so it also appears in the GUI:
-
-| Layer | Where it shows up |
+| Layer | Where you see it |
 | --- | --- |
-| CLI stdout / stderr / exit code | only the terminal that ran it |
-| The session and its full transcript | the GUI sidebar; open it for transcript, tool calls, token usage |
+| The CLI process' stdout / stderr / exit code | only in that terminal |
+| That turn's session and full conversation | the GUI sidebar session list; open it for the transcript, tool calls and token usage |
 
-This works because the plugin goes through the Host's `sessionController` rather than taking a bare agent: session
-log, title generation and `running` state all come from the same store.
+This works because the plugin goes through the Host's `sessionController` (rather than taking a bare agent): the session log, title generation and `running` state all come from the same store.
 
-Three practical points:
+Three practical notes:
 
-1. **Always pass `--cwd`.** Without it the Host uses the process working directory (usually DSH's own profile
-   directory), and such sessions are hard to place in the sidebar.
+1. **Always pass `--cwd`.** Without it the Host uses the process working directory (usually DSH's own profile), and the session is hard to place in the sidebar.
 2. **Keep the returned `sessionId`.** Later `wait` / `history` / follow-ups / taking over in the GUI all need it.
-3. **The GUI does not pop up on its own.** The session merely joins the list; you have to open it.
+3. **The GUI does not pop up by itself.** The session is simply added to the list; you open it.
 
-**Approvals remain with the GUI or your policy**: if a turn triggers a tool call that needs human approval, it
-suspends on the Host side. With nobody opening the session it waits until `timeoutMs` runs out — `ask` then returns
-`status:"timeout"` and **does not** cancel the turn (continue in the GUI, or call `dsh.sessions.cancel`).
+**Approvals still follow the GUI or your policy**: if that turn triggers a tool call needing human approval, it hangs on the host side; with nobody opening the session it waits until `timeoutMs` runs out — then `ask` returns `status:"timeout"` and **does not** cancel the turn (continue in the GUI, or `dsh.sessions.cancel`).
 
----
+## Status panel
 
-## 10. Status panel in Settings
-
-Once installed, the Settings window gains **“RPC Bridge”** (Settings → RPC Bridge). It answers "is the bridge alive,
-and what did anyone call just now":
+Once installed, a **"RPC Bridge"** entry appears on the left of the settings window (`Settings → RPC Bridge`). It answers "is the bridge alive, and what was called recently":
 
 | Block | Content |
 | --- | --- |
-| Status light | online / unreachable, version, last refresh (the page polls every 2 seconds) |
-| Runtime info | endpoint, protocol version, credential source, uptime, `pid`, Node version, remote allowed or not, total and failed calls |
-| Running turns | each active `ask`/`wait`: first 8 characters of the run id, whether it has a session, whether it carries a prompt, elapsed time |
-| Last 12 calls | time, method, duration, success/failure and error code |
-| Per-method usage | counts and errors per method, plus the `timeouts` / `cancelledByClient` non-failure outcomes |
+| Status light | online / unreachable, version, last refresh (polled every 2 seconds) |
+| Runtime info | endpoint, protocol version, credential source, uptime, `pid`, Node version, whether remote is allowed, total and failed calls |
+| Running turns | every active `ask`/`wait`: first 8 characters of the run id, whether it has a session, whether it carries a prompt, elapsed time |
+| Last 12 calls | time, method name, duration, ok/failed with error code |
+| Method usage | per-method counts and error counts, plus the two non-failure outcomes `timeouts` / `cancelledByClient` |
 | How to connect | two copyable commands (MCP registration, one CLI try) |
-| Config snippet | a `cordis.patch.yml` row built from the effective values, one click to copy |
+| Config snippet | the `cordis.patch.yml` row generated from the current values, one click to copy |
 
-It reads **`GET /dsh-rpc/status`**, which shares the `/health` trust boundary — **loopback only and no token**,
-because a page in the browser cannot read the token in `endpoint.json`. In exchange that endpoint must say nothing:
+It reads **`GET /dsh-rpc/status`**: the same trust boundary as `/health` — **loopback only, no token**, because a page in the browser cannot reach the token in `endpoint.json`. In exchange that endpoint must "say nothing":
 
-- no token, no `sessionId` (active runs expose only the first 8 characters and whether a session exists);
-- no call arguments at all — no prompt text, no tool parameters. Call accounting stores only **the method name, the
-  duration and the result code**.
+- no token, no `sessionId` (active runs expose only the first 8 characters of the run id and whether a session exists);
+- no call parameters at all — no prompt text, no tool arguments. Call accounting stores **method name, duration and result code** only.
 
-Everything on the page comes from that read-only endpoint; it writes nothing. To make the panel disappear, disable
-the plugin — `/status` goes away with it.
+Everything the page shows comes from that read-only endpoint; it writes nothing. To make the panel disappear, disable the plugin; `/status` goes down with it.
 
-> Port changes do not matter: the page asks for the fixed path `/dsh-rpc/status` (the plugin keeps that alias even
-> when `path` is configured differently), and `origin` in the status payload is always the real listening address.
+> Changed the port? No action needed: the page requests the fixed path `/dsh-rpc/status` (the plugin keeps that alias even when `path` is customised), and `origin` in the status payload is always the real listening address.
 
----
+## Known edges
 
-## 11. Verification
+- **One "asking" run per session**: two concurrent `ask` calls make the second return `-32004` by default; `queue: true` makes it wait its turn (within its own `timeoutMs`, `-32005` on timeout), and while queued `ping` / the status page shows `state: "queued"`. This only constrains this plugin — the GUI or another agent can still interject; ownership is claimed by `rpcId`, so another agent's answer is never taken for yours, at the price of waiting for it to finish. `wait` is unrestricted.
+- **`wait` only sees the snapshot window**: it relies on the `follow` first-frame snapshot to identify the current/last turn, capped at 500 events. On a very long session whose snapshot was truncated before the target turn, the status may be reported as `completed`; call `history` with the `sessionId` for the authoritative value.
+- **Batch requests run serially**: JSON-RPC entries in one HTTP batch execute **in order**, so a slow `ask` blocks the rest. Use several connections for concurrency.
+- **Approval policy is not copied**: the Harness still applies its own approval and sandbox policy; a tool needing human approval can leave the turn hanging for a long time. `permissionPreset` sets that session's default preset, it is not a grant.
+- **Location is decided at creation**: `workspaceId` / `cwd` do nothing for an existing session — the bridge rejects them instead of ignoring them. Moving means creating a session.
+- **Switching models changes the profile default**: `selectModel` is the Host's model-switch entry point and it stores the choice as the profile default.
+- **Permission presets need an optional service**: on a deployment without the `permissionPresets` service, passing `permissionPreset` yields `-32000` with an explanation.
+- **Workspaces are create-only**: the bridge exposes `workspaces.list` / `workspaces.create`; delete and rename them in the GUI.
+- **Only host-visible sessions are forwarded**: `sessions.list` and `history` go through the Host's `remoteAccess` filter.
+- **Body truncation**: at most 4000 events are kept per turn; on very long turns `text` is still complete (it comes from `assistant/message`) but the `tools` list may be truncated.
+- **Token exposure**: the token is stored alongside DSH's other credentials. **Child sessions created by this bridge can read it** — the sub-agent runs as the same OS user and a `workspace-write` sandbox still allows reading the user directory (measured 2026-11-06: a child session read the token and called `dsh.ping` over `POST /dsh-rpc`). So the approval right in `approvals.delegate` guards against **mistakes and prompt injection**, not against a process of the same user that wants more privilege for itself.
+- **The approval gate covers one road only**: `deny` / `delegate` intercept `sandbox_permissions` **in tool arguments**. Changing a preset through `configure`, or choosing `permissionPreset` when creating a session, is another road — the former is forbidden while `approvals.mode` is not `off`, but a preset chosen by the caller **when creating** a session is not constrained by the gate (that is the dispatcher's decision, not the sub-agent's).
+- **No declared `Config` schema**: the plugin validates the row's `config` by hand instead of exporting `Config` (to stay dependency-free). The cost is that `cordis_inspect_query` shows `status: absent` for that row and there is no visual form; see [Configuration](#configuration).
 
-```powershell
-cd dsh-rpc-plugin
-npm test                       # all ten suites, 182 cases; needs neither a Harness nor npm install
-node test/host.test.mjs        # 1 case: real-Host integration (run npm ci first)
-node test/e2e.mjs --cwd .      # 14 cases: end to end against a live Harness
-node test/edge.mjs             # 24 cases: protocol/edge adversarial, live Harness
-```
-
-What each of the ten suites pins down:
-
-| Suite | Cases | Pins |
-| --- | --- | --- |
-| `methods` | 76 | turn ownership, steer, timeouts, abort reasons, history, cancel, argument contracts |
-| `mcp-format` | 19 | result rendering: `note:` / `next:` / truncation / dedup / pending |
-| `registry` | 8 | sticky-session table read/write, corrupt fallback, rotation |
-| `pending` | 36 | pending store, long poll, cancellation reclaim, allowance reservation, transaction edges |
-| `approvals` | 11 | config validation, the gate's deny/delegate branches, ownership, allow-list |
-| `approval-state` | 8 | ledger across restarts, field-wise merge, TTL, orphan recovery |
-| `wait` | 6 | sliced waiting (real HTTP stub) |
-| `abort` | 7 | abort chain (real socket / in-process registry) |
-| `client` | 6 | client retry and error reporting |
-| `status` | 6 | `/status` payload and route-mount contract |
-
-`npm test` runs those ten in a fixed order; `npm run test:host` runs the real-Host case; `npm run test:e2e` /
-`npm run test:edge` need a live Harness.
-
-**Do not use `node --test`**: it forks a child process per file, which a DSH sandbox blocks with `spawn EPERM`.
-
-A few worth calling out:
-
-- **Real-Host integration** uses no fake `webServer`: it starts a real listener with `new Context()` +
-  `ctx.plugin(WebServer, {host:'127.0.0.1', port: 0})`, applies the plugin, then asserts over real HTTP that
-  `/health` is 200, an unauthenticated RPC is 401, `/status`'s `origin` matches the listening address, **and finally
-  runs the plugin's own disposer and asserts both routes turn 404**. It is the only test that catches the real
-  incident where a previous generation's routes blocked a reload.
-- **End to end** uses the same `lib/client.mjs` an external agent would, so green proves the whole chain: plugin →
-  Host `sessionController` → HTTP → JSON-RPC → caller.
-- **Edge** exercises the protocol layer: batch, notifications, id shapes, auth headers, oversized bodies (a real
-  413, not a dropped connection), parameter-injection guards, timeout clamping, concurrent asks, `limit` semantics.
-- **Port drift** (manual): point `endpoint.json` at a dead port and run `dsh-rpc ping`; expect exit 3 and a readable
-  error mentioning `nothing is listening`, `pid` and `health --wait`.
-- **Display check**: the plugin row's title and icon were confirmed by eye in the Plugins page (`RPC Bridge` plus
-  this package's icon). `plugin_manager list_bundles` prints the `package.json` `description`, which is a different
-  source from the UI label — not evidence that a locale took effect.
-
-Last runs: unit 182/182 and host 1/1 (2026-11-06); end-to-end 14/14 and edge 24/24 (2026-11-05).
-
----
-
-## 12. Known edges
-
-- **One “asking” run per session**: a second concurrent `ask` gets `-32004` by default; with `queue: true` it queues
-  (within its own `timeoutMs`, `-32005` on expiry) and shows as `state: "queued"` in `ping`/the status page. This only
-  binds this plugin — the GUI or another agent can still speak up; ownership is claimed by `rpcId`, so someone else's
-  answer is never mistaken for yours, at the cost of waiting for them to finish.
-- **`wait` only sees the snapshot window**: it judges "current/last turn" from `follow`'s first frame, capped at 500
-  events. A very long session whose snapshot was truncated before the target turn may report `completed`; call
-  `history` with the `sessionId` for the exact value.
-- **Batched requests run serially**: several JSON-RPC calls in one HTTP batch execute **in order**, so one slow
-  `ask` blocks the rest. Use separate connections for concurrency.
-- **Approval policy is not copied**: the Harness still applies its own sandbox and approval policy; a tool needing
-  human approval can leave a turn suspended for a long time. `permissionPreset` sets a session default, it does not
-  grant a pass.
-- **Location is fixed at creation**: `workspaceId` / `cwd` do not apply to an existing session; the bridge refuses
-  rather than ignoring them. A new location means a new session.
-- **Switching models changes the profile default**: `selectModel` is the Host's model switch and stores the choice
-  as the profile default.
-- **Permission presets need an optional service**: without `permissionPresets`, passing `permissionPreset` yields
-  `-32000` with an explanation.
-- **Workspaces are create-only**: the bridge exposes `workspaces.list` / `workspaces.create`; rename and delete
-  belong in the GUI.
-- **Only Host-visible sessions are forwarded**: `sessions.list` and `history` pass through the Host's `remoteAccess`
-  filter.
-- **Text is truncated**: at most 4000 events are retained per turn; a very long session's `text` stays complete (it
-  comes from `assistant/message`) but the `tools` array can be cut.
-- **Token exposure surface**: the token sits alongside DSH's other credentials. **Sub-sessions created by this
-  bridge can read it** — a sub-agent shares the same OS user, and a `workspace-write` sandbox may read the user
-  directory (measured 2026-11-06: a sub-session read the token and called `dsh.ping` over `POST /dsh-rpc`). So
-  `approvals.delegate` protects against **mistakes and prompt injection**, not against a process on the same machine
-  and user deciding to escalate itself.
-- **The approval gate covers one path**: `deny` / `delegate` intercept **`sandbox_permissions` inside tool
-  arguments**. Changing a session's preset through `configure`, or choosing a preset when creating a session, takes
-  another path — the former is blocked while `approvals.mode` is not `off`, but a preset chosen by the caller **at
-  creation** is not constrained by the gate (that is the dispatcher's decision, not the sub-agent's).
-- **No `Config` schema is declared**: the plugin validates the row's `config` by hand instead of exporting `Config`
-  (to stay dependency-free). The cost is that `cordis_inspect_query` shows `status: absent` and there is no visual
-  form; keys are listed in §5.
-
----
-
-## 13. Troubleshooting
+## Troubleshooting
 
 | Symptom | Cause / fix |
 | --- | --- |
-| `dsh-rpc: 401` | token mismatch. Delete `%USERPROFILE%\.dsh\dsh-rpc\token` and reload the plugin to regenerate |
-| `403` | origin is not loopback; check for a proxy, or enable `allowRemote` |
-| `-32004 … already has a bridge run waiting for its turn` | another `ask`/`prompt` is already waiting on that session; use another session or wait it out (`wait` can observe in parallel) |
-| exit code `3` (cannot reach) | the Harness is not running, or the plugin row is disabled; probe with `node bin/dsh-rpc.mjs health` |
-| source changed but behaviour did not | the Host cached the module: toggle with `set_plugin` off and on |
-| source changed but behaviour did not (npm install) | the npm route installs a copy unrelated to your workspace; switch to the local-directory route |
-| install reports release-age / version unavailable | a fresh release may still be inside `minimumReleaseAge`; pin an older version or allow it as in §6 |
-| `Cannot read properties of undefined (reading 'throwIfAborted')` | an old version called Host `prompt/list` with `undefined`; fixed |
-| plugin row status `absent` | expected: the plugin exports no `Config` schema, so there is no config contract to show |
+| `dsh-rpc: 401` | Token mismatch. Delete `%USERPROFILE%\.dsh\dsh-rpc\token` and reload the plugin to regenerate |
+| `403` | Origin is not loopback; check for a proxy, or enable `allowRemote` |
+| `-32004 … already has a bridge run waiting for its turn` | An `ask`/`prompt` is already waiting on that session; use another session or wait it out (`wait` can observe in parallel) |
+| Exit code `3` (cannot connect) | The Harness is not running, or the plugin row is disabled; probe with `node bin/dsh-rpc.mjs health` |
+| Source changed, behaviour did not | The host cached the module: toggle `set_plugin` off and on |
+| Source changed, behaviour did not (npm install) | The npm route installs a copy unrelated to your checkout; use the local-directory install to iterate |
+| Install fails with the cooling-off window / version unavailable | A fresh release may still be inside `minimumReleaseAge`; pin a version past the window, or allow it as described in [Install and update](#install-and-update) |
+| `Cannot read properties of undefined (reading 'throwIfAborted')` | Older versions called the host's `prompt`/`list` with `undefined`; fixed |
+| Plugin row shows `absent` | Expected: the plugin exports no `Config` schema, so `cordis_inspect_query` has no config contract |
+
+## Development and tests
+
+```powershell
+cd dsh-rpc-plugin
+npm test                       # ten suites at once, 182 cases; needs no Harness and no npm install
+node test/host.test.mjs        # 1 case: real-host integration (needs npm ci first)
+node test/e2e.mjs --cwd .      # 14 cases: end to end against a real Harness
+node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a real Harness
+```
+
+<details>
+<summary>What each of the ten suites guards</summary>
+
+| Suite | Cases | Guards |
+| --- | --- | --- |
+| `methods` | 76 | Turn ownership, steer, timeouts, abort reasons, history, cancel, parameter contracts |
+| `mcp-format` | 19 | Result rendering: `note:` / `next:` / truncation / de-duplication / pending approvals |
+| `registry` | 8 | Sticky-session table I/O, corruption fallback, rotation |
+| `pending` | 36 | Pending store, long polling, cancellation withdrawal, allowance pre-claim, transaction boundary |
+| `approvals` | 11 | Config validation, the gate's deny/delegate branches, ownership, allow-list |
+| `approval-state` | 8 | Ledger across restarts, field-wise merge, TTL, orphan recovery |
+| `wait` | 6 | Sliced waiting (real HTTP stub) |
+| `abort` | 7 | The abort chain (real socket / in-process registry) |
+| `client` | 6 | Client retries and error reporting |
+| `status` | 6 | `/status` payload and route-mounting contract |
+
+</details>
+
+`npm test` runs those ten suites in a fixed order; `npm run test:host` runs the real-host integration; `npm run test:e2e` / `npm run test:edge` need a live Harness.
+
+> [!TIP]
+> **Do not use `node --test`**: it forks a child process per file, which DSH's sandbox blocks with `spawn EPERM`.
+
+A few worth calling out:
+
+- **Real-host integration** does not use a fake `webServer`: it starts a real listener with `new Context()` + `ctx.plugin(WebServer, {host:'127.0.0.1', port: 0})`, applies the plugin, then makes real HTTP calls asserting `/health` 200, RPC without a token 401 and `/status` `origin` matching the real listener — **finally running the plugin's own disposer and asserting `/health` and `/status` both turn 404**. That is the only test that catches the real incident where a leaked route from a previous generation broke reloads.
+- **End to end** goes through the very same `lib/client.mjs` an external agent uses, so green here means the whole chain plugin → Host `sessionController` → HTTP → JSON-RPC → caller holds.
+- **Edge** probes the protocol layer: batches, notifications, id shapes, auth headers, oversized bodies (a genuine 413, not a dropped connection), parameter-injection defences, timeout clamping, concurrent asks, `limit` semantics.
+- **Port drift** (manual): point `endpoint.json` at a dead port and run `dsh-rpc ping`; expect exit code 3 and a readable error mentioning `nothing is listening`, `pid` and `health --wait`.
+
+Last actual run: unit 182/182, host 1/1 (2026-11-06); end-to-end 14/14, edge 24/24 (2026-11-05).
+
+## License
+
+[MIT](./LICENSE) © 2026 Punchact. Design trade-offs are in [docs/design.md](./docs/design.md), the security policy in [SECURITY.md](./SECURITY.md), the release flow in [docs/release.md](./docs/release.md).

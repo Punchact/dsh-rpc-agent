@@ -371,3 +371,100 @@ compression: gzip
 **验证**：`npm publish --dry-run`（未登录状态）exit 0 并给出真实清单；加入 `docs/release.md` 后 `node scripts/check-package.mjs` 报 `@punchact/dsh-rpc-agent@0.4.1, 23 files, 84.2 KB packed`。
 
 **一个必须记下来的实测结论：`--dry-run` 不校验 `private`。** 上一版 `package.json` 里还留着 `"private": true`，而 `npm publish --dry-run` **照样 exit 0**——我据此以为"可以发了"。真实的拒绝发生在正式 publish，也就是打完 tag、建好 Release 之后，是最坏的发现时机。为此 `check-package.mjs` 现在直接断言 `private` 必须不存在、`publishConfig.access` 必须是 `"public"`，并做了反向对照（临时加回 `private: true` → 脚本 exit 1 并指出原因；还原后 exit 0）。教训：**"命令跑通了"不等于"这条命令检查了你在意的那件事"**，能证明可发布性的只有断言本身。
+
+## 16. 把"还没好"和"失败"分开（0.4.5，2026-11-06）
+
+这一节的起点是一次跨天的排查。对端 Codex 报 `dsh_ask` 失败 31 次，而桥自己的台账 `calls.total=105 / errors=0`。两边都没坏，是**语义**坏了：桥把"这一轮还没结束"渲染成工具错误，对端的模型看到错误就去重试，而重试等于重新提问——会话数因此从 1 变成 4。
+
+现场数字（对端父线程 JSONL 逐条解析，168 次 MCP 调用）：`dsh_ask` 34 次里 3 次成功、31 次"失败"，其中 **28 次 `error` 字段是空的**，剩下 3 次分别是 300 s 硬顶、审批被拒、额度耗尽。失败的 `duration` 精确等于它自报的 `timeout_ms`（210000→210 s、240000→240 s），说明对端被砍一刀之后主动把预算压到了铡刀之下——它学会了躲，但没学会等。
+
+**决策二十三：状态不是错误。** `bin/` 层的 `isError` 只在**抛异常**时为真。`timeout`、`queued`、`aborted`、`partial`、`waiting-approval` 都是正常结局，写进正文，不触发对端的重试策略。判据不能用"终态白名单"——`statusFromReason()` 返回的是宿主给的自由字符串（`reason.kind` 原样透传），白名单必漏；改用桥自己的两个显式标志 `timedOut` 与 `partial`。
+
+**决策二十四：MCP 层 `dsh_ask` 默认非阻塞，RPC 层 `wait` 默认阻塞。** 同一件事在两个协议层上有不同的默认值，看着别扭，但各自服务不同的调用者：MCP 的对端是被 300 s 上限约束的（拿不到长结果就该先拿句柄），RPC 的调用者是自己写的脚本（默认等更符合直觉）。协议方法的形状跨小版本不变，只有工具层默认值改。
+
+**决策二十五：失败必须带下一步。** `NEXT_BY_CODE` 把错误码翻成人话的下一步：`-32003` 去 `dsh_sessions` 找会话、`-32004` 用 `dsh_wait` 或 `queue:true`、`-32005` 槽位超时、`-32006` 已取消、`-32602` 改参数再来（原样重试必然同样失败）。`timeout`/`partial`/`accepted` 的正文结尾固定一句 `do NOT resend the prompt`。这不是体贴，是**降低对端做错事的概率**。
+
+**决策二十六：`since` 只收窄正文，不收窄事实。** 增量请求（`since=<cursor>`）只过滤事件流——`text` 与 `events` 变短；`status`/`turn`/`tools`/`usage`/`sandbox` 仍然描述**整轮**。第一版实现漏了这层区分，轮询方会看到 `tools: []` 而这一轮明明跑过命令。修法是把整轮事件与过滤后事件分开收集（`wholeEvents` vs `resultEvents`），并用一个变异用例守着：把 `allEvents` 传成 `null`，用例必须变红。
+
+**决策二十七：句柄的第一行是 `session <id>`。** 会话 id 以前只出现在结果的**尾巴**（`— session … · turn N · status`），而超时恰好会把返回值砍掉——对端下次只能靠 `dsh_sessions` 猜，猜不到就新开。句柄首行固定给 id，meta 行里不再重复。
+
+同批还有一条兼容性收尾：`queue: true` 与 `wait: false` 互斥（什么都没等，排队无意义），同时给返回 `-32602` 而不是悄悄忽略一个。
+
+## 17. 粘性会话与三态投递（0.5.0，2026-11-06）
+
+**决策三十四：会话归属由调用方声明，桥不猜。** 曾经的默认是"不给 `session_id` 就新开"，于是同一个工作区在 18 分钟里攒出 4 个会话。但反面也不成立——桥**不能**按 `cwd` 自动认定"这是同一个项目"：同一目录下可能是两件不相干的事，猜错就是串线。所以复用需要一个显式或半显式的键。
+
+**决策三十五：键是 `namespace::project|cwd`。** `namespace` 取 MCP `initialize` 的 `clientInfo.name`（不同客户端天然隔离，避免两个 agent 抢同一个会话），`project` 优先于 `cwd`。给了 `project` 才记粘性；只给 `cwd` 而不给 `project` 不记——这是"不猜"的具体落法。表落在 `$DSH_HOME/dsh-rpc/sessions.json`（0600、`.tmp` + rename）。
+
+**决策三十六：轮换按投递次数，不按宿主消息数。** 一个会话装不下长期项目（有会话已到 718 条记录）。轮换阈值 `ROTATE_AFTER_ASKS = 200` 数的是**本桥投递过多少次问**，因为宿主侧只能靠 `history` 窗口快照的 `records.length` 推断消息数，而每次 ask 都拉 2000 条并不划算。代价是跨客户端的真实轮次不精确——记在这里，不假装精确。
+
+**决策三十七：`mode: turn | steer | queue`，其中 `turn` 是桥自己的判据。** 宿主只认 `steer` 与 `queue`（`controller().prompt` 的 `mode` 只有这两个值），所以 `turn` 必须在桥侧翻译：取基线（`baselineRunning`，在 prompt **之前**读）→ 忙则 `-32004` 并给 `data.next` → 再以 `steer`/`queue` 真正投递。判据不查 `prompting`：本运行已经持着槽位，查它必中，属于误判。
+
+**决策三十八：注册表只做快捷方式，不做安全依据。** 0.5.0 引入 `sessions.json` 后，0.7.4 曾用它给"所有权"补登记——结果一次 `ask` 带 `session_id` + `project` 就能把**人类正在看的 GUI 会话**登记成本桥所有，随后闸门开始替人回绝审批。这条在 0.7.5 被推翻：所有权只认 `controller().create()` 的返回值，注册表不参与任何安全判定。**一个便利设施被当成信任依据，是这类系统最容易犯的错**。
+
+## 18. 分片等待：一次 HTTP 请求活不过五分钟（0.5.2–0.5.4，2026-11-06）
+
+**决策二十八：等待由客户端自己循环，不要求服务端一次等完。** 触发点是一条实测：`wait --timeout 400000` 在 **303.9 秒**报 `fetch failed`。根因不是桥，是 Node 内建 `fetch`（undici）的 `headersTimeout` 默认 300 s——上游静默超过五分钟就不等响应头了。所以"让调用方传 `timeout_ms: 600000`"这条建议本身是错的：**传输层比桥先死**。`waitForTurn()` 因此把长等待切成多片，每片一次 `dsh.sessions.wait`，`status !== "timeout"` 或预算耗尽即停。
+
+**决策二十九：片长默认 120 s，硬上限 240 s。** 依据全是实测：① 唯一观测到的故障都在 300 s 以上，120 s 留 180 s 余量；② 20 s 片跑一个 90 s 的轮次，5 次往返的额外开销是 **21/12/8/8 ms**，越长的片开销占比越低，切片本身不是成本；③ 90 s 并不比 120 s 安全——中间层默认值（nginx/ALB 60 s、Cloudflare 100 s）在 90 s 面前同样不成立，而"刚好低于某个数字"是假锚点；④ 120 s 与默认预算 600 s 整除，片数与边界都可预测。上限 240 s 是硬钳制：`resolveConfig` 越界时钳到区间内并把 `maxWaitSliceMsRequested` 记进 `describeConfig`，让"你配的值没生效"可见。
+
+**决策三十：截止由桥自己兑现，不指望宿主配合中止。** 宿主的事件流是协作式中止——它只保证唤醒"正在等下一帧"的读，唤不醒已经停在长任务上的那一轮。第一版只和 `iterator.next()` 赛跑，于是出现"3 分钟预算、13 分钟不返回"。改法是双保险：`nextFrame()` 与一个独立的 `deadlineReached` 承诺赛跑（用 `Symbol` 作拒绝理由，交给既有的 `timedOut` 分支收尾），**答案的写出不再依赖宿主交还控制权**。
+
+**决策三十一：清理可以有界，答案不依赖清理。** 同一个事故的第二半：`finally` 里对事件流的 `return()` 是无界 `await`——运行算完了，控制流卡在"注销订阅"。现在这一句有 1 秒上限（`ITERATOR_RETURN_MS`），超时就放手。**清理是尽力而为，答案必须先出去**。
+
+**决策三十二：`discover` 必须带 `config`。** 曾声称"默认值单一来源"，实现里 MCP 层却从 `discover` 读不到配置，一路 `undefined` 回落到写死的 600000。修法是把 `describeConfig(config)` 挂进 `dsh.discover` 与 `dsh.ping`，并加用例钉住 `defaultTimeoutMs === 600000`、`maxWaitSliceMs === 120000`。
+
+**决策三十三：`history` 也有期限。** 它一直用裸 `iterator.next()` 加无界 `return()`，与 §18 的等待同病——只在便宜的时候礼貌。现在 `historyBudgetMs`（默认 30 s，区间 100 ms – 120 s）约束整次快照，超时抛 `-32005` 并说明"宿主停止应答"。
+
+## 19. 中止链路（0.6.0，2026-11-06）
+
+**决策三十九：`abort` 不等于 `cancel`。** 调用方断开、外层超时、用户按停止，三件事在传输层都表现为"没人要结果了"，但语义完全不同：`abort` 只该停止**本次调用**的等待与迭代，**不终止轮次**——轮次是用户的工作，丢了就找不回来。取消必须显式调 `dsh.sessions.cancel`。
+
+**决策四十：context 必须端到端透传。** `dispatch(method, params, context)` 吞掉第三参是长期存在的一处断链：`internalContext()` 早就支持 `{ onEvent, signal }`，但 HTTP 层没往下传，于是 `ask` 永远拿不到外层 signal。修法是最小的一行（`return handler(params, context)`）加派发表的两处 lambda。
+
+**决策四十一：断连即中止，但不是错误。** `rpcHandler` 补上 `res.on("close")`（只在 `!res.writableEnded` 时算调用方断开），建 `AbortController` 传下去；记账时把这种情况记进 `calls.outcomes.cancelledByClient`，**不加** `errors`。最初实现把它同时记成错误，与 README 的承诺相反——被独立审计抓出来（H2）。
+
+**决策四十二：取消要按 id 关联，且旧请求不能驱逐新控制器。** MCP 的 `notifications/cancelled` 带 `requestId`；`inflight` 表按 `String(id)` 存（id 可能是数字也可能是字符串）。第一版在 `finally` 里无条件 `delete(id)`——同一个 id 被新请求复用时，旧请求的清理会把**新**请求的 controller 删掉，之后针对新请求的取消就静默失效（审计发现 H1）。现在 `settle(id, controller)` 只在"仍是当前控制器"时才删。
+
+## 20. 审批闸门（0.7.0–0.7.7，2026-11-06）
+
+**决策四十三：不挂 `approval/request`。** 直觉上这里该挂宿主的审批 seam，ACP 也是这么做的。实际挂着不生效：`dsh-user-approval` 的 `decide()` 用 `ctx.waterfall(scopeTarget(req.agent, req.agent), "approval/request", …)`，`scopeTarget` 保留 agent 自己的 `Context.filter`，只放行"该 agent 自己组合里"的应答者；桥的插件上下文不在那个集合里。三段探针（改挂 `ctx.root`、绕过所有权判断、instrumented 版打日志）全部显示**监听器注册成功但一次都没被调用**，而 GUI 的审批面板一直等到调用方超时。ACP 能答是因为它自己 `agents.create()` 出来的 agent 就在它的上下文里。
+
+**决策四十四：挂 `tools/pre-execute`，只认 `sandbox_permissions`。** 这是宿主文档化的 waterfall，形状是 `(exec, next) => Promise<PreToolDecision>`。判定顺序固定：**sessionId 必须是字符串**（防 `undefined` 被当成自有）→ 必须是本桥创建的会话 → 必须带 `sandbox_permissions`，否则 `next()`。命中才拒。文件头注释完整记下了为什么不用 `approval/request`，以免后人重走一遍。
+
+**决策四十五：三档 `off | deny | delegate`，未知值降级为 `deny`。** `off` 不注册监听器（零风险、零行为）。`deny` 立刻回 `{ kind: "deny" }`，理由是人话（"这个会话没有人能回答审批"）。`delegate` 把决定权交给派发方：挂起 + `dsh.approvals.pending`（长轮询） + `dsh.approvals.resolve`。**降级方向永远是"更严"**：`delegate` 缺 store 或 preset 执行器时记 warn 并按 `deny` 工作，未知 mode 同样按 `deny`。
+
+**决策四十六：放宽必须有事务边界。** 第一版把"允许一次"实现成"永久放宽该会话的 preset"，`allow-once` 的名字在撒谎（审计 high #2）。第二版改成有界，但只改了一半：`await pass()` 没有 try/catch、`post` 在 `await next()` **之前**就删掉了恢复记录。于是一个会抛错的下游监听器能让会话永久停在 `danger-full-access`（审计 blocker F-02）。现在三处都闭合：`pass()` 抛错就 `restore()` + 回滚额度；`post` 的恢复放进 `finally`；另加 5 分钟兜底定时器（`unref`）与启动时的 `recover()`——**进程被杀也要能还账**。
+
+**决策四十七：所有权只认创建。** `ownSession()` 只在 `controller().create()` 成功后调用；粘性复用与显式 `session_id` 都不登记（0.7.4 的教训见 §17 决策三十八）。进程重启不丢：所有权随 `$DSH_HOME/dsh-rpc/approvals.json` 落盘。
+
+**决策四十八：额度按会话 3 次，同步预占，按字段合并。** 三处都可以破：并发竞态（多个 `pre-execute` 在同一 tick 读到 `used=0`）、重载清零、新建会话即新额度。修法是**发问前就同步预占**（失败/拒绝/到期走 `rollback`），并把台账落盘；跨进程写用"按字段合并"而不是后写覆盖——`used` 取 `max`（次数只增不减，并发最多让额度少减一次）、`owned` 取或、`widenedTo` 取 `updatedAt` 更新的一份。**承认合并策略会让额度偶尔多给一次，也不接受重启清零。**
+
+**决策四十九：待批不是超时。** 调用方阻塞在 `dsh_wait` 里时，`delegate` 的 60 s 期限必然先到——这是审计 F-07 指出的可用性硬伤。现在 `drive()` 同时与"读下一帧"和"有人开问了"赛跑，命中后者立刻返回 `status: "waiting-approval"` + `pendingApproval` + `next.tool = "dsh_approvals_resolve"`，让调用方**先去回答，再回来收**。
+
+**决策五十：审批只拦一条路，缺口写进 README。** 闸门拦的是工具参数里的 `sandbox_permissions`；`dsh.sessions.configure` 改 preset 被闸门禁止（非自有会话直接拒、`mode !== "off"` 时不许改成 `danger-full-access`），但**新建会话时调用方自选预设不受约束**。这是刻意留的口子——调用方本来就有权决定自己创建什么会话；写清楚比假装堵住更好。同理，桥创建的子会话能读 `~/.dsh/dsh-rpc/token`（同一 OS 用户、`workspace-write` 可读用户目录，2026-11-06 实测子会话读到 token 并成功 `POST /dsh-rpc` 调 `dsh.ping`）——所以 `delegate` 防的是**误操作与提示注入**，不防同机同用户的进程。这条不进承诺，进已知边界。
+
+## 21. 两次把工具层打死：宿主扩展点的形状必须从 catalog 读
+
+同一类错误犯了两次，两次都让**整台机器的工具调用**瘫痪。
+
+第一次是 0.7.0：把审批监听器挂到 `approval/request`，形状对、seam 错。症状温和——注册成功、永不触发，只是审批一直卡到超时。
+
+第二次是 0.7.5：`tools/post-execute` 写成 `(exec, next)`，而宿主的声明是 `(exec, result, next)`。于是 `next` 收到的是 result 对象，`typeof next === "function"` 为假，函数返回 `undefined`，注册表对返回值读 `.kind` —— **此后每一次工具调用都抛 `Cannot read properties of undefined (reading 'kind')`**，包括我自己用来排查的工具。最后只能由用户在设置里卸载插件才恢复。
+
+三条硬规则因此写下来：
+
+1. **扩展点的参数形状从 `catalog` 读，不从记忆写。** asar 里的 `dsh-tool-cordis/lib/types/api-catalog.js` 逐字写着 `'tools/post-execute'(this, exec, result, next)`，读一眼的成本远低于修一次。
+2. **任何插在工具链上的监听器必须"出错即降级放行"。** 现在两个监听器都被 `guarded(listener, whenBroken)` 包住：内部任何异常 → 记 warn → 返回 `next()` 或一个安全的默认决策（`{kind:"allow"}` / `{kind:"accept"}`）。**闸门坏了可以漏放，不能让工具不能用。**
+3. **实验构建不要装进本会话依赖的那个 profile。** 插件一旦坏掉，连"把它卸掉"的工具都一起坏。现在先准备好一份用户可执行的恢复脚本（`recover-dsh-rpc.ps1`：备份 profile 的 `package.json` → 从 `dependencies` 与 `dsh.profile.bundles` 里删掉插件 → 删 `node_modules` 里那份 → 完全退出 DSH 再启动），再装任何探针包。
+
+## 22. 验证方法学（2026-11-06 复盘得出）
+
+0.7.4 带着三个 blocker 通过了 160 个用例和两份独立审计。"测试全绿"与"审计通过"都没有拦住它们，因为这些缺陷全在**失败路径**上。四条结论：
+
+1. **变异验证只证明分支活着，不证明失败路径收尾。** 把判据改坏、看用例是否变红，能证明守门存在；证明不了"下游抛错时 presets 会被还原"。后者需要专门写一个**会抛错的下游**。现在的审批用例里，`applied === ["danger-full-access","workspace-write"]` 这条断言就是为此存在的。
+2. **审计提示词的结构决定产出。** 给 hy4 的攻击清单（7 个面各要一条证据）→ 13 条发现；给 mimo 的核对清单（契约/文档/计数是否一致）→ "可合并"。不是模型强弱，是**问法**。要攻击面就给攻击面清单，别问"有没有问题"。
+3. **e2e 复现的是写脚本人的心智模型。** 我的驱动器是"先轮询 `pending` 再 `wait`"，而真实客户端是"先 `wait`，被 `waiting-approval` 打断才去回答"。顺序不同，同一个 60 s 期限的后果完全不同——一个能过，一个必挂。
+4. **修一个点不如修一类。** 0.7.4 把"永久放宽"改成"有界放宽"，却没问"有界"依赖什么（`pass()` 与 `next()` 正常返回是控制流假设，不是不变量）。按"类"分组（事务化 / 所有权 / 可见性 / 时效性）比按"发现"逐条修更难漏。
+
+这条链上还有一个副产品是方法论级别的：**独立审计必须交叉**。同一份代码，两个模型分别被要求"攻击"和"核对"，得出的结论质量差异远大于模型之间的差异。
