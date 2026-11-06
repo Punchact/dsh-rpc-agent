@@ -246,3 +246,34 @@ test("without a store the approval methods say so instead of pretending", async 
     (error) => error.code === -32000 && /approvals.mode/.test(error.message),
   );
 });
+
+test("a cancelled call takes its question with it", async () => {
+  const store = createPendingStore({ deadlineMs: 30_000 });
+  const controller = new AbortController();
+  const { promise } = store.open({ sessionId: "session-mine", toolName: "bash" }, { signal: controller.signal });
+  assert.equal(store.size(), 1);
+  controller.abort();
+  const answer = await promise;
+  assert.equal(answer.decision, "cancelled");
+  assert.equal(store.size(), 0, "a withdrawn question must stop being offered");
+  assert.deepEqual(store.list(), []);
+});
+
+test("the gate refuses as soon as the held call is cancelled", async () => {
+  const store = createPendingStore({ deadlineMs: 30_000 });
+  const controller = new AbortController();
+  const gate = createApprovalGate({
+    mode: "delegate",
+    isOwned: () => true,
+    store,
+    applyPreset: async () => "danger-full-access",
+  });
+  const held = gate({ ...escalation(), signal: controller.signal }, () => Promise.resolve({ kind: "allow" }));
+  await tick();
+  assert.equal(store.size(), 1, "the call is being held while nobody has answered");
+  controller.abort();
+  const decision = await held;
+  assert.equal(decision.kind, "deny", "a cancelled call is a refusal, not an allowance");
+  assert.match(decision.reason, /cancelled/);
+  assert.equal(store.size(), 0);
+});

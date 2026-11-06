@@ -411,7 +411,7 @@ JSON-RPC 标准码之外，本插件用 `-3200x` 段表达业务语义：
 
   决策包字段：`approvalId`、`sessionId`、`toolName`、`callId`、`escalation`、`argv`（要执行的命令原文）、`cwd`、`preset`、`reason`、`createdAt`、`expiresAt`。MCP 侧对应 `dsh_approvals_pending` / `dsh_approvals_resolve`。
 
-  语义要点：**没人回答就是拒绝**（`deadlineMs` 到期按拒绝处理，绝不自动放行）；`allow-once` 通过切换该会话的 permission preset 生效——宿主没有"允许一次"的接口，桥手上只有会话级预设这一个杠杆，所以它按会话计次，**每会话最多 3 次**，之后一律拒绝；可请求的目标只有 `workspace-write` 与 `danger-full-access` 两档，其余不询问直接拒。放行与拒绝分别记在 `/status` 的 `calls.approvals.allowed` / `calls.approvals.denied`。
+  语义要点：**没人回答就是拒绝**（`deadlineMs` 到期按拒绝处理，绝不自动放行）；`allow-once` 通过切换该会话的 permission preset 生效——宿主没有"允许一次"的接口，桥手上只有会话级预设这一个杠杆，所以它按会话计次，**每会话最多 3 次**，之后一律拒绝；可请求的目标只有 `workspace-write` 与 `danger-full-access` 两档，其余不询问直接拒。放行与拒绝分别记在 `/status` 的 `calls.approvals.allowed` / `calls.approvals.denied`。挂起中被取消的调用会立刻收回它的待批请求（按拒绝处理），不会留下事后可批准的悬空条目。
 
 > **为什么不用 `ctx.on("approval/request")`**：审批服务经 `scopeTarget(req.agent, req.agent)` 派发，只会走到"该 agent 自己组合里"的应答者。实测在插件上下文和 root 上下文上各注册一次，真实升权时监听器**一次都没被调用**（GUI 面板还在等），而 `tools/pre-execute` 是全局 waterfall，所有 agent 都覆盖得到。
 
