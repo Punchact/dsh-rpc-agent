@@ -45,6 +45,12 @@ const escalation = (mode = "danger-full-access") => exec("session-mine", { comma
 
 const tick = () => new Promise((r) => setImmediate(r));
 
+// `tools/post-execute` is (exec, result, next): the result is a Readonly value the
+// listener may transform, and `next` is the third argument. Getting that arity
+// wrong is not a local bug — the registry reads `.kind` off whatever comes back,
+// so returning undefined breaks every tool call in the process.
+const ACCEPTED_RESULT = Object.freeze({ content: [{ type: "text", text: "ok" }] });
+
 test("a pending request can be listed, answered, and is then gone", async () => {
   const store = createPendingStore({ deadlineMs: 5_000 });
   const { approvalId, packet, promise } = store.open({ sessionId: "s1", toolName: "bash" });
@@ -191,7 +197,7 @@ test("a session stops being asked after its allowance budget is spent", async ()
     store.resolve(store.list()[0].approvalId, "allow-once");
     assert.deepEqual(await pending, { kind: "allow" });
     // The call finishes: the gate puts the preset back and clears `widened`.
-    await gate.post(escalation(), () => Promise.resolve({ kind: "allow" }));
+    await gate.post(escalation(), ACCEPTED_RESULT, () => Promise.resolve({ kind: "accept" }));
   };
 
   for (let i = 0; i < 3; i += 1) await runOnce();
@@ -492,7 +498,7 @@ test("a result handler that throws cannot keep the session wide", async () => {
   assert.equal((await held).kind, "allow");
   assert.deepEqual(gate.widenedSessions(), ["session-mine"], "the call is running wide");
 
-  await assert.rejects(gate.post(escalation(), () => Promise.reject(new Error("post exploded"))), /post exploded/);
+  await assert.rejects(gate.post(escalation(), ACCEPTED_RESULT, () => Promise.reject(new Error("post exploded"))), /post exploded/);
   assert.deepEqual(applied, ["danger-full-access", "workspace-write"], "restoring ran even though next() threw");
   assert.deepEqual(gate.widenedSessions(), []);
 });
@@ -561,4 +567,42 @@ test("the packet carries the whole call, redacted and bounded", () => {
   assert.ok(described.args.length <= MAX_ARGV_CHARS + 120, "args is bounded");
   assert.ok(described.argv.length <= MAX_ARGV_CHARS + 120, "argv is bounded too, not a way around it");
   assert.match(described.argv, /^curl /);
+});
+
+
+test("the result handler returns the decision it is given, not undefined", async () => {
+  // Regression: written as `(exec, next)` this handler treated the *result* as the
+  // continuation, never called it, and returned undefined — which made the tool
+  // registry read `undefined.kind` and killed every tool call in the Host.
+  const gate = makeGate({ store: createPendingStore({ deadlineMs: 1_000 }), applyPreset: async () => {} });
+  const decision = { kind: "accept", content: [{ type: "text", text: "kept" }] };
+  const returned = await gate.post(escalation(), ACCEPTED_RESULT, () => Promise.resolve(decision));
+  assert.equal(returned, decision, "the downstream decision is passed through untouched");
+
+  const noContinuation = await gate.post(escalation(), ACCEPTED_RESULT);
+  assert.equal(noContinuation.kind, "accept", "never undefined: the registry reads .kind off this");
+});
+
+test("an ordinary call passes straight through while the gate is on", async () => {
+  const store = createPendingStore({ deadlineMs: 1_000 });
+  const gate = makeGate({ store, applyPreset: async () => {} });
+  let calls = 0;
+  const outcome = await gate.pre(
+    { agent: { session: { id: "session-mine" } }, name: "bash", callId: "c-9", arguments: { command: "echo hi" } },
+    () => { calls += 1; return Promise.resolve({ kind: "allow" }); },
+  );
+  assert.equal(outcome.kind, "allow");
+  assert.equal(calls, 1);
+  assert.equal(store.size(), 0);
+});
+
+
+test("a gate that throws never breaks the tool call", async () => {
+  // The whole listener is guarded: an internal failure (here the store) degrades
+  // to pass-through, because a broken gate must behave like no gate at all.
+  const gate = makeGate({ store: { open() { throw new Error("store is on fire"); } }, applyPreset: async () => {} });
+  const outcome = await gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }));
+  assert.equal(outcome.kind, "allow");
+  const decision = await gate.post(escalation(), { content: [] }, () => Promise.resolve({ kind: "accept" }));
+  assert.equal(decision.kind, "accept");
 });
