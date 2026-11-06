@@ -181,7 +181,7 @@ console.log(answer.text, answer.usage);
 
 | 方法 | 参数 | 结果 |
 | --- | --- | --- |
-| `dsh.discover` | — | 插件版本、传输地址、方法目录、结果结构说明 |
+| `dsh.discover` | — | 插件版本、运行配置（默认预算 `defaultTimeoutMs`、单次等待上限 `maxWaitSliceMs`）、传输地址、方法目录 |
 | `dsh.ping` | — | `{ok, plugin, version, protocol, origin, tokenSource, activeRuns}` |
 | `dsh.models` | — | `{default, routableProviders, groups[], failures[]}` |
 | `dsh.workspaces.list` | — | `{total, items:[{id, title, path, status, sessions, createdAt, updatedAt}]}`，`status` 为 `ok` / `missing-dir` / `unknown` |
