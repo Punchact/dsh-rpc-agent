@@ -10,7 +10,7 @@
 
 import { readFileSync } from "node:fs";
 
-import { rpcCall, rpcStream } from "../lib/client.mjs";
+import { rpcCall, rpcStream, waitForTurn, WAIT_SLICE_MS } from "../lib/client.mjs";
 import { endpointPath, readEndpoint, stateDir, tokenPath } from "../lib/auth.mjs";
 
 const HELP = `dsh-rpc ${new Date().getUTCFullYear()} — drive a DeepSeek Harness session from the command line
@@ -74,6 +74,7 @@ const VALUE_FLAGS = new Set([
   "permission",
   "mode",
   "timeout",
+  "since",
   "limit",
   "wait",
   "url",
@@ -211,7 +212,30 @@ async function runAsk(flags, positional) {
     return exitCodeFor(result);
   }
 
-  const result = await rpcCall("dsh.sessions.ask", params, budget);
+  // One request cannot stay quiet past the transport's 300 s ceiling, so a
+  // blocking ask is a short ask plus a sliced wait. Anything the ask already
+  // collected is kept if the wait comes back empty.
+  const budgetMs = timeout ?? DEFAULT_TURN_TIMEOUT_MS;
+  const slice = Math.min(budgetMs, WAIT_SLICE_MS);
+  const first = await rpcCall(
+    "dsh.sessions.ask",
+    { ...params, timeoutMs: slice },
+    { ...connectionOptions(flags), timeoutMs: slice + 30_000 },
+  );
+  let result = first;
+  if (first?.status === "timeout" && typeof first.sessionId === "string") {
+    const left = budgetMs - (first.durationMs ?? slice);
+    if (left > 1_000) {
+      const waited = await waitForTurn(first.sessionId, { timeoutMs: left, ...connectionOptions(flags) });
+      result = {
+        ...first,
+        ...waited,
+        text: waited.text || first.text,
+        tools: waited.tools?.length > 0 ? waited.tools : first.tools,
+        durationMs: (first.durationMs ?? 0) + (waited.waitedMs ?? 0),
+      };
+    }
+  }
   emitResult(result, flags);
   return exitCodeFor(result);
 }
@@ -437,12 +461,11 @@ async function main(argv) {
     }
     case "wait": {
       if (!flags.session) throw new UsageError("wait needs --session <id>");
-      const params = { sessionId: flags.session };
       const timeout = numberOf(flags, "timeout");
-      if (timeout) params.timeoutMs = timeout;
-      const result = await rpcCall("dsh.sessions.wait", params, {
+      const result = await waitForTurn(flags.session, {
+        timeoutMs: timeout ?? DEFAULT_TURN_TIMEOUT_MS,
+        since: numberOf(flags, "since"),
         ...options,
-        timeoutMs: turnBudget(timeout),
       });
       emitResult(result, flags);
       return exitCodeFor(result);
@@ -482,7 +505,20 @@ async function main(argv) {
           throw new UsageError("call params must be valid JSON");
         }
       }
-      const result = await rpcCall(method, params, options);
+      // `--timeout` used to apply to ask/wait only, so `call dsh.sessions.wait`
+      // silently ran on the 120 s control budget. Now it means the same thing
+      // here, and a wait goes through the sliced loop like every other wait.
+      const timeout = numberOf(flags, "timeout");
+      if (method === "dsh.sessions.wait" && typeof params?.sessionId === "string") {
+        const result = await waitForTurn(params.sessionId, {
+          timeoutMs: timeout ?? DEFAULT_TURN_TIMEOUT_MS,
+          since: Number.isInteger(params.since) ? params.since : undefined,
+          ...connectionOptions(flags),
+        });
+        print(JSON.stringify(result, null, 2));
+        return 0;
+      }
+      const result = await rpcCall(method, params, timeout ? { ...connectionOptions(flags), timeoutMs: timeout } : options);
       print(JSON.stringify(result, null, 2));
       return 0;
     }

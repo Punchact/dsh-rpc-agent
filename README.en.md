@@ -197,6 +197,8 @@ A **turn result** carries `sessionId`, `turn`, `status` (`completed` / `aborted`
 
 **Deltas** — `wait` accepts `since`: with it, only events after that sequence are returned (so `text` is just that slice), while `status`, `turn`, `tools`, `usage` and `sandbox` still describe the whole turn — the delta narrows the prose only — and `cursor` still advances. Poll with `since: <last cursor>`; never re-send the prompt.
 
+**Waiting is sliced** — a single HTTP request cannot outlive five minutes (Node's built-in fetch has a 300 s `headersTimeout`; the CLI failed at 303.9 s with `fetch failed`). The bridge therefore answers at `maxWaitSliceMs` (default 240000) with `status:"timeout"` plus `sliceMs`/`requestedMs`, and the caller asks again. The CLI and the MCP tools already loop for you — pass a total budget; a hand-written client must slice itself or keep every wait under 300 s.
+
 **How MCP renders this** — a tool result is an error **only when the call itself failed** (with a code and a `next:` hint). The turn's `status` goes into an `outcome:` line, and **every end reason also gets a `note:` (plain-English explanation) plus a `next:` step — only `completed` gets neither**:
 
 ```

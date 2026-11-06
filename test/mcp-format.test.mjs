@@ -260,3 +260,26 @@ test("an error does not dump data the message already carries", () => {
   const untabled = formatToolError("boom", { next: { tool: "dsh_cancel", args: {} } }, -32099);
   assert.match(textOf(untabled), /"next":\{"tool":"dsh_cancel"/);
 });
+
+test("the wait hint quotes the bridge's configured budget, not a literal", () => {
+  const result = { sessionId: "session-a", status: "timeout", timedOut: true, cursor: 5, turn: 1 };
+  assert.match(textOf(formatToolResult(result)), /timeout_ms: 600000/);
+  assert.match(
+    textOf(formatToolResult(result, { defaultTimeoutMs: 45_000 })),
+    /timeout_ms: 45000/,
+    "a deployment on another default must not be told to ask for 600000",
+  );
+});
+
+test("a field the message already states is not reprinted as data", () => {
+  const text = textOf(
+    formatToolError("session session-a is already running turn 7", { sessionId: "session-a", turn: 7 }, -32004),
+  );
+  assert.doesNotMatch(text, /data: /, "the message already said both values");
+});
+
+test("a runaway tool result is capped, and says by how much", () => {
+  const text = textOf(formatToolResult({ sessionId: "session-a", status: "completed", text: "x".repeat(5000) }));
+  assert.ok(text.length < 2600, "one huge result must not crowd out the meta and next lines");
+  assert.match(text, /truncated 3000 of 5000 chars/);
+});
