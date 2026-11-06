@@ -10,7 +10,7 @@
 //
 // stdout carries protocol frames only; every diagnostic goes to stderr.
 
-import { rpcCall } from "../lib/client.mjs";
+import { rpcCall, waitForTurn, WAIT_SLICE_MS } from "../lib/client.mjs";
 import { PLUGIN_VERSION } from "../lib/version.mjs";
 import { formatToolResult, formatToolError } from "../lib/mcp-format.mjs";
 
@@ -341,8 +341,30 @@ function turnBudget(timeoutMs) {
   return (Number.isInteger(timeoutMs) ? timeoutMs : DEFAULT_TURN_TIMEOUT_MS) + 30_000;
 }
 
+// The bridge may configure other budgets than these literals. Ask it once, then
+// quote its answer in hints and use it as the default turn budget — a hint that
+// names 600000 against a 10-minute deployment is exactly the drift the audit
+// flagged.
+let bridgeDefaults = null;
+
+async function bridgeSettings() {
+  if (bridgeDefaults !== null) return bridgeDefaults;
+  try {
+    const info = await rpcCall("dsh.discover", {}, { timeoutMs: 5_000 });
+    bridgeDefaults = { ...(info?.config ?? {}) };
+  } catch {
+    // A bridge that cannot answer now will fail the real call with a better
+    // message; the literal default keeps the hint usable meanwhile.
+    bridgeDefaults = {};
+  }
+  return bridgeDefaults;
+}
+
 async function callTool(name, args) {
   try {
+    const defaults = await bridgeSettings();
+    const turnDefault = Number.isInteger(defaults.defaultTimeoutMs) ? defaults.defaultTimeoutMs : DEFAULT_TURN_TIMEOUT_MS;
+    const hintOptions = { defaultTimeoutMs: turnDefault };
     switch (name) {
       case "dsh_ask": {
         const prompt = typeof args.prompt === "string" ? args.prompt : "";
@@ -382,8 +404,33 @@ async function callTool(name, args) {
         // work in the same directory do not inherit each other's session.
         params.namespace = clientNamespace;
 
-        const result = await rpcCall("dsh.sessions.ask", params, { timeoutMs: turnBudget(args.timeout_ms) });
-        return formatToolResult(result);
+        if (params.wait === false) {
+          const result = await rpcCall("dsh.sessions.ask", params, { timeoutMs: turnBudget(args.timeout_ms ?? turnDefault) });
+          return formatToolResult(result, hintOptions);
+        }
+        // Blocking: ask for one slice, then keep waiting in slices. A single
+        // request that stayed quiet past ~300 s would be cut by the transport.
+        const timeoutMs = Number.isInteger(args.timeout_ms) ? args.timeout_ms : turnDefault;
+        const slice = Math.min(timeoutMs, WAIT_SLICE_MS);
+        const first = await rpcCall(
+          "dsh.sessions.ask",
+          { ...params, timeoutMs: slice },
+          { timeoutMs: slice + 30_000 },
+        );
+        if (first?.status === "timeout" && typeof first.sessionId === "string") {
+          const left = timeoutMs - (first.durationMs ?? slice);
+          if (left > 1_000) {
+            const waited = await waitForTurn(first.sessionId, { timeoutMs: left });
+            return formatToolResult({
+              ...first,
+              ...waited,
+              text: waited.text || first.text,
+              tools: waited.tools?.length > 0 ? waited.tools : first.tools,
+              durationMs: (first.durationMs ?? 0) + (waited.waitedMs ?? 0),
+            }, hintOptions);
+          }
+        }
+        return formatToolResult(first, hintOptions);
       }
 
       case "dsh_workspaces": {
@@ -436,11 +483,13 @@ async function callTool(name, args) {
       case "dsh_wait": {
         const sessionId = typeof args.session_id === "string" ? args.session_id.trim() : "";
         if (!sessionId) return formatToolError("`session_id` is required", undefined, "call dsh_sessions() to find the session id");
-        const params = { sessionId };
-        if (Number.isInteger(args.since)) params.since = args.since;
-        if (Number.isInteger(args.timeout_ms)) params.timeoutMs = args.timeout_ms;
-        const result = await rpcCall("dsh.sessions.wait", params, { timeoutMs: turnBudget(args.timeout_ms) });
-        return formatToolResult(result);
+        // Sliced on purpose: see waitForTurn(). One long request cannot survive
+        // the transport's 300 s ceiling, and the answer would be lost with it.
+        const result = await waitForTurn(sessionId, {
+          timeoutMs: Number.isInteger(args.timeout_ms) ? args.timeout_ms : turnDefault,
+          since: Number.isInteger(args.since) ? args.since : undefined,
+        });
+        return formatToolResult(result, hintOptions);
       }
 
       case "dsh_cancel": {

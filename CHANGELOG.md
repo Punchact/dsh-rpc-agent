@@ -10,6 +10,16 @@
 
 暂无。
 
+## [0.5.2] - 2026-11-06
+
+0.5.1 尚未发布到 npm。这一版修的是"等不到"：**单次 HTTP 请求活不过五分钟**，所以等待改成分片循环。
+
+- **等待不再被传输层掐死**：桥把单次等待切成 `maxWaitSliceMs`（默认 240000，配置项），到点返回 `status:"timeout"` 并附 `sliceMs` / `requestedMs` 说明"这次只被允许等这么久"；CLI 与 MCP 的 `wait` / `ask` 自动续等，直到轮次结束或预算用完。此前 `wait --timeout 400000` 在 303.9 秒报 `fetch failed`——因为 Node 内建 fetch 的 `headersTimeout` 是 300 秒，与服务端无关。
+- `dsh.discover` 现在返回 `config`（含 `defaultTimeoutMs` / `maxWaitSliceMs`），MCP 的提示文案与默认预算据此生成，不再写死 `600000`。
+- CLI `call` 的 `--timeout` 对本子命令生效，且 `call dsh.sessions.wait` 走分片等待（此前固定 120 秒）。
+- CLI `wait` 新增 `--since <cursor>`，只取该游标之后的增量。
+- 渲染：消息里已经说过的字段不再重复成 `data: {…}`；超过 2000 字的工具正文截断并标注截断量；空闲会话不再显示 `turn 0`。
+
 ## [0.5.1] - 2026-11-06
 
 0.5.0 尚未发布到 npm。这一版修掉实地冒烟发现的四处输出约定问题、一处文档口径，以及一处把 `` --model `` 吞掉的静默丢参。

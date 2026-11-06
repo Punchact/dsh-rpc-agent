@@ -1238,3 +1238,38 @@ test("sessions.list filters by cwd prefix and sorts newest first", async () => {
   const byCreated = await methods.listSessions({ sort: "createdAt" });
   assert.equal(byCreated.sort, "createdAt", "a sort the Host cannot answer still sorts deterministically");
 });
+test("a wait longer than the slice is answered at the slice boundary", async () => {
+  // The transport aborts a request after ~300 s, so the bridge must answer first
+  // and let the caller ask again. The slice is configurable so this exercises it
+  // in milliseconds instead of five minutes.
+  const controller = fakeController({
+    script: [{ kind: "start", turn: 1 }, { kind: "text", turn: 1, text: "还没完" }],
+  });
+  const methods = build(controller, { maxWaitSliceMs: 1_200 });
+  const keepAlive = setTimeout(() => {}, 10_000);
+  try {
+    const result = await methods.ask({ text: "slow", timeoutMs: 10_000 });
+    assert.equal(result.status, "timeout");
+    assert.equal(result.timedOut, true);
+    assert.equal(result.sliceMs, 1_200, "say how long this request was allowed to wait");
+    assert.equal(result.requestedMs, 10_000, "and how long the caller actually asked for");
+  } finally {
+    clearTimeout(keepAlive);
+  }
+});
+
+test("a budget below the slice is not reported as sliced", async () => {
+  const controller = fakeController({
+    script: [{ kind: "start", turn: 1 }, { kind: "text", turn: 1, text: "还没完" }],
+  });
+  const methods = build(controller, { maxWaitSliceMs: 60_000 });
+  const keepAlive = setTimeout(() => {}, 10_000);
+  try {
+    const result = await methods.ask({ text: "slow", timeoutMs: 1_000 });
+    assert.equal(result.status, "timeout");
+    assert.equal(result.sliceMs, undefined, "no slice means no slice field");
+    assert.equal(result.requestedMs, undefined);
+  } finally {
+    clearTimeout(keepAlive);
+  }
+});
