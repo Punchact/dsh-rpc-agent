@@ -237,9 +237,9 @@ function fakeController({
   return controller;
 }
 
-function build(controller, overrides = {}, services = {}) {
+function build(controller, overrides = {}, services = {}, options = {}) {
   return createMethods(
-    { sessionController: controller, webServer: ORIGIN },
+    { sessionController: controller, webServer: ORIGIN, approvals: options.approvals ?? null },
     resolveConfig(overrides),
     { get: (name) => services[name] },
     {},
@@ -845,7 +845,7 @@ test("a deployment without permissionPresets reports that instead of crashing", 
   );
 });
 
-test("a sandbox refusal is reported as a fact plus the one documented escalation", async () => {
+test("a sandbox refusal is reported as a fact, and the preset stays the caller's decision", async () => {
   const controller = fakeController({
     script: [
       { kind: "start", turn: 1 },
@@ -867,7 +867,12 @@ test("a sandbox refusal is reported as a fact plus the one documented escalation
   assert.equal(result.sandbox.denied, true);
   assert.equal(result.sandbox.marker, "[sandbox: file access denied under workspace-write mode]");
   assert.equal(result.sandbox.source, "tool");
-  assert.deepEqual(result.next.args, { session_id: "session-test", permission: "danger-full-access" });
+  // The bridge names the decision but does not make it: handing back a ready-made
+  // "retry with danger-full-access" call would let the blocked agent's own wording
+  // steer it. Only the session id travels; `permission` is the caller's to add.
+  assert.deepEqual(result.next.args, { session_id: "session-test" });
+  assert.match(result.next.reason, /caller's decision/);
+  assert.doesNotMatch(JSON.stringify(result.next), /danger-full-access/);
   assert.equal(result.next.tool, "dsh_ask");
   // The refusal is not an error: the turn ran and the tool error keeps its own flag.
   assert.equal(result.tools[0].isError, true);
@@ -1355,4 +1360,79 @@ test("a finished call lets go of the caller's abort signal", async () => {
   assert.equal(result.status, "completed");
   assert.equal(added.length, 1, "the run must subscribe to the caller's signal");
   assert.ok(removed.includes(added[0]), "and let go of it when the call ends");
+});
+
+
+test("a turn held on an approval answers while the approval is still open", async () => {
+  // The field shape this guards: the caller is blocked inside the very tool call
+  // that is holding the turn, so it cannot ask `approvals.pending` until the call
+  // returns. Without the race the deadline always expires first and `delegate`
+  // can never actually delegate.
+  const { createPendingStore } = await import("../lib/pending.mjs");
+  const store = createPendingStore({ deadlineMs: 60_000 });
+  const controller = fakeController({
+    historical: [{ type: "turn/start", data: { turn: 1 }, seq: 1 }],
+    script: [],
+    stuckAfterSnapshot: true,
+  });
+  const methods = build(
+    controller,
+    { maxWaitSliceMs: 30_000, approvals: { mode: "delegate", deadlineMs: 60_000 } },
+    {},
+    { approvals: store },
+  );
+
+  const started = Date.now();
+  const pending = methods.wait({ sessionId: "s-1", timeoutMs: 30_000 });
+  // Give the run time to reach the consume loop before the question appears.
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const opened = store.open({ sessionId: "s-1", toolName: "bash", escalation: "danger-full-access", argv: "echo hi" });
+
+  const result = await pending;
+  const elapsed = Date.now() - started;
+  assert.equal(result.status, "waiting-approval");
+  assert.equal(result.timedOut, false);
+  assert.equal(result.pendingApproval.approvalId, opened.approvalId);
+  assert.equal(result.next.tool, "dsh_approvals_resolve");
+  assert.ok(elapsed < 5_000, `answered while the approval was open (${elapsed} ms)`);
+  store.resolve(opened.approvalId, "reject");
+});
+
+
+test("a preset change cannot touch a session this bridge does not own", async () => {
+  // A preset change is an escalation route that never passes through the tool
+  // gate. Without this rule, `configure` would let any holder of the token widen
+  // a session a human is driving, and no one would be asked.
+  const permissions = fakePermissions({
+    options: [{ value: "workspace-write" }, { value: "danger-full-access" }],
+    defaultPreset: "workspace-write",
+  });
+  const sessions = { get: (id) => ({ id, header: { cwd: "C:/work" } }) };
+  const methods = build(fakeController({}), {}, { permissionPresets: permissions, sessions });
+  await assert.rejects(
+    () => methods.configure({ sessionId: "someone-else", permissionPreset: "workspace-write" }),
+    /not created by this bridge/,
+  );
+  assert.deepEqual(permissions.applied, []);
+});
+
+test("with approvals on, a preset change cannot skip the gate to full access", async () => {
+  const permissions = fakePermissions({
+    options: [{ value: "workspace-write" }, { value: "danger-full-access" }],
+    defaultPreset: "workspace-write",
+  });
+  const sessions = { get: (id) => ({ id, header: { cwd: "C:/work" } }) };
+  const methods = build(
+    fakeController({}),
+    { approvals: { mode: "deny", deadlineMs: 60_000 } },
+    { permissionPresets: permissions, sessions },
+  );
+  const created = await methods.createSession({ cwd: "C:/work" });
+  await assert.rejects(
+    () => methods.configure({ sessionId: created.sessionId, permissionPreset: "danger-full-access" }),
+    /refusing to raise a session/,
+  );
+  // Nothing wider than the current preset is an escalation, so it still works.
+  await methods.configure({ sessionId: created.sessionId, permissionPreset: "workspace-write" });
+  assert.equal(permissions.applied.at(-1).name, "workspace-write");
 });

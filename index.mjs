@@ -10,9 +10,12 @@
 //  * Fail loud on a bad config, stay inert (but loaded) when disabled.
 
 import { endpointPath, loadOrCreateToken, tokenPath, writeEndpoint } from "./lib/auth.mjs";
+import { createApprovalGate } from "./lib/approvals.mjs";
 import { MAX_WAIT_SLICE_MS, MIN_WAIT_SLICE_MS, resolveConfig } from "./lib/config.mjs";
 import { buildDispatcher, registerRoutes } from "./lib/http.mjs";
 import { createMethods } from "./lib/methods.mjs";
+import { isOwnedSession } from "./lib/owned.mjs";
+import { createPendingStore } from "./lib/pending.mjs";
 import { createStats } from "./lib/stats.mjs";
 import { PLUGIN_NAME, PLUGIN_VERSION } from "./lib/version.mjs";
 
@@ -47,8 +50,13 @@ export function apply(ctx, input = {}) {
     endpointUrl: null,
   };
 
+  // Escalations this bridge holds for a caller to answer (approvals.mode=delegate).
+  // The store owns the deadline: the Host's approval service has none, and an
+  // unanswered question has to become a refusal rather than a hang.
+  const approvals = createPendingStore({ deadlineMs: config.approvals.deadlineMs, log });
+
   const methods = createMethods(
-    { sessionController: ctx.sessionController, webServer: ctx.webServer },
+    { sessionController: ctx.sessionController, webServer: ctx.webServer, approvals },
     config,
     ctx,
     state,
@@ -68,6 +76,63 @@ export function apply(ctx, input = {}) {
     log,
     stats,
   });
+
+  // Refuse in-place escalations from our own sessions (lib/approvals.mjs). Off by
+  // default: the Host already fails closed with nobody answering, and taking a
+  // decision away from a human watching the GUI is not a safe default.
+  //
+  // The seam is `tools/pre-execute`, not `approval/request`: the approval service
+  // dispatches through `scopeTarget(req.agent, req.agent)`, which only reaches
+  // answerers inside the agent's own composition. Measured on a live session — a
+  // listener on this context (and on the root context) was never called while the
+  // GUI kept the dialog open. The pre-execute waterfall is global, so it can.
+  const gate = createApprovalGate({
+    mode: config.approvals.mode,
+    isOwned: isOwnedSession,
+    onDeny: () => stats.recordApproval("denied"),
+    onAllow: () => stats.recordApproval("allowed"),
+    applyPreset: async (sessionId, name) => {
+      const service = ctx.get?.("permissionPresets");
+      if (!service?.set) throw new Error("this deployment exposes no permissionPresets service");
+      const session = ctx.get?.("sessions")?.get?.(sessionId);
+      if (!session) throw new Error(`session ${sessionId} is not live`);
+      service.set(session, name);
+      return name;
+    },
+    currentPreset: (sessionId) => {
+      const service = ctx.get?.("permissionPresets");
+      const session = ctx.get?.("sessions")?.get?.(sessionId);
+      if (!service?.current || !session) return null;
+      return service.current(session) ?? null;
+    },
+    store: approvals,
+    log,
+  });
+  if (gate) {
+    if (typeof ctx.on === "function") {
+      ctx.on("tools/pre-execute", gate.pre, { prepend: true });
+      // `allow-once` widens the preset only for the approved call, so the gate
+      // has to see that call finish. Its own safety timer restores the preset
+      // even when the tool never reports.
+      ctx.on("tools/post-execute", gate.post);
+      log.info?.(
+        `[dsh-rpc] approvals.mode=${config.approvals.mode}: ` +
+          (config.approvals.mode === "delegate"
+            ? `holding sandbox escalations from sessions this bridge created for up to ${config.approvals.deadlineMs} ms`
+            : "refusing sandbox escalations from sessions this bridge created"),
+      );
+    } else {
+      log.warn?.(
+        `[dsh-rpc] approvals.mode=${config.approvals.mode} needs ctx.on: the escalation gate is not registered`,
+      );
+    }
+    // A reload or a shutdown must not leave a session widened with nothing left to
+    // put it back: `dispose` restores every widened preset and stops the fallback
+    // timers.
+    if (typeof ctx.effect === "function") {
+      ctx.effect(() => () => gate.dispose?.(), "dsh-rpc.approval-gate");
+    }
+  }
 
   // Publish the endpoint so out-of-process callers (CLI, MCP bridge, curl) can
   // discover url + token without being told the port. `getOrigin()` throws

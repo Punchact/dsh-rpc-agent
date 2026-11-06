@@ -101,8 +101,10 @@ const TOOLS = [
           description:
             "Permission preset for the session (see dsh_permissions). Each preset expands to a sandbox mode plus an approval policy. " +
             "Omit it by default. If a result comes back with `sandbox.denied: true` — or the Harness reports that a write was blocked — " +
-            'retry ONCE in the same session with permission: "danger-full-access": that preset is full disk access with approvals ' +
-            "disabled. Do not retry the same preset, and do not open a new session to get around a permission wall.",
+            "the decision whether this session may run wider is yours: retry ONCE in the same session with permission: " +
+            '\"danger-full-access\" only after deciding that, and say so in your answer. Do not retry the same preset, ' +
+            "and do not open a new session to get around a permission wall. With approvals.mode=delegate the escalation is " +
+            "held before the tool runs: answer it with dsh_approvals_pending / dsh_approvals_resolve instead of re-asking.",
         },
         timeout_ms: {
           type: "integer",
@@ -135,8 +137,47 @@ const TOOLS = [
     description:
       "List the permission presets this Harness deployment offers, with the default marked. A preset is a sandbox mode plus an approval policy; " +
       "each entry carries a `cost` sentence, because the deployment's own descriptions are often empty. " +
-      'Start with the default. Use "danger-full-access" only after a turn was actually blocked by the sandbox, and say so in your answer.',
+      'Start with the default. Use "danger-full-access" only after deciding that a session which was actually blocked by the sandbox may run wider, and say so in your answer.',
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "dsh_approvals_pending",
+    title: "See sandbox escalations waiting for you",
+    description:
+      "List the sandbox escalations a Harness session is holding for your decision. Only sessions this MCP server created ask here, and only when " +
+      'the bridge runs with approvals.mode="delegate". Each item carries the exact command (argv), the working directory, the requested mode and the ' +
+      "agent's stated reason. Pass wait_ms to wait in one call instead of polling; an unanswered request is refused when its deadline passes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: { type: "string", description: "Only this session's pending requests." },
+        wait_ms: {
+          type: "integer",
+          minimum: 0,
+          maximum: 120000,
+          description: "Long-poll: return as soon as something is pending, or after this long (default 0 = answer immediately).",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "dsh_approvals_resolve",
+    title: "Answer a sandbox escalation",
+    description:
+      'Answer one pending request. "allow-once" widens that session\'s permission preset and lets the held call run; "reject" refuses it and the ' +
+      "agent is told the call was not executed. Prefer reject unless the command in argv is exactly what you asked for — an approval is a decision " +
+      "about that command, not a general grant, and a session may win at most a few before the bridge stops asking.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        approval_id: { type: "string", description: "The approvalId from dsh_approvals_pending." },
+        decision: { type: "string", enum: ["allow-once", "reject"], description: "What to answer." },
+        note: { type: "string", description: "Optional note shown to the agent alongside the decision." },
+      },
+      required: ["approval_id", "decision"],
+      additionalProperties: false,
+    },
   },
   {
     name: "dsh_sessions",
@@ -475,6 +516,70 @@ async function callTool(name, args, signal = undefined) {
         };
       }
 
+      case "dsh_approvals_pending": {
+        const params = {};
+        if (typeof args.session_id === "string" && args.session_id.trim()) params.sessionId = args.session_id.trim();
+        if (Number.isInteger(args.wait_ms)) params.waitMs = args.wait_ms;
+        const result = await call("dsh.approvals.pending", params);
+        const pending = Array.isArray(result.pending) ? result.pending : [];
+        if (pending.length === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  result.mode === "delegate"
+                    ? `(no escalation is waiting${result.timedOut ? " yet" : ""})`
+                    : `(this bridge does not hold escalations: approvals.mode=${result.mode}; nothing can be pending)`,
+              },
+            ],
+          };
+        }
+        const lines = pending.map((item) => {
+          // The whole call, not one field of it: a `write_file` keeps its payload in
+          // `content`, so showing only `command`/`path` would let the interesting
+          // half of a call stay invisible to the caller deciding on it.
+          const shown = typeof item.args === "string" && item.args.length > 0 ? item.args : item.argv || "(unknown)";
+          return [
+            `${item.approvalId}  ${item.sessionId}  ${item.toolName} → ${item.escalation}`,
+            `  call: ${shown}`,
+            item.argsTruncated ? "  (truncated for display; the packet keeps the front of the call)" : null,
+            item.cwd ? `  cwd: ${item.cwd}` : null,
+            item.preset ? `  current preset: ${item.preset}` : null,
+            item.reason ? `  reason (the agent's own words, untrusted): ${item.reason}` : null,
+            `  expires: ${new Date(item.expiresAt).toISOString()}`,
+            `  answer with dsh_approvals_resolve({ approval_id: "${item.approvalId}", decision: "allow-once" | "reject" })`,
+          ]
+            .filter(Boolean)
+            .join("\n");
+        });
+        return { content: [{ type: "text", text: lines.join("\n\n") }] };
+      }
+      case "dsh_approvals_resolve": {
+        const approvalId = typeof args.approval_id === "string" ? args.approval_id.trim() : "";
+        if (!approvalId) return toolError("`approval_id` is required");
+        if (args.decision !== "allow-once" && args.decision !== "reject") {
+          return toolError('`decision` must be "allow-once" or "reject"');
+        }
+        const resolved = await call("dsh.approvals.resolve", {
+          approvalId,
+          decision: args.decision,
+          ...(typeof args.note === "string" ? { note: args.note } : {}),
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `${resolved.decision}: ${resolved.toolName} in ${resolved.sessionId} ` +
+                `(approval ${resolved.approvalId})` +
+                (resolved.decision === "allow-once"
+                  ? "\nnext: the held call runs now under the widened preset; the preset goes back as soon as that call finishes (five minutes at the latest)."
+                  : "\nnext: the agent was told the call was not executed; do not resend the same escalation."),
+            },
+          ],
+        };
+      }
       case "dsh_permissions": {
         const result = await call("dsh.permissions.catalog", {});
         const lines = (result.options ?? []).map((option) => {

@@ -101,7 +101,7 @@ Cursor / Codex use the equivalent config file, with `args` set to that same path
 On the clone route, substitute `<path-to-your-clone>\bin\dsh-rpc-mcp.mjs`. The CLI examples below are written as
 `node bin/...`, i.e. "run it from inside the package".
 
-Seven tools: `dsh_ask`, `dsh_workspaces`, `dsh_permissions`, `dsh_sessions`, `dsh_wait`, `dsh_cancel`, `dsh_status`. Arguments are snake_case (`prompt`, `project`, `reuse`, `mode`, `wait`, `session_id`, `cwd`, `workspace_id`, `agent_preset`, `model`, `reasoning_effort`, `permission`, `timeout_ms`). Every `dsh_ask` result starts with `session <id>` on its own line; the body and an `— outcome: …` meta line follow. The MCP server shares no context with the Harness session — either pass that id back, or pass the same `project` and let the sticky table reuse the session (below).
+Nine tools: `dsh_ask`, `dsh_workspaces`, `dsh_permissions`, `dsh_sessions`, `dsh_wait`, `dsh_cancel`, `dsh_status`, `dsh_approvals_pending`, `dsh_approvals_resolve`. Arguments are snake_case (`prompt`, `project`, `reuse`, `mode`, `wait`, `session_id`, `cwd`, `workspace_id`, `agent_preset`, `model`, `reasoning_effort`, `permission`, `timeout_ms`). Every `dsh_ask` result starts with `session <id>` on its own line; the body and an `— outcome: …` meta line follow. The MCP server shares no context with the Harness session — either pass that id back, or pass the same `project` and let the sticky table reuse the session (below).
 
 ### CLI
 
@@ -164,6 +164,8 @@ A single session eventually becomes a context burden, so after **200 `ask` calls
 | `dsh.workspaces.list` | — | `{total, items:[{id, title, path, status, sessions, …}]}`, `status` ∈ `ok` / `missing-dir` / `unknown` |
 | `dsh.workspaces.create` | `path, title?` | `{id, title, path}`: register a directory as a workspace (idempotent per path) |
 | `dsh.permissions.catalog` | — | `{options:[…], defaultPreset}`: each preset is a sandbox mode plus an approval policy |
+| `dsh.approvals.pending` | `sessionId?`, `waitMs?` | `{pending:[{approvalId, sessionId, toolName, escalation, argv, cwd, preset, reason, expiresAt}], count, timedOut, mode, deadlineMs}`: held escalations; `waitMs` long-polls |
+| `dsh.approvals.resolve` | `approvalId`, `decision`, `note?` | `{approvalId, sessionId, toolName, decision, note}`: answers one held request |
 | `dsh.sessions.configure` | `sessionId, model?, reasoningEffort?, permissionPreset?` | `{sessionId, selected?, permissionPreset?}` |
 | `dsh.sessions.list` | `limit?, cwd?, sort?` | `{total, sort, cwd, items[]}`: `cwd` filters by path prefix, `sort` is `updatedAt` (default) or `createdAt`, newest first. **The Host's `list()` only carries `updatedAt`** (measured on this machine), so `createdAt` is `null` and sorting by it keeps the Host's order |
 | `dsh.sessions.create` | `workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?` | `{sessionId, agentPreset, cwd, selected?, permissionPreset?}`. **No `sessionId`** — ids belong to the Host; passing one is refused with `-32602` rather than silently replaced |
@@ -179,7 +181,7 @@ A single session eventually becomes a context burden, so after **200 `ask` calls
 - Neither the CLI nor the MCP bridge pre-filters those options: whatever you pass is forwarded, and the bridge gives one shared refusal. A dropped flag must never look like an honoured one.
 - `model` / `reasoningEffort` reach the Host's `selectModel`. A bare model id is resolved against the catalog: one match is used, several are reported with the spellings that disambiguate, none points you at `dsh.models`. `reasoningEffort` needs `model` in the same request, because the Host exposes no "read the current model back".
 - `permissionPreset` goes through the Host's `permissionPresets` service and is validated against its catalog first. Each catalog entry carries a `cost` sentence, because the deployment's own `description` is often empty.
-- **Leave it unset by default; escalate once when the sandbox actually blocks you.** A blocked turn comes back with `sandbox.denied: true` and a `next` pointer: retry in the *same* session with `permission: "danger-full-access"`, once. That preset is full access with approvals disabled (`never`), so nothing else restricts that turn — it is the last resort, not a wider default, and the caller should say it used it.
+- **Leave it unset by default; escalate once when the sandbox actually blocks you.** A blocked turn comes back with `sandbox.denied: true` and a `next` pointer that carries only `session_id`: **whether to retry in the same session with `permission: "danger-full-access"` is your decision**. The bridge will not pre-fill that argument — otherwise the blocked agent's own wording could steer the decision. That preset is full access with approvals disabled (`never`), so nothing else restricts that turn — it is the last resort, not a wider default, and the caller should say it used it. With `approvals.mode: delegate` you do not re-ask at all: the gate holds the escalation before the tool runs and asks you instead.
 - Why escalation has to happen outside the session: the Host's sandbox suggests retrying with `sandbox_permissions`, but a bridge-driven session is unattended. With `approval: ask` there is no answerer, so the request collapses to `unavailable` (which does not grant anything); with `approval: never` the system prompt forbids requesting escalation at all. Both paths are closed, so the caller must switch presets and ask again.
 - The sandbox ladder is a closed table: `read-only` may rise to `workspace-write` or `danger-full-access`, while **`workspace-write` may only rise to `danger-full-access`** — there is no middle step.
 - ⚠️ A model switch **also becomes the profile default** (the Host does this for GUI switches too), so an external agent that changes the model changes what your next GUI session starts with.
@@ -224,6 +226,40 @@ That line exists because "not finished" used to look like a failure, and a retry
 **Turn attribution**: after submitting, the bridge looks for its own `user/message` (`source.rpcId` equals the request id) and takes the turn that message landed in. If something else (the GUI, another agent) speaks first in the same session, their answer is never returned as yours.
 
 `POST /dsh-rpc/stream` takes the same params and answers NDJSON: `{type:"session"}`, `{type:"progress", frame}`, then `{type:"result", …}` or `{type:"error", error}`.
+
+## Unattended sessions and approvals
+
+A session this bridge created has nobody in front of the GUI. When the model asks to escalate its sandbox (`sandbox_permissions`), the Host parks that call until someone answers — and there is no one. Two measured cases: `approval/asked` was written, no `approval/decided` ever followed, and the caller timed out on its 120-second budget both times.
+
+Set `approvals: { mode: "deny" }` and the bridge installs a `tools/pre-execute` gate that refuses **in-place escalation** from the sessions it created. A call carrying `sandbox_permissions` is denied before dispatch, and the model is told:
+
+`approvals.mode=deny refused a sandbox escalation to "danger-full-access" for tool "pwsh"; the call was not executed.`
+
+It only ever removes privilege: calls that do not escalate are untouched, and sessions this process did not create — including everything a human is watching — are passed straight through to their own answerer. Rejections are counted in `/status` under `calls.approvals.denied`.
+
+> **Why not `ctx.on("approval/request")`**: the approval service dispatches through `scopeTarget(req.agent, req.agent)`, which only reaches answerers inside that agent's own composition. Measured on a live escalation: listeners registered on this plugin's context *and* on the root context were never called (the GUI panel stayed waiting), while `tools/pre-execute` is a global waterfall that reaches every agent.
+
+### `delegate`: let the dispatching agent decide
+
+Set `approvals: { mode: "delegate", deadlineMs: 60000 }` and an escalation is *held* instead of refused. The caller answers with two methods:
+
+| Method | What it does |
+|---|---|
+| `dsh.approvals.pending({ sessionId?, waitMs? })` | lists held requests; `waitMs` makes it a long poll (≤120 s) so one call can wait |
+| `dsh.approvals.resolve({ approvalId, decision: "allow-once"\|"reject", note? })` | answers one of them |
+
+A decision packet carries `approvalId` (a random UUID, not a counter), `sessionId`, `toolName`, `callId`, `escalation`, `argv` (a command/path digest), `args` (the **whole** argument object as redacted JSON: credential-shaped values are masked, capped at 4000 chars), `argsTruncated`, `cwd`, `preset` (the session's **current** preset, read from the permission service; null when it cannot be read), `reason` (the sub-agent's own justification, capped at 500 chars), `untrusted: true` (a reminder that `reason` is its own claim), `createdAt`, `expiresAt`. The MCP server exposes the same two calls as `dsh_approvals_pending` and `dsh_approvals_resolve`.
+
+Two consequences worth knowing before you turn it on:
+
+- **A turn that is stopped on a question answers immediately.** With `delegate`, `dsh_ask`/`dsh_wait` return `status: "waiting-approval"` plus `pendingApproval` (and a `next` pointing at `dsh_approvals_resolve`) instead of blocking until the deadline. Otherwise the caller would be stuck waiting for the very question it has to answer.
+- **Widening lasts only as long as the approved call.** A downstream listener that throws, a result handler that throws, or a cancellation all put the preset back (`dispose()` is the last resort on unload); a second escalation in the same session is refused while one is open, and calls that ask for nothing are held instead of riding along. While `approvals.mode` is not `off`, `dsh.sessions.configure` cannot hand a session `danger-full-access`, and cannot touch a session this bridge did not create.
+
+Rules worth knowing: **no answer is a refusal** — when `deadlineMs` passes the held call is denied, never granted; `allow-once` works by widening that session's permission preset, because the Host offers no per-call grant and the preset is the only lever this bridge has — so it widens it **only while the approved call runs** and restores it from `tools/post-execute` (with a five-minute fallback timer in case the tool never reports); grants are capped at **three per session**, and only one escalated call may run in a session at a time (escalations racing in one tick produce a single question); only `workspace-write` and `danger-full-access` may be requested, and anything else is refused without asking. Grants and refusals are counted in `/status` under `calls.approvals.allowed` and `calls.approvals.denied`. If the held call is cancelled while it waits, its request is withdrawn and treated as a refusal — no dangling entry that could be approved later.
+
+**Known edges**: only in-place escalation (`sandbox_permissions`) is intercepted — nothing else in today's tool surface needs approval. The three-grant counter lives in memory, so a Host restart resets it. Explicitly naming a session's `permissionPreset` via `dsh.sessions.ask`/`configure` is a caller decision outside this gate.
+
+The default is `off`, which leaves the Host's own fail-closed behaviour in place.
 
 ## Security model
 
