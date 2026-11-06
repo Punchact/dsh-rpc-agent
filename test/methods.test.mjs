@@ -59,6 +59,7 @@ function fakeController({
   historical = [],
   hostCwd = "/host/resolved",
   models = null,
+  stuckAfterSnapshot = false,
 } = {}) {
   const events = [...historical];
   const subscribers = new Set();
@@ -214,6 +215,12 @@ function fakeController({
           records: events.slice(-50).map((event) => ({ type: "event", event })),
           hasMore: false,
         };
+        if (stuckAfterSnapshot) {
+          // A Host whose stream stopped producing frames and whose abort handler
+          // never runs: nothing is pending on an event, so there is nothing for
+          // `out.close()` to resolve.
+          await new Promise(() => {});
+        }
         for (;;) {
           const next = await out.next();
           if (next.done || signal?.aborted) return;
@@ -1281,5 +1288,44 @@ test("discover publishes the running config, so clients stop copying defaults", 
   assert.equal(info.plugin, "dsh-rpc-agent");
   assert.ok(info.config, "discover must carry the config the MCP layer reads");
   assert.equal(info.config.defaultTimeoutMs, 600_000);
-  assert.equal(info.config.maxWaitSliceMs, 240_000, "the slice ceiling is part of the contract");
+  assert.equal(info.config.maxWaitSliceMs, 120_000, "the slice default is part of the contract");
+});
+
+test("the wait slice default is two minutes and a stray value is clamped, not rejected", () => {
+  assert.equal(resolveConfig({}).maxWaitSliceMs, 120_000);
+  assert.equal(resolveConfig({}).maxWaitSliceMsRequested, undefined);
+
+  const tooBig = resolveConfig({ maxWaitSliceMs: 900_000 });
+  assert.equal(tooBig.maxWaitSliceMs, 240_000, "one response cannot wait longer than the ceiling");
+  assert.equal(tooBig.maxWaitSliceMsRequested, 900_000, "the operator can still see what was asked for");
+
+  const tooSmall = resolveConfig({ maxWaitSliceMs: 200 });
+  assert.equal(tooSmall.maxWaitSliceMs, 1_000, "a slice below one second is pointless");
+  assert.equal(tooSmall.maxWaitSliceMsRequested, 200);
+
+  assert.equal(resolveConfig({ maxWaitSliceMs: 90_000 }).maxWaitSliceMsRequested, undefined);
+});
+
+test("a Host stream that never returns control cannot hold the answer past the slice", async () => {
+  // The field case this guards: the turn was parked on a long background job, the
+  // stream produced no frames, and one `wait` never came back (13 minutes on a
+  // five-minute budget). The abort is cooperative, so the deadline must be able to
+  // answer on its own.
+  // A turn already in flight when we attach: that is what makes this a *wait*
+  // rather than the "nothing to wait for" shortcut.
+  const controller = fakeController({
+    historical: [{ type: "turn/start", data: { turn: 1 }, seq: 1 }],
+    script: [],
+    stuckAfterSnapshot: true,
+  });
+  // 1000 is the floor `MIN_WAIT_SLICE_MS` enforces, so a smaller value would be
+  // clamped up and this test would measure the clamp instead of the deadline.
+  const methods = build(controller, { maxWaitSliceMs: 1_000 });
+  const started = Date.now();
+  const result = await methods.wait({ sessionId: "s-1", timeoutMs: 10_000 });
+  const elapsed = Date.now() - started;
+  assert.equal(result.status, "timeout");
+  assert.equal(result.timedOut, true);
+  assert.equal(result.sliceMs, 1_000);
+  assert.ok(elapsed < 3_000, `answered at the slice boundary, not when the Host felt like it (${elapsed} ms)`);
 });

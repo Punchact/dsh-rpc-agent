@@ -415,7 +415,7 @@ async function callTool(name, args) {
         const first = await rpcCall(
           "dsh.sessions.ask",
           { ...params, timeoutMs: slice },
-          { timeoutMs: slice + 30_000 },
+          { timeoutMs: Math.min(slice + 30_000, 280_000) },
         );
         if (first?.status === "timeout" && typeof first.sessionId === "string") {
           const left = timeoutMs - (first.durationMs ?? slice);

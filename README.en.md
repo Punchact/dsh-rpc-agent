@@ -158,7 +158,7 @@ A single session eventually becomes a context burden, so after **200 `ask` calls
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `dsh.discover` | — | version, running config (`defaultTimeoutMs`, `maxWaitSliceMs`), transport address, method catalog |
+| `dsh.discover` | — | version, running config (`defaultTimeoutMs`, `maxWaitSliceMs`, plus `maxWaitSliceMsRequested` when clamped), transport address, method catalog |
 | `dsh.ping` | — | `{ok, plugin, version, protocol, origin, tokenSource, activeRuns}` |
 | `dsh.models` | — | routable providers and models |
 | `dsh.workspaces.list` | — | `{total, items:[{id, title, path, status, sessions, …}]}`, `status` ∈ `ok` / `missing-dir` / `unknown` |
@@ -197,7 +197,7 @@ A **turn result** carries `sessionId`, `turn`, `status` (`completed` / `aborted`
 
 **Deltas** — `wait` accepts `since`: with it, only events after that sequence are returned (so `text` is just that slice), while `status`, `turn`, `tools`, `usage` and `sandbox` still describe the whole turn — the delta narrows the prose only — and `cursor` still advances. Poll with `since: <last cursor>`; never re-send the prompt.
 
-**Waiting is sliced** — a single HTTP request cannot outlive five minutes (Node's built-in fetch has a 300 s `headersTimeout`; the CLI failed at 303.9 s with `fetch failed`). The bridge therefore answers at `maxWaitSliceMs` (default 240000) with `status:"timeout"` plus `sliceMs`/`requestedMs`, and the caller asks again. The CLI and the MCP tools already loop for you — pass a total budget; a hand-written client must slice itself or keep every wait under 300 s.
+**Waiting is sliced** — a single HTTP request cannot outlive five minutes (Node's built-in fetch has a 300 s `headersTimeout`; the CLI failed at 303.9 s with `fetch failed`). The bridge therefore answers at `maxWaitSliceMs` (default **120000**, capped at 240000 — a larger value is clamped with a warning) with `status:"timeout"` plus `sliceMs`/`requestedMs`, and the caller asks again. The CLI and the MCP tools already loop for you — pass a total budget; a hand-written client must slice itself or keep every wait under 300 s. `waitedMs` is wall-clock: a tail slice below 1 s is raised to the 1000 ms floor, so it may exceed the budget by up to a second, while `slices` stays the true request count. **The answer belongs to our deadline, not to the Host**: every event read races this run's deadline, and the cleanup that unsubscribes from the Host stream waits at most one second — a stuck Host can delay us, but it cannot hold the answer. That is the direct fix for a `wait` that once sat 13 minutes.
 
 **How MCP renders this** — a tool result is an error **only when the call itself failed** (with a code and a `next:` hint). The turn's `status` goes into an `outcome:` line, and **every end reason also gets a `note:` (plain-English explanation) plus a `next:` step — only `completed` gets neither**:
 

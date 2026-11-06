@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
 
-import { waitForTurn } from "../lib/client.mjs";
+import { MAX_WAIT_SLICE_MS, WAIT_SLICE_MS, waitForTurn } from "../lib/client.mjs";
 
 const TOKEN = "test-token";
 
@@ -101,6 +101,55 @@ test("a result that is not a timeout ends the loop immediately", async () => {
     assert.equal(result.status, "completed");
     assert.equal(result.slices, 1, "no second request when the first one answers");
     assert.equal(bridge.calls.length, 1);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("the default slice stays well clear of the transport ceiling", async () => {
+  const bridge = await stubBridge([{ sessionId: "session-d", status: "completed", text: "quick" }]);
+  try {
+    await waitForTurn("session-d", { url: bridge.url, token: TOKEN, timeoutMs: 600_000 });
+    assert.equal(WAIT_SLICE_MS, 120_000, "the default is two minutes, not four");
+    assert.equal(bridge.calls[0].params.timeoutMs, 120_000);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("a fractional budget is ignored instead of reaching AbortSignal.timeout", async () => {
+  // AbortSignal.timeout() rejects a non-integer delay, so a fractional hint used
+  // to crash the client before a single request went out. The bridge compares
+  // with Number.isInteger too; both sides must refuse the same values.
+  const bridge = await stubBridge([{ sessionId: "session-f", status: "completed", text: "quick" }]);
+  try {
+    const result = await waitForTurn("session-f", {
+      url: bridge.url,
+      token: TOKEN,
+      timeoutMs: 60_000.5,
+      sliceMs: 1_000.5,
+    });
+    assert.equal(result.status, "completed");
+    assert.equal(bridge.calls[0].params.timeoutMs, WAIT_SLICE_MS, "a fractional hint falls back to the default slice");
+    assert.equal(Number.isInteger(bridge.calls[0].params.timeoutMs), true);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("a slice hint above the ceiling is clamped, never forwarded", async () => {
+  const bridge = await stubBridge([{ sessionId: "session-e", status: "completed", text: "quick" }]);
+  try {
+    // A caller may ask for anything; one response still cannot stay quiet for
+    // more than the ceiling, so the hint must not reach the wire unchanged.
+    await waitForTurn("session-e", {
+      url: bridge.url,
+      token: TOKEN,
+      timeoutMs: 3_600_000,
+      sliceMs: 900_000,
+    });
+    assert.equal(bridge.calls[0].params.timeoutMs, MAX_WAIT_SLICE_MS);
+    assert.equal(MAX_WAIT_SLICE_MS, 240_000);
   } finally {
     await bridge.close();
   }
