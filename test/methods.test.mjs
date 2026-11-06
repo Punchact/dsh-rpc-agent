@@ -573,6 +573,36 @@ test("prompt-only returns immediately without waiting for the turn", async () =>
   assert.equal(typeof result.requestId, "string");
 });
 
+test("prompt applies session options instead of dropping them", async () => {
+  // The CLI accepts `prompt --model`; before this test that value reached the
+  // bridge and was silently discarded, so one real dispatch ran on the profile
+  // default model while its caller believed it had named another.
+  const controller = fakeController({ models: twoProviderModels, script: happyScript });
+  const result = await build(controller).prompt({
+    sessionId: "session-test",
+    text: "hello",
+    model: "beta/shared",
+    reasoningEffort: "low",
+  });
+  assert.deepEqual(controller.selections, [
+    { sessionId: "session-test", provider: "beta", model: "shared", reasoningEffort: "low" },
+  ]);
+  assert.deepEqual(result.selected, { provider: "beta", model: "shared", reasoningEffort: "low" });
+});
+
+test("prompt refuses create-time-only options instead of ignoring them", async () => {
+  const controller = fakeController({ script: happyScript });
+  const methods = build(controller);
+  await assert.rejects(
+    () => methods.prompt({ sessionId: "session-test", text: "hi", cwd: "C:/elsewhere" }),
+    (error) => error.code === -32602 && /only apply when the session is created/.test(error.message),
+  );
+  await assert.rejects(
+    () => methods.prompt({ sessionId: "session-test", text: "hi", agentPreset: "minimal" }),
+    (error) => error.code === -32602 && /only applies when the session is created/.test(error.message),
+  );
+});
+
 test("driver options cannot be injected through JSON params", async () => {
   // `onEvent` and `signal` belong to the internal channel; a wire caller that
   // sends them must not reach the driver (it used to throw a TypeError).
