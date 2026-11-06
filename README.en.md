@@ -154,9 +154,9 @@ console.log(answer.text, answer.usage);
 | `dsh.sessions.configure` | `sessionId, model?, reasoningEffort?, permissionPreset?` | `{sessionId, selected?, permissionPreset?}` |
 | `dsh.sessions.list` | `limit?` | `{total, items[]}` |
 | `dsh.sessions.create` | `workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?` | `{sessionId, agentPreset, cwd, selected?, permissionPreset?}`. **No `sessionId`** — ids belong to the Host; passing one is refused with `-32602` rather than silently replaced |
-| `dsh.sessions.ask` | `text, sessionId?, workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?, mode?, queue?, timeoutMs?` | turn result (below). A second prompting run on the same session is refused with `-32004` unless `queue: true`, which waits for that session inside its own `timeoutMs` |
+| `dsh.sessions.ask` | `text, sessionId?, workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?, mode?, queue?, timeoutMs?, wait?` | turn result (below). A second prompting run on the same session is refused with `-32004` unless `queue: true`, which waits for that session inside its own `timeoutMs`. `wait: false` returns a handle instead of waiting |
 | `dsh.sessions.prompt` | `sessionId, text, mode?` | `{accepted, requestId}`, returns immediately. Does **not** reserve the session, so a concurrent `ask` can still claim that turn — pair it with `dsh.sessions.wait` when the answer matters |
-| `dsh.sessions.wait` | `sessionId, timeoutMs?` | turn result |
+| `dsh.sessions.wait` | `sessionId, timeoutMs?, since?` | turn result; `since` returns only the events after that cursor |
 | `dsh.sessions.cancel` | `sessionId` | `{accepted}` |
 | `dsh.sessions.history` | `sessionId, limit?` | `{cursor, turn, running, messageCount, records[]}` |
 
@@ -177,6 +177,18 @@ A **turn result** carries `sessionId`, `turn`, `status` (`completed` / `aborted`
 `sandbox.denied` is set **only** when the Host's fixed marker (`[sandbox: file access denied`) appears in a tool output or, failing that, in the turn's text. It is never inferred from words like "denied" in the answer: a missed report beats a false one. `source` says which of the two matched — `tool` is the reliable one; `text` means only the agent's own reply carried the marker, and an agent writing *about* sandbox refusals can quote it. Neither `sandbox` nor `next` is an error — the turn did run, `status` and the tool-error flags are unaffected. Tool `output` is truncated per tool and the whole turn shares one 20 000-character budget, so a chatty turn cannot flood the caller's context.
 
 `status` always comes from that turn's own `turn/end` reason. `partial: true` means the event stream ended before `turn/end`, so `text` is a fragment. A `timeout` does **not** cancel the turn.
+
+**Not waiting** — `ask` with `wait:false` returns a handle instead of a turn result: `{sessionId, requestId, status:"running", turn:null, text:"", accepted:true, queued:true, cursor}`. The turn keeps running in the Harness and `dsh_wait` collects it. Use it when your own tool timeout is shorter than the work. The handle deliberately does **not** occupy the bridge's turn slot, so there is a millisecond-wide window before `dsh_wait` takes over; a second `ask` in that window is refused with `-32004` rather than silently queued.
+
+**Deltas** — `wait` accepts `since`: with it, only events after that sequence are returned (so `text` is just that slice), while `status`, `turn` and `tools` still describe the whole turn and `cursor` still advances. Poll with `since: <last cursor>`; never re-send the prompt.
+
+**How MCP renders this** — a tool result is an error **only when the call itself failed** (with a code and a `next:` hint). The turn's `status` goes into an `outcome:` line, and `timeout` / `partial` / `accepted` add:
+
+```
+next: the turn is still running — do NOT resend the prompt. Call dsh_wait({ session_id: "…", timeout_ms: 600000, since: 31 }) to collect it.
+```
+
+That line exists because "not finished" used to look like a failure, and a retry after that is a *new prompt* — which is how one task became four sessions. `status` cannot be used for the decision: it is the Host's free-form `reason.kind`.
 
 **Turn attribution**: after submitting, the bridge looks for its own `user/message` (`source.rpcId` equals the request id) and takes the turn that message landed in. If something else (the GUI, another agent) speaks first in the same session, their answer is never returned as yours.
 

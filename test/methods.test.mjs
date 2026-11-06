@@ -934,3 +934,61 @@ test("ask applies options and reports them alongside the turn", async () => {
 });
 
 
+
+// --- 0.4.5: R2 (ask can return a handle) and R4 (wait can return a delta) ---
+
+test("ask with wait:false hands back a handle instead of waiting for the turn", async () => {
+  const controller = fakeController({ script: happyScript });
+  const result = await build(controller).ask({ text: "long job", wait: false });
+
+  assert.equal(result.accepted, true);
+  assert.equal(result.status, "running");
+  assert.equal(result.turn, null);
+  assert.equal(result.text, "");
+  assert.equal(result.sessionId, "session-test");
+  assert.match(result.requestId, /^rpc-/);
+  assert.equal(controller.prompts.length, 1, "the prompt must still be submitted");
+});
+
+test("a non-blocking ask refuses to stack onto a turn that is already running", async () => {
+  const controller = fakeController({ script: happyScript });
+  controller.list = async (_request, signal) => {
+    signal?.throwIfAborted();
+    return { items: [{ sessionId: "session-test", running: true, blank: false, updatedAt: 1 }] };
+  };
+
+  await assert.rejects(
+    () => build(controller).ask({ sessionId: "session-test", text: "again", wait: false }),
+    (error) => error.code === -32004 && /already running a turn/.test(error.message),
+  );
+  assert.equal(controller.prompts.length, 0, "a refused request must not reach the Host");
+});
+
+const historicalTurn = [
+  { type: "turn/start", seq: 1, time: 1, data: { turn: 1 } },
+  {
+    type: "assistant/message",
+    seq: 2,
+    time: 2,
+    data: { turn: 1, step: 1, message: { content: [{ type: "text", text: "旧答案" }] } },
+  },
+  { type: "turn/end", seq: 3, time: 3, data: { turn: 1, reason: { kind: "completed" } } },
+];
+
+test("wait with since returns only what happened after that cursor", async () => {
+  const controller = fakeController({ historical: historicalTurn });
+  const result = await build(controller).wait({ sessionId: "session-test", since: 2 });
+
+  assert.equal(result.since, 2);
+  assert.equal(result.turn, 1);
+  assert.equal(result.text, "", "the text before the cursor must not be replayed");
+  assert.ok(result.cursor >= 3, `cursor must still advance (got ${result.cursor})`);
+});
+
+test("wait without since still replays the whole turn", async () => {
+  const controller = fakeController({ historical: historicalTurn });
+  const result = await build(controller).wait({ sessionId: "session-test" });
+
+  assert.equal(result.text, "旧答案");
+  assert.equal(result.since, undefined, "no since means no delta marker");
+});
