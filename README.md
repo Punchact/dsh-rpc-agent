@@ -304,7 +304,7 @@ node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
 - `wait:false` 是 **MCP 工具 `dsh_ask` 的默认行为**，也是给"自己的工具超时比这轮任务短"的调用方用的：它立刻返回句柄（上面第二个示例），任务在 DSH 里继续跑，结果靠 `dsh_wait` 收。MCP 侧的 `dsh_ask` 因此默认不阻塞，要等就显式传 `wait: true`；RPC 方法 `dsh.sessions.ask` 的默认值仍是 `true`（协议方法不跨小版本改形状）。**句柄不占轮次槽位**，也不登记为本插件正在等待的运行；因此在它跑起来到 `dsh_wait` 接手之间有一个毫秒级的窗口，同一会话此时再来一次 `ask` 会被 `-32004` 挡住而不是悄悄排队。
 - `queue: true` 与 `wait: false` 是互斥的两个要求：前者要"等轮次空出来"，后者根本不等待。同时给会返回 `-32602`，而不是悄悄忽略其中一个。
 - `since` 让 `wait` 只回增量：不传就是整轮（默认），传了就只返回 `seq > since` 的事件，`text` 随之只含这段；`status`/`turn`/`tools`/`usage`/`sandbox` 仍然描述整轮（增量只收窄正文与事件），`cursor` 照常前进。轮询进度用 `since: <上次的 cursor>`，不要重投。
-- **等待是分片循环**：单次 HTTP 请求活不过五分钟（Node 内建 fetch 的 `headersTimeout` 是 300 秒，实测 303.9 秒报 `fetch failed`），所以桥把一次等待切成 `maxWaitSliceMs`（默认 **120000**，上限 240000——配得更大也会被钳到上限并告警）返回 `status:"timeout"` 并附 `sliceMs`/`requestedMs`，由调用方续等。**CLI 与 MCP 工具已经替你循环**，直接传总预算即可；自己写客户端的人要么分片，要么别请求超过 300 秒的等待。
+- **等待是分片循环**：单次 HTTP 请求活不过五分钟（Node 内建 fetch 的 `headersTimeout` 是 300 秒，实测 303.9 秒报 `fetch failed`），所以桥把一次等待切成 `maxWaitSliceMs`（默认 **120000**，上限 240000——配得更大也会被钳到上限并告警）返回 `status:"timeout"` 并附 `sliceMs`/`requestedMs`，由调用方续等。**CLI 与 MCP 工具已经替你循环**，直接传总预算即可；自己写客户端的人要么分片，要么别请求超过 300 秒的等待。返回的 `waitedMs` 是墙钟：尾片不足 1 秒时会抬到 1000 ms 的下限，所以它可能比预算多出最多 1 秒，`slices` 则如实是请求次数。
 - **答案由我们的截止写出，不由宿主决定**：每次读事件都与本次运行的截止赛跑，末尾的清理（向宿主注销事件流）也只在 1 秒内等待——宿主卡住时它会拖慢我们一次，但拖不住答案。这条是现场那 13 分钟的直接修复。
 
 **MCP 层怎么渲染**（`bin/dsh-rpc-mcp.mjs` + `lib/mcp-format.mjs`）：工具结果**只在调用本身失败时**才是错误（错误码 + `next:` 提示）。轮次的 `status` 一律写进正文的 `outcome:` 行；**每一种结束原因都会额外给一行 `note:`（人话解释）与一行 `next:`（下一步），只有 `completed` 两者都没有**：

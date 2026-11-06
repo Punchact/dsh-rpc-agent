@@ -117,6 +117,26 @@ test("the default slice stays well clear of the transport ceiling", async () => 
   }
 });
 
+test("a fractional budget is ignored instead of reaching AbortSignal.timeout", async () => {
+  // AbortSignal.timeout() rejects a non-integer delay, so a fractional hint used
+  // to crash the client before a single request went out. The bridge compares
+  // with Number.isInteger too; both sides must refuse the same values.
+  const bridge = await stubBridge([{ sessionId: "session-f", status: "completed", text: "quick" }]);
+  try {
+    const result = await waitForTurn("session-f", {
+      url: bridge.url,
+      token: TOKEN,
+      timeoutMs: 60_000.5,
+      sliceMs: 1_000.5,
+    });
+    assert.equal(result.status, "completed");
+    assert.equal(bridge.calls[0].params.timeoutMs, WAIT_SLICE_MS, "a fractional hint falls back to the default slice");
+    assert.equal(Number.isInteger(bridge.calls[0].params.timeoutMs), true);
+  } finally {
+    await bridge.close();
+  }
+});
+
 test("a slice hint above the ceiling is clamped, never forwarded", async () => {
   const bridge = await stubBridge([{ sessionId: "session-e", status: "completed", text: "quick" }]);
   try {
