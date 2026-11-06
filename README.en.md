@@ -200,7 +200,8 @@ A **turn result** carries `sessionId`, `turn`, `status` (`completed` / `aborted`
 **How MCP renders this** — a tool result is an error **only when the call itself failed** (with a code and a `next:` hint). The turn's `status` goes into an `outcome:` line, and **every end reason also gets a `note:` (plain-English explanation) plus a `next:` step — only `completed` gets neither**:
 
 ```
-— outcome: aborted · session … · turn 5 · 12.3s · 3 tool calls · cursor 88
+session session-a
+— outcome: aborted · turn 5 · 12.3s · 3 tool calls · cursor 88
 note: the turn was stopped (cause: user — the Host cannot tell a bridge cancel from someone pressing stop)
 reason: {"kind":"aborted","reason":{"kind":"user"}}
 next: do not resend blindly: ask the human whether to continue, then resend with the same session_id

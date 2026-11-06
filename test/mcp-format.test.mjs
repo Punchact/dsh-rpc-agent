@@ -226,14 +226,37 @@ test("a completed turn does not repeat its own outcome as a reason", () => {
   assert.match(textOf(stopped), /reason: \{"kind":"aborted"/);
 });
 
+test("every ending except completed keeps its reason line", () => {
+  // Table-driven on purpose: pinning only the two ends (completed / aborted) let a
+  // narrowed predicate pass — see the red-team mutation M7, where every other kind
+  // was silently swallowed and the suite stayed green.
+  const kinds = ["aborted", "blocked", "error", "max-tokens", "interrupted", "forked", "refusal", "unknown", "timeout"];
+  for (const kind of kinds) {
+    // `status` is deliberately "completed": the line must follow reason.kind, not
+    // the Host's free-form status string.
+    const out = formatToolResult({ sessionId: "s", turn: 1, status: "completed", text: "x", reason: { kind } });
+    assert.match(textOf(out), new RegExp(`reason: \\{"kind":"${kind}"`), `missing reason line for ${kind}`);
+  }
+  // The one case where the line is pure noise.
+  const done = formatToolResult({ sessionId: "s", turn: 1, status: "completed", text: "x", reason: { kind: "completed" } });
+  assert.doesNotMatch(textOf(done), /reason:/);
+});
+
 test("an error does not dump data the message already carries", () => {
   const busy = formatToolError("session s is already running a turn", { sessionId: "s", next: { tool: "dsh_wait" } }, -32004);
   const text = textOf(busy);
   assert.doesNotMatch(text, /\{"sessionId"/);
   assert.doesNotMatch(text, /"next":/);
   assert.match(text, /next: the session is busy/);
+  // Nothing left after dedupe: an empty object is noise, not evidence.
+  assert.doesNotMatch(text, /data: \{\}/);
 
   // Anything the message does not say survives, labelled.
   const invalid = formatToolError("bad value", { field: "mode", value: "nope" }, -32602);
   assert.match(textOf(invalid), /data: \{"field":"mode","value":"nope"\}/);
+
+  // A code with no table hint keeps its own `next`: the summary hint does not
+  // replace it, so dropping it would lose the only actionable part.
+  const untabled = formatToolError("boom", { next: { tool: "dsh_cancel", args: {} } }, -32099);
+  assert.match(textOf(untabled), /"next":\{"tool":"dsh_cancel"/);
 });

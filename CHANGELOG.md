@@ -12,7 +12,7 @@
 
 ## [0.5.1] - 2026-11-06
 
-0.5.0 尚未发布到 npm，这一版只把实地冒烟发现的三处渲染问题与一处文档口径修掉。
+0.5.0 尚未发布到 npm，这一版只把实地冒烟发现的四处输出约定问题与一处文档口径修掉。
 
 - 句柄的元信息行不再打印 `turn ?`——句柄本来就没有轮次号，占位符会被当成可用的数据。
 - `completed` 不再输出 `reason: {"kind":"completed"}`，它与 `outcome: completed` 重复；需要解释的结局才带 `reason`。
@@ -39,7 +39,8 @@
   同一键累计 200 次 `ask` 后自动轮换。
 - **`mode` 三态**：`turn`（默认，会话正忙则 `-32004` 并附 `data.next`）、`steer`（插进当前轮）、
   `queue`（等当前轮结束）。`turn` 是桥自己的判据，宿主只认 `steer` / `queue`；其它值返回 `-32602`。
-- **`dsh_sessions` 支持 `cwd` 前缀过滤与 `sort`**（`updatedAt` 默认 / `createdAt`），会话项新增 `createdAt`。
+- **`dsh_sessions` 支持 `cwd` 前缀过滤与 `sort`**（`updatedAt` 默认 / `createdAt`），会话项新增 `createdAt`
+  （宿主的 `list()` 本身不提供创建时间，该字段目前恒为 `null`，按它排序等于保持宿主原序）。
 
 ## [0.4.5] - 2026-11-06
 

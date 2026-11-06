@@ -306,7 +306,8 @@ node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
 **MCP 层怎么渲染**（`bin/dsh-rpc-mcp.mjs` + `lib/mcp-format.mjs`）：工具结果**只在调用本身失败时**才是错误（错误码 + `next:` 提示）。轮次的 `status` 一律写进正文的 `outcome:` 行；**每一种结束原因都会额外给一行 `note:`（人话解释）与一行 `next:`（下一步），只有 `completed` 两者都没有**：
 
 ```
-— outcome: aborted · session … · turn 5 · 12.3s · 3 tool calls · cursor 88
+session session-a
+— outcome: aborted · turn 5 · 12.3s · 3 tool calls · cursor 88
 note: the turn was stopped (cause: user — the Host cannot tell a bridge cancel from someone pressing stop)
 reason: {"kind":"aborted","reason":{"kind":"user"}}
 next: do not resend blindly: ask the human whether to continue, then resend with the same session_id
