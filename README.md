@@ -305,6 +305,7 @@ node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
 - `queue: true` 与 `wait: false` 是互斥的两个要求：前者要"等轮次空出来"，后者根本不等待。同时给会返回 `-32602`，而不是悄悄忽略其中一个。
 - `since` 让 `wait` 只回增量：不传就是整轮（默认），传了就只返回 `seq > since` 的事件，`text` 随之只含这段；`status`/`turn`/`tools`/`usage`/`sandbox` 仍然描述整轮（增量只收窄正文与事件），`cursor` 照常前进。轮询进度用 `since: <上次的 cursor>`，不要重投。
 - **等待是分片循环**：单次 HTTP 请求活不过五分钟（Node 内建 fetch 的 `headersTimeout` 是 300 秒，实测 303.9 秒报 `fetch failed`），所以桥把一次等待切成 `maxWaitSliceMs`（默认 **120000**，上限 240000——配得更大也会被钳到上限并告警）返回 `status:"timeout"` 并附 `sliceMs`/`requestedMs`，由调用方续等。**CLI 与 MCP 工具已经替你循环**，直接传总预算即可；自己写客户端的人要么分片，要么别请求超过 300 秒的等待。
+- **答案由我们的截止写出，不由宿主决定**：每次读事件都与本次运行的截止赛跑，末尾的清理（向宿主注销事件流）也只在 1 秒内等待——宿主卡住时它会拖慢我们一次，但拖不住答案。这条是现场那 13 分钟的直接修复。
 
 **MCP 层怎么渲染**（`bin/dsh-rpc-mcp.mjs` + `lib/mcp-format.mjs`）：工具结果**只在调用本身失败时**才是错误（错误码 + `next:` 提示）。轮次的 `status` 一律写进正文的 `outcome:` 行；**每一种结束原因都会额外给一行 `note:`（人话解释）与一行 `next:`（下一步），只有 `completed` 两者都没有**：
 
