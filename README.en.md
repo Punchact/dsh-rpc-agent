@@ -258,6 +258,10 @@ After a restart:
 node bin/dsh-rpc.mjs health --wait 15000
 ```
 
+**When the caller goes away**: a non-streaming request aborts its own call when the socket closes — the event iteration stops and the run slot is released, but **the turn is not cancelled**. It keeps running in the Host and can still be collected with `wait` (and seen in the GUI). That is abort, not cancel; the bridge only does the former.
+
+**How an aborted call is accounted**: it lands in `/status` under `calls.outcomes`, not `errors` — `timeouts` means the wait budget ran out, `cancelledByClient` means the caller left first. Both are admitted calls with a different ending.
+
 ## Follow a CLI task in the GUI
 
 A session started from the CLI is a **real Harness session**, so it appears in the GUI sidebar — open it to see the transcript, tool calls and token usage. The CLI's own stdout stays in your terminal.
@@ -268,7 +272,7 @@ A session started from the CLI is a **real Harness session**, so it appears in t
 
 ## The status panel in Settings
 
-Once installed, Settings grows a **“RPC Bridge”** page: an online/offline light, version, endpoint, credential source, uptime, `pid`, Node version, whether remote callers are allowed, the runs in flight (run id prefix, has-session, has-prompt, age), the last 12 calls (time, method, duration, outcome) and per-method counters. It refreshes every two seconds.
+Once installed, Settings grows a **“RPC Bridge”** page: an online/offline light, version, endpoint, credential source, uptime, `pid`, Node version, whether remote callers are allowed, the runs in flight (run id prefix, has-session, has-prompt, age), the last 12 calls (time, method, duration, outcome), per-method counters, and two non-failure outcome counters (`timeouts`, `cancelledByClient`). It refreshes every two seconds.
 
 It reads **`GET /dsh-rpc/status`**, which sits on the same trust boundary as `/health`: **loopback only, no token**, because browser code cannot read the token in `endpoint.json`. In exchange the endpoint must stay silent about anything a caller said:
 
@@ -280,7 +284,11 @@ The panel is read-only and disappears with the plugin. It asks a fixed path `/ds
 ## Verify
 
 ```powershell
-node test/methods.test.mjs     # 41 unit tests, no Harness needed
+node test/methods.test.mjs     # 71 unit tests, no Harness needed
+node test/mcp-format.test.mjs  # 18 result-formatting tests, no Harness needed
+node test/wait.test.mjs        # 6 sliced-wait tests (real HTTP stub), no Harness needed
+node test/abort.test.mjs       # 7 abort-path tests (real socket, in-process registry), no Harness needed
+node test/registry.test.mjs    # 8 sticky-session registry tests, no Harness needed
 node test/client.test.mjs      # 6 client retry/error tests, no Harness needed
 node test/status.test.mjs      # 6 status/route-mounting tests, no Harness needed
 node test/catalog.smoke.mjs    # method catalogue + the four package-name sites must agree
@@ -291,9 +299,9 @@ node test/edge.mjs             # 24 protocol/edge checks against a live Harness
 
 Run the files directly, not through `node --test`: that forks a child process, which some sandboxes forbid.
 
-`npm test` runs the first four (no Harness, no install needed); `npm run test:host` runs the real-Host one; `npm run test:e2e` / `npm run test:edge` need a live Harness.
+`npm test` runs all eight of the above (no Harness, no install needed); `npm run test:host` runs the real-Host one; `npm run test:e2e` / `npm run test:edge` need a live Harness.
 
-Last run (2026-11-05): unit 41/41, client 6/6, status 6/6, catalogue smoke ok, real-Host 1/1, end-to-end 14/14, edge 24/24.
+Last run (2026-11-06): unit 71/71, result formatting 18/18, sliced waiting 6/6, abort 7/7, sticky registry 8/8, client 6/6, status 6/6, catalogue smoke ok, real-Host 1/1. End-to-end (14/14) and edge (24/24) were last run on 2026-11-05 and were not re-run for this change.
 
 The real-Host test is the only one that cannot be fooled by a fake `webServer`: it starts an actual listener on `127.0.0.1:0`, applies the plugin, sends real HTTP, then runs the plugin's own disposers and asserts `/health` and `/status` both become 404. That is exactly the failure we shipped once — a previous generation's routes surviving a reload, so every later enable died with `duplicate exact route`.
 

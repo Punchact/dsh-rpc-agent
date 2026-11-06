@@ -486,6 +486,10 @@ node bin/dsh-rpc.mjs health --wait 15000; if ($?) { node bin/dsh-rpc.mjs ask "�
 
 **仍可能失败的情形**：Harness 启动中插件尚未激活（`endpoint.json` 还是上一次的地址，`pid` 未变而端口已失效）；同时跑多个实例（单文件，后写覆盖先写）。这两种请用 `--url` 显式指定。
 
+**调用方断开之后**：非流式请求在 socket 关闭时会中止这次调用——事件迭代停下、运行槽位释放，但**那一轮不会取消**，它仍在 Host 里继续跑，之后还能用 `wait` 收（GUI 里也看得到）。这是 abort 与 cancel 的区别，桥只做前者。
+
+**被中止的调用怎么记账**：它记在 `/status` 的 `calls.outcomes` 里，而不是 `errors`——`timeouts` 是"等到预算用完"，`cancelledByClient` 是"调用方先走了"。两者都是被受理的调用，只是结局不同。
+
 ---
 
 ## 9. 从 GUI 跟进 CLI 发起的任务
@@ -519,7 +523,7 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 | 运行信息 | 端点 URL、协议版本、凭据来源（`config`/`env`/`file`/`generated`）、已服务时长、`pid`、Node 版本、是否允许远程、调用总数与失败数 |
 | 正在跑的轮次 | 每个活动的 `ask`/`wait`：运行 ID 前 8 位、是否有会话、是否带提问、已跑多久 |
 | 最近 12 次调用 | 时间、方法名、耗时、成功/失败与错误码 |
-| 方法用量 | 按方法累计的次数与错误次数 |
+| 方法用量 | 按方法累计的次数与错误次数，以及 `timeouts` / `cancelledByClient` 两个非失败结局的计数 |
 | 怎么接 | 两条可直接复制的命令（MCP 注册、CLI 试一次） |
 | 配置片段 | 按当前生效值生成的一段 `cordis.patch.yml` 行，一键复制——改配置去 profile 的 patch 层，页面只负责把该贴什么写给你 |
 
@@ -538,7 +542,11 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 
 ```powershell
 cd dsh-rpc-plugin
-node test/methods.test.mjs     # 41 个单元用例，无需 Harness
+node test/methods.test.mjs     # 71 个单元用例，无需 Harness
+node test/mcp-format.test.mjs  # 18 项结果渲染用例（note/next/截断/去重），无需 Harness
+node test/wait.test.mjs        # 6 项分片等待用例（真 HTTP 桩），无需 Harness
+node test/abort.test.mjs       # 7 项中止链路用例（真 socket / 进程内登记表），无需 Harness
+node test/registry.test.mjs    # 8 项粘性会话表用例，无需 Harness
 node test/client.test.mjs      # 6 项客户端重试/报错用例，无需 Harness
 node test/status.test.mjs      # 6 项 /status 与路由挂载用例，无需 Harness
 node test/catalog.smoke.mjs    # 方法目录与四处包名一致性
@@ -547,12 +555,13 @@ node test/e2e.mjs --cwd .      # 14 项端到端检查，打真实 Harness
 node test/edge.mjs             # 24 项协议/边界对抗检查，打真实 Harness
 ```
 
-`npm test` 跑前四个（都不需要 Harness，也不需要 `npm install`）；`npm run test:host` 跑真宿主集成那一项；`npm run test:e2e` / `npm run test:edge` 要活的 Harness。
+`npm test` 依次跑上面八段（都不需要 Harness，也不需要 `npm install`）；`npm run test:host` 跑真宿主集成那一项；`npm run test:e2e` / `npm run test:edge` 要活的 Harness。
 
-- **单元**用 `node:test` 与一个手写的 Host 假体（含 `follow` 流、事件总线、`user/message` 认领），覆盖轮次归属、steer、超时、abort 原因、history、cancel、并发拒绝与 `queue` 排队、创建期的参数契约（含拒绝调用方自带 `sessionId`）、cwd 归属、工作区/模型/权限下发、`limit` 校验、dispatcher 错误码。必须**直接 node 运行**——`node --test` 会为每个文件 fork 子进程，在 DSH 沙箱下被 `spawn EPERM` 挡住。上次实跑：41/41（2026-11-05）。
-- **客户端**用临时 `$DSH_HOME` 与本地假服务，验证重试与报错策略：端点重发后重试一次且只投递一次、`ECONNRESET` 绝不重放、显式 `--url` 不重试、重试后的失败不被改写成"没人监听"、端点未变时报错含 `pid` 与下一步建议；另有一例直接对 `lib/transport.mjs` 钉住「从 undici 的 cause 链里取真实 errno」在各平台的形状（Linux 上 `UND_ERR_SOCKET` 会归一成 `ECONNRESET`）。上次实跑：6/6（2026-11-05）。
-- **状态页**用假 `webServer` 与假 `res` 钉住三件事：`/status` 的载荷只有聚合数据（断言 token、`sessionId`、prompt 正文都不出现）、非 loopback 一律 403 且非 GET/HEAD 得 405、以及**路由挂载契约**（同一次进程内第二代能接管上一代的路由而不撞 `duplicate exact route`；挂载中途失败会整段回滚；只有当前属主能真正卸载）。上次实跑：6/6（2026-11-05）。
-- **真宿主集成**不用假 `webServer`：`new Context()` + `ctx.plugin(WebServer, {host:'127.0.0.1', port: 0})` 起真监听，再 `apply()`，然后真发 HTTP 断言 `/health` 200、无 token 的 RPC 401、`/status` 的 `origin` 与真实监听一致、前缀内未注册路径 404，**最后跑插件自己的 disposer 并断言 `/health` 与 `/status` 都变 404**。这是唯一能抓住"上一代路由残留导致重载失败"这一真实事故的测试。上次实跑：1/1（2026-11-05）。
+- **单元**用 `node:test` 与一个手写的 Host 假体（含 `follow` 流、事件总线、`user/message` 认领），覆盖轮次归属、steer、超时、abort 原因、history、cancel、并发拒绝与 `queue` 排队、创建期的参数契约（含拒绝调用方自带 `sessionId`）、cwd 归属、工作区/模型/权限下发、`limit` 校验、dispatcher 错误码。必须**直接 node 运行**——`node --test` 会为每个文件 fork 子进程，在 DSH 沙箱下被 `spawn EPERM` 挡住。上次实跑：71/71（2026-11-06）。
+- **结果渲染 / 分片等待 / 中止 / 粘性会话**各有独立套件：渲染套件钉住 `note:` 与 `next:` 的每一种结局、长正文截断与字段去重；等待套件用真 HTTP 桩验证"预算切成多片、片内不越界"；中止套件用真 socket 验证"调用方断开会让本次调用中止"，并钉住"被中止的调用不算错误"；注册表套件覆盖粘性会话表的读写、损坏降级与轮换。上次实跑：18/18、6/6、7/7、8/8（2026-11-06）。
+- **客户端**用临时 `$DSH_HOME` 与本地假服务，验证重试与报错策略：端点重发后重试一次且只投递一次、`ECONNRESET` 绝不重放、显式 `--url` 不重试、重试后的失败不被改写成"没人监听"、端点未变时报错含 `pid` 与下一步建议；另有一例直接对 `lib/transport.mjs` 钉住「从 undici 的 cause 链里取真实 errno」在各平台的形状（Linux 上 `UND_ERR_SOCKET` 会归一成 `ECONNRESET`）。上次实跑：6/6（2026-11-06）。
+- **状态页**用假 `webServer` 与假 `res` 钉住三件事：`/status` 的载荷只有聚合数据（断言 token、`sessionId`、prompt 正文都不出现）、非 loopback 一律 403 且非 GET/HEAD 得 405、以及**路由挂载契约**（同一次进程内第二代能接管上一代的路由而不撞 `duplicate exact route`；挂载中途失败会整段回滚；只有当前属主能真正卸载）。上次实跑：6/6（2026-11-06）。
+- **真宿主集成**不用假 `webServer`：`new Context()` + `ctx.plugin(WebServer, {host:'127.0.0.1', port: 0})` 起真监听，再 `apply()`，然后真发 HTTP 断言 `/health` 200、无 token 的 RPC 401、`/status` 的 `origin` 与真实监听一致、前缀内未注册路径 404，**最后跑插件自己的 disposer 并断言 `/health` 与 `/status` 都变 404**。这是唯一能抓住"上一代路由残留导致重载失败"这一真实事故的测试。上次实跑：1/1（2026-11-06）。
 - **端到端**走的是与外部 agent 完全相同的 `lib/client.mjs`，因此跑绿即证明 plugin → Host `sessionController` → HTTP → JSON-RPC → 调用方 整条链路成立。上次实跑：14/14（2026-11-05）。
 - **边界**检查协议层：batch、通知、id 形态、鉴权头、超大 body（应得真正的 413 而不是断连）、参数注入防护、超时钳制、并发 ask、`limit` 语义。上次实跑：24/24（2026-11-05）。
 - **端口漂移**（手工）：把 `endpoint.json` 的 url 改成死端口再跑 `dsh-rpc ping`，应得退出码 3 与含 `nothing is listening`、`pid`、`health --wait` 的可读报错；把文件恢复后 `ping` 立刻正常。2026-11-05 实跑符合预期。
