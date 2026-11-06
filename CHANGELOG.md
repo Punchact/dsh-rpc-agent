@@ -14,6 +14,7 @@
 - **没人回答就是拒绝**：`approvals.deadlineMs`（默认 60000）到期把挂起的调用判为拒绝，绝不自动放行。宿主自己的审批服务没有超时——这正是过去 10 分钟挂死的成因——所以超时由桥负责。
 - **`allow-once` 按会话计次，上限 3 次**：宿主没有"允许一次"的接口，桥手上唯一的杠杆是会话级 permission preset，所以放行等于放宽该会话。护栏是每会话最多 3 次、只接受 `workspace-write` 与 `danger-full-access` 两档、其余不询问直接拒；次数用尽后一律拒绝。
 - **`/status` 的 `calls` 新增 `approvals.allowed`**：与 `approvals.denied` 并列，用来判断无人值守会话是否真的在用这条通道。
+- **决策包报告会话当前的预设**：`preset` 从宿主会话的权限服务读出（原来读一个不存在的字段，恒为 null），读不到时为 null 且不影响判定——派发方要判断"升到哪一档"，必须先知道现在在哪一档。
 - **调用被取消时待批请求立刻收回**：挂起期间轮次被取消或调用方断开，这条请求从 `dsh.approvals.pending` 里消失并按拒绝处理——不会留下一个事后还能批准的悬空条目。
 - **`approvals.deadlineMs` 的非法值报错而不是静默修正**：`mode` 与 `deadlineMs` 一起校验，写错就抛 `ConfigError` 并点名 `approvals`。
 

@@ -187,7 +187,7 @@ console.log(answer.text, answer.usage);
 | `dsh.workspaces.list` | — | `{total, items:[{id, title, path, status, sessions, createdAt, updatedAt}]}`，`status` 为 `ok` / `missing-dir` / `unknown` |
 | `dsh.workspaces.create` | `path, title?` | `{id, title, path}`：把目录登记成工作区（同路径幂等复用） |
 | `dsh.permissions.catalog` | — | `{options:[{value, name, description?}], defaultPreset}`：每个预设=沙箱模式+审批策略 |
-| `dsh.approvals.pending` | `sessionId?`, `waitMs?` | `{pending:[{approvalId, sessionId, toolName, argv, cwd, reason, expiresAt}], count, timedOut, mode, deadlineMs}`：`approvals.mode=delegate` 时待批的升权请求，`waitMs` 为长轮询 |
+| `dsh.approvals.pending` | `sessionId?`, `waitMs?` | `{pending:[{approvalId, sessionId, toolName, escalation, argv, cwd, preset, reason, expiresAt}], count, timedOut, mode, deadlineMs}`：`approvals.mode=delegate` 时待批的升权请求，`waitMs` 为长轮询 |
 | `dsh.approvals.resolve` | `approvalId`, `decision`, `note?` | `{approvalId, sessionId, toolName, decision, note}`：回答一条待批请求 |
 | `dsh.sessions.configure` | `sessionId, model?, reasoningEffort?, permissionPreset?` | `{sessionId, selected?, permissionPreset?}`：给已有会话换模型/推理等级/权限 |
 | `dsh.sessions.list` | `limit?, cwd?, sort?` | `{total, sort, cwd, items:[{sessionId, running, blank, cwd, updatedAt, createdAt, …}]}`：`cwd` 按目录前缀过滤，`sort` 取 `updatedAt`（默认）或 `createdAt`，均为新的在前。**本机实测宿主 `list()` 只有 `updatedAt`**，故 `createdAt` 为 `null`、按它排序等于保持宿主原序 |
@@ -409,7 +409,7 @@ JSON-RPC 标准码之外，本插件用 `-3200x` 段表达业务语义：
   | `dsh.approvals.pending({ sessionId?, waitMs? })` | 列出待批请求；`waitMs` 让它变成最多 120 秒的长轮询，一个调用就能等到 |
   | `dsh.approvals.resolve({ approvalId, decision: "allow-once"\|"reject", note? })` | 回答某一条 |
 
-  决策包字段：`approvalId`、`sessionId`、`toolName`、`callId`、`escalation`、`argv`（要执行的命令原文）、`cwd`、`preset`、`reason`、`createdAt`、`expiresAt`。MCP 侧对应 `dsh_approvals_pending` / `dsh_approvals_resolve`。
+  决策包字段：`approvalId`、`sessionId`、`toolName`、`callId`、`escalation`、`argv`（要执行的命令原文）、`cwd`、`preset`（会话**当前**的预设，读不到时为 null）、`reason`、`createdAt`、`expiresAt`。MCP 侧对应 `dsh_approvals_pending` / `dsh_approvals_resolve`。
 
   语义要点：**没人回答就是拒绝**（`deadlineMs` 到期按拒绝处理，绝不自动放行）；`allow-once` 通过切换该会话的 permission preset 生效——宿主没有"允许一次"的接口，桥手上只有会话级预设这一个杠杆，所以它按会话计次，**每会话最多 3 次**，之后一律拒绝；可请求的目标只有 `workspace-write` 与 `danger-full-access` 两档，其余不询问直接拒。放行与拒绝分别记在 `/status` 的 `calls.approvals.allowed` / `calls.approvals.denied`。挂起中被取消的调用会立刻收回它的待批请求（按拒绝处理），不会留下事后可批准的悬空条目。
 

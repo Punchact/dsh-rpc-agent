@@ -277,3 +277,39 @@ test("the gate refuses as soon as the held call is cancelled", async () => {
   assert.match(decision.reason, /cancelled/);
   assert.equal(store.size(), 0);
 });
+
+test("the decision packet carries the session's live preset", async () => {
+  const store = createPendingStore({ deadlineMs: 5_000 });
+  const gate = createApprovalGate({
+    mode: "delegate",
+    isOwned: () => true,
+    store,
+    applyPreset: async () => "danger-full-access",
+    currentPreset: () => "workspace-write",
+  });
+  const held = gate(escalation(), () => Promise.resolve({ kind: "allow" }));
+  await tick();
+  const [packet] = store.list();
+  assert.equal(packet.preset, "workspace-write", "a caller judging the request needs the current ceiling");
+  store.resolve(packet.approvalId, "reject");
+  assert.equal((await held).kind, "deny");
+});
+
+test("a preset reader that throws leaves the field null instead of failing the call", async () => {
+  const store = createPendingStore({ deadlineMs: 5_000 });
+  const gate = createApprovalGate({
+    mode: "delegate",
+    isOwned: () => true,
+    store,
+    applyPreset: async () => "danger-full-access",
+    currentPreset: () => {
+      throw new Error("no permissionPresets service");
+    },
+  });
+  const held = gate(escalation(), () => Promise.resolve({ kind: "allow" }));
+  await tick();
+  const [packet] = store.list();
+  assert.equal(packet.preset, null);
+  store.resolve(packet.approvalId, "reject");
+  assert.equal((await held).kind, "deny");
+});

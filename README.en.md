@@ -164,7 +164,7 @@ A single session eventually becomes a context burden, so after **200 `ask` calls
 | `dsh.workspaces.list` | — | `{total, items:[{id, title, path, status, sessions, …}]}`, `status` ∈ `ok` / `missing-dir` / `unknown` |
 | `dsh.workspaces.create` | `path, title?` | `{id, title, path}`: register a directory as a workspace (idempotent per path) |
 | `dsh.permissions.catalog` | — | `{options:[…], defaultPreset}`: each preset is a sandbox mode plus an approval policy |
-| `dsh.approvals.pending` | `sessionId?`, `waitMs?` | `{pending:[{approvalId, sessionId, toolName, argv, cwd, reason, expiresAt}], count, timedOut, mode, deadlineMs}`: held escalations; `waitMs` long-polls |
+| `dsh.approvals.pending` | `sessionId?`, `waitMs?` | `{pending:[{approvalId, sessionId, toolName, escalation, argv, cwd, preset, reason, expiresAt}], count, timedOut, mode, deadlineMs}`: held escalations; `waitMs` long-polls |
 | `dsh.approvals.resolve` | `approvalId`, `decision`, `note?` | `{approvalId, sessionId, toolName, decision, note}`: answers one held request |
 | `dsh.sessions.configure` | `sessionId, model?, reasoningEffort?, permissionPreset?` | `{sessionId, selected?, permissionPreset?}` |
 | `dsh.sessions.list` | `limit?, cwd?, sort?` | `{total, sort, cwd, items[]}`: `cwd` filters by path prefix, `sort` is `updatedAt` (default) or `createdAt`, newest first. **The Host's `list()` only carries `updatedAt`** (measured on this machine), so `createdAt` is `null` and sorting by it keeps the Host's order |
@@ -248,7 +248,7 @@ Set `approvals: { mode: "delegate", deadlineMs: 60000 }` and an escalation is *h
 | `dsh.approvals.pending({ sessionId?, waitMs? })` | lists held requests; `waitMs` makes it a long poll (≤120 s) so one call can wait |
 | `dsh.approvals.resolve({ approvalId, decision: "allow-once"\|"reject", note? })` | answers one of them |
 
-A decision packet carries `approvalId`, `sessionId`, `toolName`, `callId`, `escalation`, `argv` (the exact command), `cwd`, `preset`, `reason`, `createdAt`, `expiresAt`. The MCP server exposes the same two calls as `dsh_approvals_pending` and `dsh_approvals_resolve`.
+A decision packet carries `approvalId`, `sessionId`, `toolName`, `callId`, `escalation`, `argv` (the exact command), `cwd`, `preset` (the session's **current** preset, read from the permission service; null when it cannot be read), `reason`, `createdAt`, `expiresAt`. The MCP server exposes the same two calls as `dsh_approvals_pending` and `dsh_approvals_resolve`.
 
 Rules worth knowing: **no answer is a refusal** — when `deadlineMs` passes the held call is denied, never granted; `allow-once` works by widening that session's permission preset, because the Host offers no per-call grant and the preset is the only lever this bridge has, so it is capped at **three grants per session**; only `workspace-write` and `danger-full-access` may be requested, and anything else is refused without asking. Grants and refusals are counted in `/status` under `calls.approvals.allowed` and `calls.approvals.denied`. If the held call is cancelled while it waits, its request is withdrawn and treated as a refusal — no dangling entry that could be approved later.
 

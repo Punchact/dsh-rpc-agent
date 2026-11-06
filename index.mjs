@@ -99,6 +99,12 @@ export function apply(ctx, input = {}) {
       service.set(session, name);
       return name;
     },
+    currentPreset: (sessionId) => {
+      const service = ctx.get?.("permissionPresets");
+      const session = ctx.get?.("sessions")?.get?.(sessionId);
+      if (!service?.current || !session) return null;
+      return service.current(session) ?? null;
+    },
     store: approvals,
     log,
   });
