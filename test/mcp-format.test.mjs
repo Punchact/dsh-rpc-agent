@@ -24,7 +24,11 @@ test("a completed turn is plain text, not an error", () => {
     cursor: 12,
   });
   assert.equal(result.isError, false);
-  assert.match(textOf(result), /^收到了/);
+  // The session id leads the result: it is the one thing the caller must be able
+  // to keep even when the rest is truncated, because losing it is what produced a
+  // new session on every retry.
+  assert.match(textOf(result), /^session session-1\n/);
+  assert.match(textOf(result), /^session session-1\n收到了/m);
   assert.match(textOf(result), /outcome: completed/);
   assert.match(textOf(result), /cursor 12/);
   assert.doesNotMatch(textOf(result), /next:/);

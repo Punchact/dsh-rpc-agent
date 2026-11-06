@@ -56,23 +56,36 @@ Cursor / Codex 用配置文件等价写法（把 `args` 换成同一个路径；
 
 若你走的是本地克隆那条路线，把上面的路径换成 `<path-to-your-clone>\bin\dsh-rpc-mcp.mjs` 即可；本节与后面的 CLI 示例都写作 `node bin/...`，等价于"在当前目录位于包内时执行"。
 
-暴露 7 个工具：`dsh_ask`、`dsh_workspaces`、`dsh_permissions`、`dsh_sessions`、`dsh_wait`、`dsh_cancel`、`dsh_status`。`dsh_ask` 返回 Harness 的正文，加一行 `— session … · turn … · completed · 5.2s` 元信息。
+暴露 7 个工具：`dsh_ask`、`dsh_workspaces`、`dsh_permissions`、`dsh_sessions`、`dsh_wait`、`dsh_cancel`、`dsh_status`。`dsh_ask` 的结果第一行固定是 `session <id>`，随后是正文与一行 `— outcome: … · turn … · 5.2s` 元信息。
 
 工具参数是 snake_case（MCP 侧习惯），和 HTTP 层不同：
 
 | 工具 | 参数 | 说明 |
 | --- | --- | --- |
-| `dsh_ask` | `prompt`（**必填**）、`session_id?`、`cwd?`、`workspace_id?`、`agent_preset?`、`model?`、`reasoning_effort?`、`permission?`、`timeout_ms?` | 提问一轮并等结果；`session_id` 省略即新建会话。`cwd` 与 `workspace_id` 互斥；三者都只在新建时有效，给了 `session_id` 再给会被拒绝 |
+| `dsh_ask` | `prompt`（**必填**）、`project?`、`reuse?`、`mode?`、`wait?`、`session_id?`、`cwd?`、`workspace_id?`、`agent_preset?`、`model?`、`reasoning_effort?`、`permission?`、`timeout_ms?` | 提问一轮。**`wait` 默认 `false`**：立刻返回句柄（含 `session_id`），答案用 `dsh_wait` 收；`wait:true` 才阻塞等这一轮。`project` 是粘性会话的键（见下）。`cwd` 与 `workspace_id` 互斥；两者与 `agent_preset` 都只在新建时有效，给了 `session_id` 再给会被拒绝 |
 | `dsh_workspaces` | `path?`、`title?` | 不带 `path` 就列工作区；带 `path` 则登记一个新工作区 |
 | `dsh_permissions` | — | 列出权限预设及其默认项 |
-| `dsh_sessions` | `limit?` | 列出会话 |
-| `dsh_wait` | `session_id`（必填）、`timeout_ms?` | 等该会话当前/下一轮结束 |
+| `dsh_sessions` | `limit?`、`cwd?`、`sort?` | 列出会话；`cwd` 按目录前缀过滤，`sort` 取 `updatedAt`（默认）或 `createdAt`，都是新的在前 |
+| `dsh_wait` | `session_id`（必填）、`timeout_ms?`、`since?` | 等该会话当前/下一轮结束；`since` 只回该游标之后的正文（增量） |
 | `dsh_cancel` | `session_id`（必填） | 中断正在跑的轮次 |
 | `dsh_status` | — | `ping` 的等价物，用于确认端点与 token 可读 |
 
 > 参数名写错时报文很直接，例如给 `dsh_ask` 传 `text` 会得到 `` `prompt` is required ``，`isError:true`。
 
-> MCP 服务器与被调用的 Harness 会话**不共享上下文**。给 `dsh_ask` 的 prompt 要自包含；要延续同一会话就把上次返回的 `session_id` 传回去。
+> MCP 服务器与被调用的 Harness 会话**不共享上下文**。给 `dsh_ask` 的 prompt 要自包含。
+
+### 粘性会话（0.5.0）
+
+`dsh_ask` 不带 `session_id` 时不再盲目新建：它按 `${客户端名}::${project ?? cwd}` 在 `~/.dsh/dsh-rpc/sessions.json` 里查这张表，命中且会话还在、还不是空会话，就**接着用同一个会话**；否则新建并回写。所以同一个 `project` 的第二次调用会落在上次那个会话里——这正是"一个项目一个会话"的落地方式。
+
+| 参数 | 取值 | 语义 |
+| --- | --- | --- |
+| `project` | 任意稳定标签（仓库名、工单号） | 粘性键；省略时退到 `cwd` |
+| `reuse` | `auto`（默认）/ `never` / `latest` | `auto` 用表里的会话；`never` 永远新建；`latest` 忽略表里记的 id，按 `updatedAt` 取该项目最近的会话 |
+
+两条边界：**不同客户端互不继承**（`initialize` 里的 `clientInfo.name` 是命名空间的一部分）；**不用 `-` 兜底**——表里记的会话若已被删或仍是空会话，就新建，而不是报错。表在桥侧，按 0600 原子写；文件损坏只会退回"没有记录"，不会让调用失败。
+
+单个会话攒太久会变成上下文负担，所以同一键累计 **200 次** `ask` 后自动轮换：新建会话、把旧 id 放在结果的 `previousSessionId` 里一并报回（`rotated: true`）。这个阈值数的是**本桥投递的次数**，不是宿主的总消息数——宿主没有廉价的计数接口。
 
 ### CLI
 
@@ -173,15 +186,15 @@ console.log(answer.text, answer.usage);
 | `dsh.workspaces.create` | `path, title?` | `{id, title, path}`：把目录登记成工作区（同路径幂等复用） |
 | `dsh.permissions.catalog` | — | `{options:[{value, name, description?}], defaultPreset}`：每个预设=沙箱模式+审批策略 |
 | `dsh.sessions.configure` | `sessionId, model?, reasoningEffort?, permissionPreset?` | `{sessionId, selected?, permissionPreset?}`：给已有会话换模型/推理等级/权限 |
-| `dsh.sessions.list` | `limit?` | `{total, items:[{sessionId, running, blank, cwd, updatedAt, …}]}` |
+| `dsh.sessions.list` | `limit?, cwd?, sort?` | `{total, sort, cwd, items:[{sessionId, running, blank, cwd, updatedAt, createdAt, …}]}`：`cwd` 按目录前缀过滤，`sort` 取 `updatedAt`（默认）或 `createdAt`，均为新的在前 |
 | `dsh.sessions.create` | `workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?` | `{sessionId, agentPreset, cwd, selected?, permissionPreset?}`：`workspaceId` 与 `cwd` 互斥；都不传就交给 Host 决定，`cwd` 回读 Host 实际挂载的目录。**不接受 `sessionId`**——id 由 Host 分配，传了会 `-32602`，不会悄悄换成另一个 id |
-| `dsh.sessions.ask` | `text, sessionId?, workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?, mode?, queue?, timeoutMs?, wait?` | 见下方**轮次结果**；`sessionId` 省略时新建会话，`created:true`。同一会话已有 bridge 在等轮次时默认返回 `-32004`，加 `queue: true` 则排队等它结束（受自己的 `timeoutMs` 约束） |
+| `dsh.sessions.ask` | `text, sessionId?, project?, reuse?, namespace?, workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?, mode?, queue?, timeoutMs?, wait?` | 见下方**轮次结果**；`sessionId` 省略时按粘性表（`namespace::project ?? cwd`）复用或新建，结果带 `created`/`reused`/`rotated`。**RPC 层 `wait` 仍默认 `true`**（MCP 工具才默认 `false`）。同一会话已有 bridge 在等轮次时默认返回 `-32004`，加 `queue: true` 则排队等它结束（受自己的 `timeoutMs` 约束） |
 | `dsh.sessions.prompt` | `sessionId, text, mode?` | `{accepted, sessionId, requestId, mode}`，立即返回、不等轮次；**不占住会话**，所以并发的 `ask` 仍可能抢走那一轮——要结果就配 `dsh.sessions.wait` |
 | `dsh.sessions.wait` | `sessionId, timeoutMs?, since?` | 等待该会话**当前/下一个**轮次结束并返回轮次结果；`since` 只回该游标之后的事件（增量轮询用） |
 | `dsh.sessions.cancel` | `sessionId` | `{accepted, sessionId}`：中断正在进行的轮次，保留待处理队列 |
 | `dsh.sessions.history` | `sessionId, limit?` | `{cursor, turn, running, messageCount, records[]}`，只读快照 |
 
-`mode` 取 `queue`（默认，下一轮次开始）或 `steer`（插入正在跑的轮次，当前一步之后生效）。
+`mode` 取 `turn`（默认：只在会话空闲时投递，正在跑就返回 `-32004` 并附 `data.next`）、`steer`（插入正在跑的轮次，当前一步之后生效）或 `queue`（等当前轮次结束后开始）。`turn` 是桥自己的判据——宿主只认 `steer` / `queue`，桥在投递前用基线快照判断，判断为 idle 才继续。给别的值返回 `-32602`，不会悄悄降级成别的并发语义。
 
 `limit` 必须是正整数：省略时 `dsh.sessions.list` 默认 50 条、`dsh.sessions.history` 默认 40 条；`history` 的上限是 500 条。传 `0`、负数或小数会返回 `-32602`，而不是被悄悄纠正成一个别的条数。
 
@@ -262,7 +275,7 @@ node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
 }
 ```
 
-`wait:false` 的 `ask` 不等轮次，返回的是一张**句柄**，字段不同：
+`wait:false` 的 `ask`（**MCP 工具 `dsh_ask` 的默认行为**）不等轮次，返回的是一张**句柄**，字段不同：
 
 ```jsonc
 {
@@ -286,7 +299,7 @@ node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
 - `cwd` 只在 `created:true` 时回填。
 - `sandbox.denied` **只认 Host 写进工具输出的固定标记**（`[sandbox: file access denied`），不从回答正文里猜同义词；工具输出取不到时，退而扫该轮正文。宁可漏报，不误报。
 - `sandbox` 与 `next` 都不是错误：`status` 与工具错误的判定不受影响，这一轮确实跑完了，只是一步动作被挡住。拿到 `next` 就照它再问一次，**不要**用同一档重试，也不要为此新开会话。
-- `wait:false` 是给"自己的工具超时比这轮任务短"的调用方用的：它立刻返回句柄（上面第二个示例），任务在 DSH 里继续跑，结果靠 `dsh_wait` 收。**句柄不占轮次槽位**，也不登记为本插件正在等待的运行；因此在它跑起来到 `dsh_wait` 接手之间有一个毫秒级的窗口，同一会话此时再来一次 `ask` 会被 `-32004` 挡住而不是悄悄排队。
+- `wait:false` 是 **MCP 工具 `dsh_ask` 的默认行为**，也是给"自己的工具超时比这轮任务短"的调用方用的：它立刻返回句柄（上面第二个示例），任务在 DSH 里继续跑，结果靠 `dsh_wait` 收。MCP 侧的 `dsh_ask` 因此默认不阻塞，要等就显式传 `wait: true`；RPC 方法 `dsh.sessions.ask` 的默认值仍是 `true`（协议方法不跨小版本改形状）。**句柄不占轮次槽位**，也不登记为本插件正在等待的运行；因此在它跑起来到 `dsh_wait` 接手之间有一个毫秒级的窗口，同一会话此时再来一次 `ask` 会被 `-32004` 挡住而不是悄悄排队。
 - `queue: true` 与 `wait: false` 是互斥的两个要求：前者要"等轮次空出来"，后者根本不等待。同时给会返回 `-32602`，而不是悄悄忽略其中一个。
 - `since` 让 `wait` 只回增量：不传就是整轮（默认），传了就只返回 `seq > since` 的事件，`text` 随之只含这段；`status`/`turn`/`tools`/`usage`/`sandbox` 仍然描述整轮（增量只收窄正文与事件），`cursor` 照常前进。轮询进度用 `since: <上次的 cursor>`，不要重投。
 

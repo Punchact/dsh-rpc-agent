@@ -10,6 +10,27 @@
 
 暂无。
 
+## [0.5.0] - 2026-11-06
+
+这一个版本故意破坏两处默认值，换掉"每次调用都新开一个会话、每次都阻塞到被自己的超时砍断"的老形态。
+
+### 破坏性变更
+
+- **MCP 工具 `dsh_ask` 的 `wait` 默认值改成 `false`**：立刻返回句柄，结果用 `dsh_wait` 收。
+  要走老行为就显式传 `wait: true`。**RPC 方法 `dsh.sessions.ask` 仍默认 `true`**——协议方法不跨小版本改形状。
+- **`dsh_ask` 的结果第一行固定是 `session <id>`**，正文与 `— outcome: …` 元信息在后；元信息里不再重复会话 id。
+  以前 id 只出现在尾巴上，被调用方超时截断就丢了，下一次只能新开会话。
+
+### 新增
+
+- **粘性会话**：不带 `session_id` 时，`dsh_ask` 按 `${客户端名}::${project ?? cwd}` 查
+  `~/.dsh/dsh-rpc/sessions.json`，命中且会话仍存在、非空就复用，否则新建并回写。新参数 `project`、
+  `reuse`（`auto`/`never`/`latest`）、`namespace`；结果带 `reused` / `rotated` / `previousSessionId`。
+  同一键累计 200 次 `ask` 后自动轮换。
+- **`mode` 三态**：`turn`（默认，会话正忙则 `-32004` 并附 `data.next`）、`steer`（插进当前轮）、
+  `queue`（等当前轮结束）。`turn` 是桥自己的判据，宿主只认 `steer` / `queue`；其它值返回 `-32602`。
+- **`dsh_sessions` 支持 `cwd` 前缀过滤与 `sort`**（`updatedAt` 默认 / `createdAt`），会话项新增 `createdAt`。
+
 ## [0.4.5] - 2026-11-06
 
 ### 新增

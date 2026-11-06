@@ -101,7 +101,7 @@ Cursor / Codex use the equivalent config file, with `args` set to that same path
 On the clone route, substitute `<path-to-your-clone>\bin\dsh-rpc-mcp.mjs`. The CLI examples below are written as
 `node bin/...`, i.e. "run it from inside the package".
 
-Seven tools: `dsh_ask`, `dsh_workspaces`, `dsh_permissions`, `dsh_sessions`, `dsh_wait`, `dsh_cancel`, `dsh_status`. Arguments are snake_case (`prompt`, `session_id`, `cwd`, `workspace_id`, `agent_preset`, `model`, `reasoning_effort`, `permission`, `timeout_ms`). The MCP server shares no context with the Harness session — pass the returned `session_id` to continue one.
+Seven tools: `dsh_ask`, `dsh_workspaces`, `dsh_permissions`, `dsh_sessions`, `dsh_wait`, `dsh_cancel`, `dsh_status`. Arguments are snake_case (`prompt`, `project`, `reuse`, `mode`, `wait`, `session_id`, `cwd`, `workspace_id`, `agent_preset`, `model`, `reasoning_effort`, `permission`, `timeout_ms`). Every `dsh_ask` result starts with `session <id>` on its own line; the body and an `— outcome: …` meta line follow. The MCP server shares no context with the Harness session — either pass that id back, or pass the same `project` and let the sticky table reuse the session (below).
 
 ### CLI
 
@@ -141,6 +141,19 @@ console.log(answer.text, answer.usage);
 
 `rpcCall` resolves to the method's `result`; failures throw an `Error` carrying `code` / `data` / `status`.
 
+### Sticky sessions (0.5.0)
+
+When `dsh_ask` has no `session_id`, it no longer blindly creates a session. It looks up `${client name}::${project ?? cwd}` in `~/.dsh/dsh-rpc/sessions.json`; if the entry names a session that still exists and is not blank, that session is reused — otherwise a new one is created and written back. Two calls with the same `project` therefore land in one conversation, which is how "one project, one session" actually happens.
+
+| Argument | Values | Meaning |
+| --- | --- | --- |
+| `project` | any stable label (repo, ticket) | the sticky key; omitted, the session `cwd` is used |
+| `reuse` | `auto` (default) / `never` / `latest` | `auto` uses the recorded session; `never` always creates; `latest` ignores the recorded id and picks the most recently updated session for that key |
+
+Two boundaries: **different MCP clients do not inherit each other's sessions** (`clientInfo.name` is part of the namespace), and nothing is guessed — a recorded session that was deleted or is still blank is simply replaced, never reported as an error. The table lives in the bridge, is written atomically with mode 0600, and a corrupted file degrades to "no records" rather than failing a call.
+
+A single session eventually becomes a context burden, so after **200 `ask` calls** on one key it rotates: a new session is created and the old id comes back as `previousSessionId` with `rotated: true`. That count is of prompts this bridge delivered, not of all messages the Host ever held — the Host has no cheap message counter.
+
 ## Methods
 
 | Method | Params | Result |
@@ -152,9 +165,9 @@ console.log(answer.text, answer.usage);
 | `dsh.workspaces.create` | `path, title?` | `{id, title, path}`: register a directory as a workspace (idempotent per path) |
 | `dsh.permissions.catalog` | — | `{options:[…], defaultPreset}`: each preset is a sandbox mode plus an approval policy |
 | `dsh.sessions.configure` | `sessionId, model?, reasoningEffort?, permissionPreset?` | `{sessionId, selected?, permissionPreset?}` |
-| `dsh.sessions.list` | `limit?` | `{total, items[]}` |
+| `dsh.sessions.list` | `limit?, cwd?, sort?` | `{total, sort, cwd, items[]}`: `cwd` filters by path prefix, `sort` is `updatedAt` (default) or `createdAt`, newest first |
 | `dsh.sessions.create` | `workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?` | `{sessionId, agentPreset, cwd, selected?, permissionPreset?}`. **No `sessionId`** — ids belong to the Host; passing one is refused with `-32602` rather than silently replaced |
-| `dsh.sessions.ask` | `text, sessionId?, workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?, mode?, queue?, timeoutMs?, wait?` | turn result (below). A second prompting run on the same session is refused with `-32004` unless `queue: true`, which waits for that session inside its own `timeoutMs`. `wait: false` returns a handle instead of waiting |
+| `dsh.sessions.ask` | `text, sessionId?, project?, reuse?, namespace?, workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?, mode?, queue?, timeoutMs?, wait?` | turn result (below). `sessionId` omitted means the sticky table (`namespace::project ?? cwd`) decides between reuse and a new session; the result carries `created` / `reused` / `rotated`. **The RPC `wait` still defaults to `true`** (only the MCP tool defaults to `false`). A second prompting run on the same session is refused with `-32004` unless `queue: true`, which waits for that session inside its own `timeoutMs` |
 | `dsh.sessions.prompt` | `sessionId, text, mode?` | `{accepted, requestId}`, returns immediately. Does **not** reserve the session, so a concurrent `ask` can still claim that turn — pair it with `dsh.sessions.wait` when the answer matters |
 | `dsh.sessions.wait` | `sessionId, timeoutMs?, since?` | turn result; `since` returns only the events after that cursor |
 | `dsh.sessions.cancel` | `sessionId` | `{accepted}` |
@@ -178,7 +191,7 @@ A **turn result** carries `sessionId`, `turn`, `status` (`completed` / `aborted`
 
 `status` always comes from that turn's own `turn/end` reason. A `turn/end` with **no `reason`** is reported as `unknown` with `reason: {kind:"unknown", message:"the Host ended the turn without a reason; treat this outcome as unverified"}`: the field is required by a TypeScript union, and a union is not a runtime guard — an ending nobody described must not be reported as success. `partial: true` means the event stream ended before `turn/end`, so `text` is a fragment. A `timeout` does **not** cancel the turn; since there is no `turn/end` to quote, the bridge fills `reason` with `{kind:"timeout", message:"… it keeps running"}` rather than leaving it null.
 
-**Not waiting** — `ask` with `wait:false` returns a handle instead of a turn result: `{sessionId, requestId, mode, status:"running", turn:null, text:"", accepted:true}`. The turn keeps running in the Harness and `dsh_wait` collects it. Use it when your own tool timeout is shorter than the work. The handle deliberately does **not** occupy the bridge's turn slot, so there is a millisecond-wide window before `dsh_wait` takes over; a second `ask` in that window is refused with `-32004` rather than silently queued.
+**Not waiting (the MCP tool's default)** — `dsh_ask` returns a handle instead of a turn result; pass `wait: true` to block: `{sessionId, requestId, mode, status:"running", turn:null, text:"", accepted:true}`. The turn keeps running in the Harness and `dsh_wait` collects it. Use it when your own tool timeout is shorter than the work. The handle deliberately does **not** occupy the bridge's turn slot, so there is a millisecond-wide window before `dsh_wait` takes over; a second `ask` in that window is refused with `-32004` rather than silently queued.
 
 **Mutually exclusive** — `queue: true` asks to wait for the turn slot, `wait: false` never waits; combining them is refused with `-32602` instead of silently dropping one.
 
