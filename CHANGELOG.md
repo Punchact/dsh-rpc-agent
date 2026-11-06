@@ -10,6 +10,17 @@
 
 暂无。
 
+## [0.5.1] - 2026-11-06
+
+0.5.0 尚未发布到 npm。这一版修掉实地冒烟发现的四处输出约定问题、一处文档口径，以及一处把 `` --model `` 吞掉的静默丢参。
+
+- 句柄的元信息行不再打印 `turn ?`——句柄本来就没有轮次号，占位符会被当成可用的数据。
+- `completed` 不再输出 `reason: {"kind":"completed"}`，它与 `outcome: completed` 重复；需要解释的结局才带 `reason`。
+- 工具报错不再把整个 `data` 原样 `JSON.stringify` 进正文（读起来像堆栈、还把提示压到底部），只补消息里没说的字段。
+- `dsh_ask` 的 `reuse` / `mode` / `wait` 在 schema 里声明了 `default`，外部客户端读 schema 就能看到默认值。
+- `dsh.sessions.prompt` 现在真的应用 `model` / `reasoningEffort` / `permissionPreset`；此前 CLI 的 `prompt --model` 会被静默丢弃，会话悄悄跑在 profile 默认模型上。`cwd` / `workspaceId` / `agentPreset` 这类创建期参数改为显式 `-32602` 拒绝，而不是忽略。
+- README 如实说明：本机宿主 `list()` 不带创建时间，`createdAt` 为 `null`、`sort:"createdAt"` 退化为宿主原序。
+
 ## [0.5.0] - 2026-11-06
 
 这一个版本故意破坏两处默认值，换掉"每次调用都新开一个会话、每次都阻塞到被自己的超时砍断"的老形态。
@@ -29,7 +40,8 @@
   同一键累计 200 次 `ask` 后自动轮换。
 - **`mode` 三态**：`turn`（默认，会话正忙则 `-32004` 并附 `data.next`）、`steer`（插进当前轮）、
   `queue`（等当前轮结束）。`turn` 是桥自己的判据，宿主只认 `steer` / `queue`；其它值返回 `-32602`。
-- **`dsh_sessions` 支持 `cwd` 前缀过滤与 `sort`**（`updatedAt` 默认 / `createdAt`），会话项新增 `createdAt`。
+- **`dsh_sessions` 支持 `cwd` 前缀过滤与 `sort`**（`updatedAt` 默认 / `createdAt`），会话项新增 `createdAt`
+  （宿主的 `list()` 本身不提供创建时间，该字段目前恒为 `null`，按它排序等于保持宿主原序）。
 
 ## [0.4.5] - 2026-11-06
 

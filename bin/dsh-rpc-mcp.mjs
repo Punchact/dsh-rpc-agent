@@ -48,6 +48,7 @@ const TOOLS = [
         reuse: {
           type: "string",
           enum: ["auto", "never", "latest"],
+          default: "auto",
           description:
             'auto (default) reuses the session recorded for this project; never always creates a fresh session; latest ignores the ' +
             "recorded session id and takes the most recently updated session for the project.",
@@ -55,12 +56,14 @@ const TOOLS = [
         mode: {
           type: "string",
           enum: ["turn", "steer", "queue"],
+          default: "turn",
           description:
             'turn (default) delivers only into an idle session and fails with a busy error if one is running; steer injects into the ' +
             'running turn; queue waits for it. A busy error is not a failure — follow the running turn with dsh_wait instead.',
         },
         wait: {
           type: "boolean",
+          default: false,
           description:
             "false (default) returns a handle immediately: use dsh_wait to collect the result. true blocks until the turn finishes " +
             "and returns its answer in the same call — only when the work is known to be short.",

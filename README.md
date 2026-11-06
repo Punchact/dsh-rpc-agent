@@ -65,7 +65,7 @@ Cursor / Codex 用配置文件等价写法（把 `args` 换成同一个路径；
 | `dsh_ask` | `prompt`（**必填**）、`project?`、`reuse?`、`mode?`、`wait?`、`session_id?`、`cwd?`、`workspace_id?`、`agent_preset?`、`model?`、`reasoning_effort?`、`permission?`、`timeout_ms?` | 提问一轮。**`wait` 默认 `false`**：立刻返回句柄（含 `session_id`），答案用 `dsh_wait` 收；`wait:true` 才阻塞等这一轮。`project` 是粘性会话的键（见下）。`cwd` 与 `workspace_id` 互斥；两者与 `agent_preset` 都只在新建时有效，给了 `session_id` 再给会被拒绝 |
 | `dsh_workspaces` | `path?`、`title?` | 不带 `path` 就列工作区；带 `path` 则登记一个新工作区 |
 | `dsh_permissions` | — | 列出权限预设及其默认项 |
-| `dsh_sessions` | `limit?`、`cwd?`、`sort?` | 列出会话；`cwd` 按目录前缀过滤，`sort` 取 `updatedAt`（默认）或 `createdAt`，都是新的在前 |
+| `dsh_sessions` | `limit?`、`cwd?`、`sort?` | 列出会话；`cwd` 按目录前缀过滤，`sort` 取 `updatedAt`（默认）或 `createdAt`，都是新的在前。宿主不返回创建时间时 `createdAt` 恒为 `null`、`sort:"createdAt"` 退化为宿主原序（见下） |
 | `dsh_wait` | `session_id`（必填）、`timeout_ms?`、`since?` | 等该会话当前/下一轮结束；`since` 只回该游标之后的正文（增量） |
 | `dsh_cancel` | `session_id`（必填） | 中断正在跑的轮次 |
 | `dsh_status` | — | `ping` 的等价物，用于确认端点与 token 可读 |
@@ -186,10 +186,10 @@ console.log(answer.text, answer.usage);
 | `dsh.workspaces.create` | `path, title?` | `{id, title, path}`：把目录登记成工作区（同路径幂等复用） |
 | `dsh.permissions.catalog` | — | `{options:[{value, name, description?}], defaultPreset}`：每个预设=沙箱模式+审批策略 |
 | `dsh.sessions.configure` | `sessionId, model?, reasoningEffort?, permissionPreset?` | `{sessionId, selected?, permissionPreset?}`：给已有会话换模型/推理等级/权限 |
-| `dsh.sessions.list` | `limit?, cwd?, sort?` | `{total, sort, cwd, items:[{sessionId, running, blank, cwd, updatedAt, createdAt, …}]}`：`cwd` 按目录前缀过滤，`sort` 取 `updatedAt`（默认）或 `createdAt`，均为新的在前 |
+| `dsh.sessions.list` | `limit?, cwd?, sort?` | `{total, sort, cwd, items:[{sessionId, running, blank, cwd, updatedAt, createdAt, …}]}`：`cwd` 按目录前缀过滤，`sort` 取 `updatedAt`（默认）或 `createdAt`，均为新的在前。**本机实测宿主 `list()` 只有 `updatedAt`**，故 `createdAt` 为 `null`、按它排序等于保持宿主原序 |
 | `dsh.sessions.create` | `workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?` | `{sessionId, agentPreset, cwd, selected?, permissionPreset?}`：`workspaceId` 与 `cwd` 互斥；都不传就交给 Host 决定，`cwd` 回读 Host 实际挂载的目录。**不接受 `sessionId`**——id 由 Host 分配，传了会 `-32602`，不会悄悄换成另一个 id |
 | `dsh.sessions.ask` | `text, sessionId?, project?, reuse?, namespace?, workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?, mode?, queue?, timeoutMs?, wait?` | 见下方**轮次结果**；`sessionId` 省略时按粘性表（`namespace::project ?? cwd`）复用或新建，结果带 `created`/`reused`/`rotated`。**RPC 层 `wait` 仍默认 `true`**（MCP 工具才默认 `false`）。同一会话已有 bridge 在等轮次时默认返回 `-32004`，加 `queue: true` 则排队等它结束（受自己的 `timeoutMs` 约束） |
-| `dsh.sessions.prompt` | `sessionId, text, mode?` | `{accepted, sessionId, requestId, mode}`，立即返回、不等轮次；**不占住会话**，所以并发的 `ask` 仍可能抢走那一轮——要结果就配 `dsh.sessions.wait` |
+| `dsh.sessions.prompt` | `sessionId, text, mode?, model?, reasoningEffort?, permissionPreset?` | `{accepted, sessionId, requestId, mode, selected?, permissionPreset?}`，立即返回、不等轮次；**不占住会话**，所以并发的 `ask` 仍可能抢走那一轮——要结果就配 `dsh.sessions.wait`。`model` 等会话级设置在这里就生效（CLI 的 `prompt --model` 走的就是这条路） |
 | `dsh.sessions.wait` | `sessionId, timeoutMs?, since?` | 等待该会话**当前/下一个**轮次结束并返回轮次结果；`since` 只回该游标之后的事件（增量轮询用） |
 | `dsh.sessions.cancel` | `sessionId` | `{accepted, sessionId}`：中断正在进行的轮次，保留待处理队列 |
 | `dsh.sessions.history` | `sessionId, limit?` | `{cursor, turn, running, messageCount, records[]}`，只读快照 |
@@ -306,7 +306,8 @@ node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
 **MCP 层怎么渲染**（`bin/dsh-rpc-mcp.mjs` + `lib/mcp-format.mjs`）：工具结果**只在调用本身失败时**才是错误（错误码 + `next:` 提示）。轮次的 `status` 一律写进正文的 `outcome:` 行；**每一种结束原因都会额外给一行 `note:`（人话解释）与一行 `next:`（下一步），只有 `completed` 两者都没有**：
 
 ```
-— outcome: aborted · session … · turn 5 · 12.3s · 3 tool calls · cursor 88
+session session-a
+— outcome: aborted · turn 5 · 12.3s · 3 tool calls · cursor 88
 note: the turn was stopped (cause: user — the Host cannot tell a bridge cancel from someone pressing stop)
 reason: {"kind":"aborted","reason":{"kind":"user"}}
 next: do not resend blindly: ask the human whether to continue, then resend with the same session_id

@@ -165,10 +165,10 @@ A single session eventually becomes a context burden, so after **200 `ask` calls
 | `dsh.workspaces.create` | `path, title?` | `{id, title, path}`: register a directory as a workspace (idempotent per path) |
 | `dsh.permissions.catalog` | — | `{options:[…], defaultPreset}`: each preset is a sandbox mode plus an approval policy |
 | `dsh.sessions.configure` | `sessionId, model?, reasoningEffort?, permissionPreset?` | `{sessionId, selected?, permissionPreset?}` |
-| `dsh.sessions.list` | `limit?, cwd?, sort?` | `{total, sort, cwd, items[]}`: `cwd` filters by path prefix, `sort` is `updatedAt` (default) or `createdAt`, newest first |
+| `dsh.sessions.list` | `limit?, cwd?, sort?` | `{total, sort, cwd, items[]}`: `cwd` filters by path prefix, `sort` is `updatedAt` (default) or `createdAt`, newest first. **The Host's `list()` only carries `updatedAt`** (measured on this machine), so `createdAt` is `null` and sorting by it keeps the Host's order |
 | `dsh.sessions.create` | `workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?` | `{sessionId, agentPreset, cwd, selected?, permissionPreset?}`. **No `sessionId`** — ids belong to the Host; passing one is refused with `-32602` rather than silently replaced |
 | `dsh.sessions.ask` | `text, sessionId?, project?, reuse?, namespace?, workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?, mode?, queue?, timeoutMs?, wait?` | turn result (below). `sessionId` omitted means the sticky table (`namespace::project ?? cwd`) decides between reuse and a new session; the result carries `created` / `reused` / `rotated`. **The RPC `wait` still defaults to `true`** (only the MCP tool defaults to `false`). A second prompting run on the same session is refused with `-32004` unless `queue: true`, which waits for that session inside its own `timeoutMs` |
-| `dsh.sessions.prompt` | `sessionId, text, mode?` | `{accepted, requestId}`, returns immediately. Does **not** reserve the session, so a concurrent `ask` can still claim that turn — pair it with `dsh.sessions.wait` when the answer matters |
+| `dsh.sessions.prompt` | `sessionId, text, mode?, model?, reasoningEffort?, permissionPreset?` | `{accepted, sessionId, requestId, mode, selected?, permissionPreset?}`, returns immediately. Does **not** reserve the session, so a concurrent `ask` can still claim that turn — pair it with `dsh.sessions.wait` when the answer matters. Session settings such as `model` take effect here, which is what the CLI's `prompt --model` relies on |
 | `dsh.sessions.wait` | `sessionId, timeoutMs?, since?` | turn result; `since` returns only the events after that cursor |
 | `dsh.sessions.cancel` | `sessionId` | `{accepted}` |
 | `dsh.sessions.history` | `sessionId, limit?` | `{cursor, turn, running, messageCount, records[]}` |
@@ -200,7 +200,8 @@ A **turn result** carries `sessionId`, `turn`, `status` (`completed` / `aborted`
 **How MCP renders this** — a tool result is an error **only when the call itself failed** (with a code and a `next:` hint). The turn's `status` goes into an `outcome:` line, and **every end reason also gets a `note:` (plain-English explanation) plus a `next:` step — only `completed` gets neither**:
 
 ```
-— outcome: aborted · session … · turn 5 · 12.3s · 3 tool calls · cursor 88
+session session-a
+— outcome: aborted · turn 5 · 12.3s · 3 tool calls · cursor 88
 note: the turn was stopped (cause: user — the Host cannot tell a bridge cancel from someone pressing stop)
 reason: {"kind":"aborted","reason":{"kind":"user"}}
 next: do not resend blindly: ask the human whether to continue, then resend with the same session_id
