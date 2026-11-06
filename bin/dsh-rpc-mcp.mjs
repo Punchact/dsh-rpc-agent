@@ -206,6 +206,9 @@ const TOOLS = [
 
 let buffer = "";
 let pending = 0;
+// One controller per in-flight client request, so `notifications/cancelled` has
+// something to abort. Keyed by String(id): ids may be numbers or strings.
+const inflight = new Map();
 let closing = false;
 
 // Requests are answered concurrently, so end-of-input must not tear the process
@@ -291,8 +294,17 @@ async function handleLine(line) {
         return;
 
       case "notifications/initialized":
-      case "notifications/cancelled":
         return;
+
+      case "notifications/cancelled": {
+        const target = request.params?.requestId ?? request.params?.id ?? null;
+        const controller = target === null ? undefined : inflight.get(String(target));
+        if (controller) {
+          log(`cancelled by the client: ${String(target)}`);
+          controller.abort();
+        }
+        return;
+      }
 
       case "ping":
         if (!isNotification) reply(id, {});
@@ -306,7 +318,14 @@ async function handleLine(line) {
         const params = request.params ?? {};
         const name = params.name;
         const args = params.arguments ?? {};
-        const outcome = await callTool(name, args);
+        const controller = new AbortController();
+        if (id !== null) inflight.set(String(id), controller);
+        let outcome;
+        try {
+          outcome = await callTool(name, args, controller.signal);
+        } finally {
+          if (id !== null) inflight.delete(String(id));
+        }
         // A notification carries no id and must never be answered.
         if (!isNotification) reply(id, outcome);
         return;
@@ -360,7 +379,11 @@ async function bridgeSettings() {
   return bridgeDefaults;
 }
 
-async function callTool(name, args) {
+async function callTool(name, args, signal = undefined) {
+  // Cancellation from the client has to reach the request that is still in flight;
+  // these two wrappers are the only places that talk to the bridge from here.
+  const call = (method, params, options = {}) => rpcCall(method, params, signal ? { ...options, signal } : options);
+  const waitTurn = (sessionId, options = {}) => waitForTurn(sessionId, signal ? { ...options, signal } : options);
   try {
     const defaults = await bridgeSettings();
     const turnDefault = Number.isInteger(defaults.defaultTimeoutMs) ? defaults.defaultTimeoutMs : DEFAULT_TURN_TIMEOUT_MS;
@@ -405,14 +428,14 @@ async function callTool(name, args) {
         params.namespace = clientNamespace;
 
         if (params.wait === false) {
-          const result = await rpcCall("dsh.sessions.ask", params, { timeoutMs: turnBudget(args.timeout_ms ?? turnDefault) });
+          const result = await call("dsh.sessions.ask", params, { timeoutMs: turnBudget(args.timeout_ms ?? turnDefault) });
           return formatToolResult(result, hintOptions);
         }
         // Blocking: ask for one slice, then keep waiting in slices. A single
         // request that stayed quiet past ~300 s would be cut by the transport.
         const timeoutMs = Number.isInteger(args.timeout_ms) ? args.timeout_ms : turnDefault;
         const slice = Math.min(timeoutMs, WAIT_SLICE_MS);
-        const first = await rpcCall(
+        const first = await call(
           "dsh.sessions.ask",
           { ...params, timeoutMs: slice },
           { timeoutMs: Math.min(slice + 30_000, 280_000) },
@@ -420,7 +443,7 @@ async function callTool(name, args) {
         if (first?.status === "timeout" && typeof first.sessionId === "string") {
           const left = timeoutMs - (first.durationMs ?? slice);
           if (left > 1_000) {
-            const waited = await waitForTurn(first.sessionId, { timeoutMs: left });
+            const waited = await waitTurn(first.sessionId, { timeoutMs: left });
             return formatToolResult({
               ...first,
               ...waited,
@@ -437,12 +460,12 @@ async function callTool(name, args) {
         const path = typeof args.path === "string" ? args.path.trim() : "";
         if (path) {
           const title = typeof args.title === "string" ? args.title.trim() : "";
-          const created = await rpcCall("dsh.workspaces.create", title ? { path, title } : { path });
+          const created = await call("dsh.workspaces.create", title ? { path, title } : { path });
           return {
             content: [{ type: "text", text: `workspace ${created.id}  ${created.title}\n${created.path}` }],
           };
         }
-        const result = await rpcCall("dsh.workspaces.list", {});
+        const result = await call("dsh.workspaces.list", {});
         const lines = (result.items ?? []).map(
           (item) => `${item.id}  ${item.title}  [${item.status}, ${item.sessions} sessions]\n  ${item.path}`,
         );
@@ -452,7 +475,7 @@ async function callTool(name, args) {
       }
 
       case "dsh_permissions": {
-        const result = await rpcCall("dsh.permissions.catalog", {});
+        const result = await call("dsh.permissions.catalog", {});
         const lines = (result.options ?? []).map((option) => {
           const mark = option.value === result.defaultPreset ? "*" : " ";
           return `${mark} ${option.value}  ${option.name}${option.description ? ` — ${option.description}` : ""}`;
@@ -472,7 +495,7 @@ async function callTool(name, args) {
         if (Number.isInteger(args.limit)) params.limit = args.limit;
         if (typeof args.cwd === "string" && args.cwd.trim()) params.cwd = args.cwd.trim();
         if (typeof args.sort === "string" && args.sort.trim()) params.sort = args.sort.trim();
-        const result = await rpcCall("dsh.sessions.list", params);
+        const result = await call("dsh.sessions.list", params);
         const lines = (result.items ?? []).map(
           (item) =>
             `${item.sessionId}  ${item.running ? "running" : "idle"}${item.blank ? ",blank" : ""}  ${item.cwd ?? ""}`,
@@ -483,9 +506,9 @@ async function callTool(name, args) {
       case "dsh_wait": {
         const sessionId = typeof args.session_id === "string" ? args.session_id.trim() : "";
         if (!sessionId) return formatToolError("`session_id` is required", undefined, "call dsh_sessions() to find the session id");
-        // Sliced on purpose: see waitForTurn(). One long request cannot survive
+        // Sliced on purpose: see waitTurn(). One long request cannot survive
         // the transport's 300 s ceiling, and the answer would be lost with it.
-        const result = await waitForTurn(sessionId, {
+        const result = await waitTurn(sessionId, {
           timeoutMs: Number.isInteger(args.timeout_ms) ? args.timeout_ms : turnDefault,
           since: Number.isInteger(args.since) ? args.since : undefined,
         });
@@ -495,12 +518,12 @@ async function callTool(name, args) {
       case "dsh_cancel": {
         const sessionId = typeof args.session_id === "string" ? args.session_id.trim() : "";
         if (!sessionId) return formatToolError("`session_id` is required", undefined, "call dsh_sessions() to find the session id");
-        const result = await rpcCall("dsh.sessions.cancel", { sessionId });
+        const result = await call("dsh.sessions.cancel", { sessionId });
         return { content: [{ type: "text", text: `cancelled ${result.sessionId}` }] };
       }
 
       case "dsh_status": {
-        const result = await rpcCall("dsh.ping", {});
+        const result = await call("dsh.ping", {});
         const text = [
           `plugin: ${result.plugin} ${result.version}`,
           `endpoint: ${result.origin ?? "?"}${result.config?.path ?? ""}`,

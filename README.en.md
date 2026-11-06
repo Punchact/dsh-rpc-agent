@@ -258,6 +258,10 @@ After a restart:
 node bin/dsh-rpc.mjs health --wait 15000
 ```
 
+**When the caller goes away**: a non-streaming request aborts its own call when the socket closes — the event iteration stops and the run slot is released, but **the turn is not cancelled**. It keeps running in the Host and can still be collected with `wait` (and seen in the GUI). That is abort, not cancel; the bridge only does the former.
+
+**How an aborted call is accounted**: it lands in `/status` under `calls.outcomes`, not `errors` — `timeouts` means the wait budget ran out, `cancelledByClient` means the caller left first. Both are admitted calls with a different ending.
+
 ## Follow a CLI task in the GUI
 
 A session started from the CLI is a **real Harness session**, so it appears in the GUI sidebar — open it to see the transcript, tool calls and token usage. The CLI's own stdout stays in your terminal.
@@ -268,7 +272,7 @@ A session started from the CLI is a **real Harness session**, so it appears in t
 
 ## The status panel in Settings
 
-Once installed, Settings grows a **“RPC Bridge”** page: an online/offline light, version, endpoint, credential source, uptime, `pid`, Node version, whether remote callers are allowed, the runs in flight (run id prefix, has-session, has-prompt, age), the last 12 calls (time, method, duration, outcome) and per-method counters. It refreshes every two seconds.
+Once installed, Settings grows a **“RPC Bridge”** page: an online/offline light, version, endpoint, credential source, uptime, `pid`, Node version, whether remote callers are allowed, the runs in flight (run id prefix, has-session, has-prompt, age), the last 12 calls (time, method, duration, outcome), per-method counters, and two non-failure outcome counters (`timeouts`, `cancelledByClient`). It refreshes every two seconds.
 
 It reads **`GET /dsh-rpc/status`**, which sits on the same trust boundary as `/health`: **loopback only, no token**, because browser code cannot read the token in `endpoint.json`. In exchange the endpoint must stay silent about anything a caller said:
 
