@@ -6,6 +6,16 @@
 只有**对外可见的行为变化**才值得单独一行：新方法、语义变化、修掉的 bug、会影响使用者的坑。
 内部重构与措辞调整不记。
 
+## [0.8.0] - 2026-11-06
+
+> 0.8.0 与之前的 0.7.1、0.7.0、0.6.0、0.5.4 都还没有发布到 npm（npm 上仍是 0.5.3）。
+
+- **新增 `approvals.mode=delegate`：把批准权交给派发方**。升权请求不再一律被拒，而是被挂起；调用方用 `dsh.approvals.pending`（可 `waitMs` 长轮询 ≤120 秒）读出"要执行的确切命令、工作目录、当前预设、模型给的理由、到期时间"，再用 `dsh.approvals.resolve` 回答 `allow-once` 或 `reject`。MCP 侧对应 `dsh_approvals_pending` / `dsh_approvals_resolve`。
+- **没人回答就是拒绝**：`approvals.deadlineMs`（默认 60000）到期把挂起的调用判为拒绝，绝不自动放行。宿主自己的审批服务没有超时——这正是过去 10 分钟挂死的成因——所以超时由桥负责。
+- **`allow-once` 按会话计次，上限 3 次**：宿主没有"允许一次"的接口，桥手上唯一的杠杆是会话级 permission preset，所以放行等于放宽该会话。护栏是每会话最多 3 次、只接受 `workspace-write` 与 `danger-full-access` 两档、其余不询问直接拒；次数用尽后一律拒绝。
+- **`/status` 的 `calls` 新增 `approvals.allowed`**：与 `approvals.denied` 并列，用来判断无人值守会话是否真的在用这条通道。
+- **`approvals.deadlineMs` 的非法值报错而不是静默修正**：`mode` 与 `deadlineMs` 一起校验，写错就抛 `ConfigError` 并点名 `approvals`。
+
 ## [0.7.1] - 2026-11-06
 
 > 0.7.1、0.7.0、0.6.0、0.5.4 都还没有发布到 npm（npm 上仍是 0.5.3）。0.7.0 没有发出去，因为它的实现挂错了钩子（见第一条）。

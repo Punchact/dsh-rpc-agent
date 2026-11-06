@@ -120,7 +120,7 @@ test("the status route answers loopback with an aggregate-only payload", async (
       lastCallAt: null,
       lastErrorAt: null,
       outcomes: { timeouts: 0, cancelledByClient: 0 },
-      approvals: { denied: 0 },
+      approvals: { denied: 0, allowed: 0 },
       byMethod: {},
       recent: [],
     });

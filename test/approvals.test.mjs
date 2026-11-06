@@ -48,10 +48,11 @@ const delegateTo = (decision) => {
 // ---------------------------------------------------------------- config ----
 
 test("approvals default to off, and an unknown mode is a named config error", () => {
-  assert.deepEqual(resolveConfig({}).approvals, { mode: "off" });
-  assert.deepEqual(resolveConfig({ approvals: { mode: "deny" } }).approvals, { mode: "deny" });
+  assert.deepEqual(resolveConfig({}).approvals, { mode: "off", deadlineMs: 60_000 });
+  assert.deepEqual(resolveConfig({ approvals: { mode: "deny" } }).approvals, { mode: "deny", deadlineMs: 60_000 });
+  assert.deepEqual(resolveConfig({ approvals: { mode: "delegate", deadlineMs: 5_000 } }).approvals, { mode: "delegate", deadlineMs: 5_000 });
   // A partial object is legal: `{ mode }` is the only knob today.
-  assert.deepEqual(resolveConfig({ approvals: {} }).approvals, { mode: "off" });
+  assert.deepEqual(resolveConfig({ approvals: {} }).approvals, { mode: "off", deadlineMs: 60_000 });
 
   assert.throws(
     () => resolveConfig({ approvals: { mode: "allow" } }),
@@ -66,7 +67,7 @@ test("approvals default to off, and an unknown mode is a named config error", ()
 });
 
 test("the described config reports the mode without inventing others", () => {
-  assert.deepEqual(resolveConfig({}).approvals, { mode: APPROVAL_MODES[0] });
+  assert.deepEqual(resolveConfig({}).approvals, { mode: APPROVAL_MODES[0], deadlineMs: 60_000 });
 });
 
 // ------------------------------------------------------------ escalation ----
@@ -193,11 +194,11 @@ test("creation marks ownership; nothing else does", async () => {
 
 test("denials are counted apart from call outcomes", () => {
   const stats = createStats({ startedAt: 0, pid: 1 });
-  assert.deepEqual(stats.snapshot().approvals, { denied: 0 });
+  assert.deepEqual(stats.snapshot().approvals, { denied: 0, allowed: 0 });
   stats.recordApproval("denied");
   stats.recordApproval("denied");
   stats.recordApproval("something-else");
   const snapshot = stats.snapshot();
-  assert.deepEqual(snapshot.approvals, { denied: 2 });
+  assert.deepEqual(snapshot.approvals, { denied: 2, allowed: 0 });
   assert.equal(snapshot.total, 0, "an approval is not a call");
 });

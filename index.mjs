@@ -15,6 +15,7 @@ import { MAX_WAIT_SLICE_MS, MIN_WAIT_SLICE_MS, resolveConfig } from "./lib/confi
 import { buildDispatcher, registerRoutes } from "./lib/http.mjs";
 import { createMethods } from "./lib/methods.mjs";
 import { isOwnedSession } from "./lib/owned.mjs";
+import { createPendingStore } from "./lib/pending.mjs";
 import { createStats } from "./lib/stats.mjs";
 import { PLUGIN_NAME, PLUGIN_VERSION } from "./lib/version.mjs";
 
@@ -49,8 +50,13 @@ export function apply(ctx, input = {}) {
     endpointUrl: null,
   };
 
+  // Escalations this bridge holds for a caller to answer (approvals.mode=delegate).
+  // The store owns the deadline: the Host's approval service has none, and an
+  // unanswered question has to become a refusal rather than a hang.
+  const approvals = createPendingStore({ deadlineMs: config.approvals.deadlineMs, log });
+
   const methods = createMethods(
-    { sessionController: ctx.sessionController, webServer: ctx.webServer },
+    { sessionController: ctx.sessionController, webServer: ctx.webServer, approvals },
     config,
     ctx,
     state,
@@ -84,16 +90,31 @@ export function apply(ctx, input = {}) {
     mode: config.approvals.mode,
     isOwned: isOwnedSession,
     onDeny: () => stats.recordApproval("denied"),
+    onAllow: () => stats.recordApproval("allowed"),
+    applyPreset: async (sessionId, name) => {
+      const service = ctx.get?.("permissionPresets");
+      if (!service?.set) throw new Error("this deployment exposes no permissionPresets service");
+      const session = ctx.get?.("sessions")?.get?.(sessionId);
+      if (!session) throw new Error(`session ${sessionId} is not live`);
+      service.set(session, name);
+      return name;
+    },
+    store: approvals,
     log,
   });
   if (escalateOrPass) {
     if (typeof ctx.on === "function") {
       ctx.on("tools/pre-execute", escalateOrPass, { prepend: true });
       log.info?.(
-        "[dsh-rpc] approvals.mode=deny: refusing sandbox escalations from sessions this bridge created",
+        `[dsh-rpc] approvals.mode=${config.approvals.mode}: ` +
+          (config.approvals.mode === "delegate"
+            ? `holding sandbox escalations from sessions this bridge created for up to ${config.approvals.deadlineMs} ms`
+            : "refusing sandbox escalations from sessions this bridge created"),
       );
     } else {
-      log.warn?.("[dsh-rpc] approvals.mode=deny needs ctx.on: the escalation gate is not registered");
+      log.warn?.(
+        `[dsh-rpc] approvals.mode=${config.approvals.mode} needs ctx.on: the escalation gate is not registered`,
+      );
     }
   }
 

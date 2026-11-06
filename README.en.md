@@ -164,6 +164,8 @@ A single session eventually becomes a context burden, so after **200 `ask` calls
 | `dsh.workspaces.list` | — | `{total, items:[{id, title, path, status, sessions, …}]}`, `status` ∈ `ok` / `missing-dir` / `unknown` |
 | `dsh.workspaces.create` | `path, title?` | `{id, title, path}`: register a directory as a workspace (idempotent per path) |
 | `dsh.permissions.catalog` | — | `{options:[…], defaultPreset}`: each preset is a sandbox mode plus an approval policy |
+| `dsh.approvals.pending` | `sessionId?`, `waitMs?` | `{pending:[{approvalId, sessionId, toolName, argv, cwd, reason, expiresAt}], count, timedOut, mode, deadlineMs}`: held escalations; `waitMs` long-polls |
+| `dsh.approvals.resolve` | `approvalId`, `decision`, `note?` | `{approvalId, sessionId, toolName, decision, note}`: answers one held request |
 | `dsh.sessions.configure` | `sessionId, model?, reasoningEffort?, permissionPreset?` | `{sessionId, selected?, permissionPreset?}` |
 | `dsh.sessions.list` | `limit?, cwd?, sort?` | `{total, sort, cwd, items[]}`: `cwd` filters by path prefix, `sort` is `updatedAt` (default) or `createdAt`, newest first. **The Host's `list()` only carries `updatedAt`** (measured on this machine), so `createdAt` is `null` and sorting by it keeps the Host's order |
 | `dsh.sessions.create` | `workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?` | `{sessionId, agentPreset, cwd, selected?, permissionPreset?}`. **No `sessionId`** — ids belong to the Host; passing one is refused with `-32602` rather than silently replaced |
@@ -237,7 +239,22 @@ It only ever removes privilege: calls that do not escalate are untouched, and se
 
 > **Why not `ctx.on("approval/request")`**: the approval service dispatches through `scopeTarget(req.agent, req.agent)`, which only reaches answerers inside that agent's own composition. Measured on a live escalation: listeners registered on this plugin's context *and* on the root context were never called (the GUI panel stayed waiting), while `tools/pre-execute` is a global waterfall that reaches every agent.
 
-The default is `off`, which leaves the Host's own fail-closed behaviour in place. Handing the decision to the dispatching agent (`delegate`) is designed in the plan document but not implemented.
+### `delegate`: let the dispatching agent decide
+
+Set `approvals: { mode: "delegate", deadlineMs: 60000 }` and an escalation is *held* instead of refused. The caller answers with two methods:
+
+| Method | What it does |
+|---|---|
+| `dsh.approvals.pending({ sessionId?, waitMs? })` | lists held requests; `waitMs` makes it a long poll (≤120 s) so one call can wait |
+| `dsh.approvals.resolve({ approvalId, decision: "allow-once"\|"reject", note? })` | answers one of them |
+
+A decision packet carries `approvalId`, `sessionId`, `toolName`, `callId`, `escalation`, `argv` (the exact command), `cwd`, `preset`, `reason`, `createdAt`, `expiresAt`. The MCP server exposes the same two calls as `dsh_approvals_pending` and `dsh_approvals_resolve`.
+
+Rules worth knowing: **no answer is a refusal** — when `deadlineMs` passes the held call is denied, never granted; `allow-once` works by widening that session's permission preset, because the Host offers no per-call grant and the preset is the only lever this bridge has, so it is capped at **three grants per session**; only `workspace-write` and `danger-full-access` may be requested, and anything else is refused without asking. Grants and refusals are counted in `/status` under `calls.approvals.allowed` and `calls.approvals.denied`.
+
+**Known edges**: only in-place escalation (`sandbox_permissions`) is intercepted — nothing else in today's tool surface needs approval; and `allow-once` widens the session rather than a single call, which is why the cap exists.
+
+The default is `off`, which leaves the Host's own fail-closed behaviour in place.
 
 ## Security model
 

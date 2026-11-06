@@ -187,6 +187,8 @@ console.log(answer.text, answer.usage);
 | `dsh.workspaces.list` | — | `{total, items:[{id, title, path, status, sessions, createdAt, updatedAt}]}`，`status` 为 `ok` / `missing-dir` / `unknown` |
 | `dsh.workspaces.create` | `path, title?` | `{id, title, path}`：把目录登记成工作区（同路径幂等复用） |
 | `dsh.permissions.catalog` | — | `{options:[{value, name, description?}], defaultPreset}`：每个预设=沙箱模式+审批策略 |
+| `dsh.approvals.pending` | `sessionId?`, `waitMs?` | `{pending:[{approvalId, sessionId, toolName, argv, cwd, reason, expiresAt}], count, timedOut, mode, deadlineMs}`：`approvals.mode=delegate` 时待批的升权请求，`waitMs` 为长轮询 |
+| `dsh.approvals.resolve` | `approvalId`, `decision`, `note?` | `{approvalId, sessionId, toolName, decision, note}`：回答一条待批请求 |
 | `dsh.sessions.configure` | `sessionId, model?, reasoningEffort?, permissionPreset?` | `{sessionId, selected?, permissionPreset?}`：给已有会话换模型/推理等级/权限 |
 | `dsh.sessions.list` | `limit?, cwd?, sort?` | `{total, sort, cwd, items:[{sessionId, running, blank, cwd, updatedAt, createdAt, …}]}`：`cwd` 按目录前缀过滤，`sort` 取 `updatedAt`（默认）或 `createdAt`，均为新的在前。**本机实测宿主 `list()` 只有 `updatedAt`**，故 `createdAt` 为 `null`、按它排序等于保持宿主原序 |
 | `dsh.sessions.create` | `workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?` | `{sessionId, agentPreset, cwd, selected?, permissionPreset?}`：`workspaceId` 与 `cwd` 互斥；都不传就交给 Host 决定，`cwd` 回读 Host 实际挂载的目录。**不接受 `sessionId`**——id 由 Host 分配，传了会 `-32602`，不会悄悄换成另一个 id |
@@ -386,7 +388,8 @@ JSON-RPC 标准码之外，本插件用 `-3200x` 段表达业务语义：
         maxBodyBytes: 1048576
         maxSessions: 200       # 同时进行的等待上限
         approvals:
-          mode: off            # off（默认）| deny
+          mode: off            # off（默认）| deny | delegate
+          deadlineMs: 60000    # delegate：等调用方回答的时长，超时视为拒绝
 ```
 
 其余键：`enabled`、`tokenFile`（自定义 token 路径）、`path`（默认 `/dsh-rpc`）、`logRequests`。
@@ -399,10 +402,20 @@ JSON-RPC 标准码之外，本插件用 `-3200x` 段表达业务语义：
 - `deny`：桥在 `tools/pre-execute` 上挂一个前置 gate，**只拒绝"就地升权"**。本桥创建的会话里，带 `sandbox_permissions` 的调用在派发前就被拒，模型立刻收到：
   `approvals.mode=deny refused a sandbox escalation to "danger-full-access" for tool "pwsh"; the call was not executed.`
   它**只收紧权限、不放宽**：不升权的调用完全不受影响，不是本进程创建的会话（包括人在 GUI 里看着的那些）一律放行给它们自己的应答者。被拒次数记在 `/status` 的 `calls.approvals.denied`。
+- `delegate`：把决定权交给**派发任务的调用方**。升权请求被挂起，调用方用两个方法回答：
+
+  | 方法 | 作用 |
+  |---|---|
+  | `dsh.approvals.pending({ sessionId?, waitMs? })` | 列出待批请求；`waitMs` 让它变成最多 120 秒的长轮询，一个调用就能等到 |
+  | `dsh.approvals.resolve({ approvalId, decision: "allow-once"\|"reject", note? })` | 回答某一条 |
+
+  决策包字段：`approvalId`、`sessionId`、`toolName`、`callId`、`escalation`、`argv`（要执行的命令原文）、`cwd`、`preset`、`reason`、`createdAt`、`expiresAt`。MCP 侧对应 `dsh_approvals_pending` / `dsh_approvals_resolve`。
+
+  语义要点：**没人回答就是拒绝**（`deadlineMs` 到期按拒绝处理，绝不自动放行）；`allow-once` 通过切换该会话的 permission preset 生效——宿主没有"允许一次"的接口，桥手上只有会话级预设这一个杠杆，所以它按会话计次，**每会话最多 3 次**，之后一律拒绝；可请求的目标只有 `workspace-write` 与 `danger-full-access` 两档，其余不询问直接拒。放行与拒绝分别记在 `/status` 的 `calls.approvals.allowed` / `calls.approvals.denied`。
 
 > **为什么不用 `ctx.on("approval/request")`**：审批服务经 `scopeTarget(req.agent, req.agent)` 派发，只会走到"该 agent 自己组合里"的应答者。实测在插件上下文和 root 上下文上各注册一次，真实升权时监听器**一次都没被调用**（GUI 面板还在等），而 `tools/pre-execute` 是全局 waterfall，所有 agent 都覆盖得到。
 
-"把批准权交给派发方 agent"（`delegate`）在设计文档里，尚未实现。
+**已知边界**：只拦"带 `sandbox_permissions` 的就地升权"（当前工具面里其它动作不需要审批）；`allow-once` 是会话级放宽而非"仅此一次"，所以计次上限是按护栏而不是按次数精确实现的。
 
 环境变量 `DSH_RPC_TOKEN` 可覆盖 token（优先级高于文件），适合 CI 或不想落盘的场景。
 

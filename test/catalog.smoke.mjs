@@ -51,6 +51,8 @@ const methods = createMethods(
 const info = await methods.discover();
 const names = (info.methods ?? []).map((method) => method.name).sort();
 const expected = [
+  "dsh.approvals.pending",
+  "dsh.approvals.resolve",
   "dsh.discover",
   "dsh.models",
   "dsh.permissions.catalog",
