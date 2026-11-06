@@ -1,6 +1,6 @@
 {
   "name": "@punchact/dsh-rpc-agent",
-  "version": "0.7.6",
+  "version": "0.7.7",
   "description": "Loopback JSON-RPC bridge that lets local AI agents drive DeepSeek Harness sessions",
   "author": "Punchact",
   "license": "MIT",
@@ -58,7 +58,7 @@
     }
   },
   "scripts": {
-    "test": "node test/methods.test.mjs && node test/mcp-format.test.mjs && node test/registry.test.mjs && node test/pending.test.mjs && node test/approvals.test.mjs && node test/wait.test.mjs && node test/abort.test.mjs && node test/client.test.mjs && node test/status.test.mjs && node test/catalog.smoke.mjs",
+    "test": "node test/methods.test.mjs && node test/mcp-format.test.mjs && node test/registry.test.mjs && node test/pending.test.mjs && node test/approvals.test.mjs && node test/approval-state.test.mjs && node test/wait.test.mjs && node test/abort.test.mjs && node test/client.test.mjs && node test/status.test.mjs && node test/catalog.smoke.mjs",
     "test:host": "node test/host.test.mjs",
     "test:e2e": "node test/e2e.mjs",
     "test:edge": "node test/edge.mjs",

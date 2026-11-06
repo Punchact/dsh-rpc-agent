@@ -10,11 +10,12 @@
 //  * Fail loud on a bad config, stay inert (but loaded) when disabled.
 
 import { endpointPath, loadOrCreateToken, tokenPath, writeEndpoint } from "./lib/auth.mjs";
+import { createApprovalState } from "./lib/approval-state.mjs";
 import { createApprovalGate } from "./lib/approvals.mjs";
 import { MAX_WAIT_SLICE_MS, MIN_WAIT_SLICE_MS, resolveConfig } from "./lib/config.mjs";
 import { buildDispatcher, registerRoutes } from "./lib/http.mjs";
 import { createMethods } from "./lib/methods.mjs";
-import { isOwnedSession } from "./lib/owned.mjs";
+import { isOwnedSession, useOwnedState } from "./lib/owned.mjs";
 import { createPendingStore } from "./lib/pending.mjs";
 import { createStats } from "./lib/stats.mjs";
 import { PLUGIN_NAME, PLUGIN_VERSION } from "./lib/version.mjs";
@@ -54,6 +55,17 @@ export function apply(ctx, input = {}) {
   // The store owns the deadline: the Host's approval service has none, and an
   // unanswered question has to become a refusal rather than a hang.
   const approvals = createPendingStore({ deadlineMs: config.approvals.deadlineMs, log });
+
+  // What the gate has to remember across restarts: how many escalations each
+  // session already won, which sessions this bridge created, and any preset it
+  // widened without getting a chance to put it back. Written only when approvals
+  // are on — with them off nothing here answers for anybody, so the file would be
+  // noise on every session create.
+  const approvalState = config.approvals.mode === "off" ? null : createApprovalState({ log });
+  if (approvalState) {
+    useOwnedState(approvalState);
+    approvalState.prune();
+  }
 
   const methods = createMethods(
     { sessionController: ctx.sessionController, webServer: ctx.webServer, approvals },
@@ -106,9 +118,21 @@ export function apply(ctx, input = {}) {
       return service.current(session) ?? null;
     },
     store: approvals,
+    state: approvalState,
     log,
   });
   if (gate) {
+    // A killed process cannot run `dispose`, so a preset this bridge widened and
+    // never restored is still wide right now. The journal is the only record of
+    // that debt, and settling it is the first thing to do.
+    gate
+      .recover?.()
+      ?.then?.((result) => {
+        if (result?.restored || result?.failed) {
+          log.info?.(`[dsh-rpc] approval journal: restored ${result.restored}, failed ${result.failed}`);
+        }
+      })
+      ?.catch?.((error) => log.warn?.(`[dsh-rpc] approval recovery failed: ${error?.message ?? error}`));
     if (typeof ctx.on === "function") {
       ctx.on("tools/pre-execute", gate.pre, { prepend: true });
       // `allow-once` widens the preset only for the approved call, so the gate

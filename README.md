@@ -387,6 +387,8 @@ JSON-RPC 标准码之外，本插件用 `-3200x` 段表达业务语义：
         defaultCwd: ''         # ask 未给 cwd 时用这个，再回落到进程 cwd
         defaultAgentPreset: '' # 新建会话的默认 preset
         defaultTimeoutMs: 600000
+        maxWaitSliceMs: 120000 # 单次响应等待时长，见 §8
+        historyBudgetMs: 30000 # 一次 history 快照最多等多久
         maxBodyBytes: 1048576
         maxSessions: 200       # 同时进行的等待上限
         approvals:
@@ -418,9 +420,11 @@ JSON-RPC 标准码之外，本插件用 `-3200x` 段表达业务语义：
 
   语义要点：**没人回答就是拒绝**（`deadlineMs` 到期按拒绝处理，绝不自动放行）；`allow-once` 通过临时切换该会话的 permission preset 生效——宿主没有"允许一次"的接口，桥手上只有会话级预设这一个杠杆，所以它**只在被批准的那次调用期间放宽**，调用结束（`tools/post-execute`）立刻恢复原预设，另有 5 分钟兜底定时器防止工具不上报时一直放宽；按会话计次，**每会话最多 3 次**，且同一会话同时只允许一个升权调用在跑（同 tick 的并发请求只会产生一条待批记录），之后一律拒绝；可请求的目标只有 `workspace-write` 与 `danger-full-access` 两档，其余不询问直接拒。放行与拒绝分别记在 `/status` 的 `calls.approvals.allowed` / `calls.approvals.denied`。挂起中被取消的调用会立刻收回它的待批请求（按拒绝处理），不会留下事后可批准的悬空条目。
 
+**重启之后**：每会话已用的升权次数、本桥拥有的会话、以及"这次放宽还没还回去"的欠账都写在 `$DSH_HOME/dsh-rpc/approvals.json`（0600、`.tmp` 后 rename 的原子替换）。所以重启不会把额度清零，也不会让闸门对旧会话失声；如果进程被杀、放宽没来得及收回，下一次启动会读这份台账把 preset 还回去（还失败只记 warn，不反复重试）。`approvals.mode=off` 时不写这个文件。
+
 > **为什么不用 `ctx.on("approval/request")`**：审批服务经 `scopeTarget(req.agent, req.agent)` 派发，只会走到"该 agent 自己组合里"的应答者。实测在插件上下文和 root 上下文上各注册一次，真实升权时监听器**一次都没被调用**（GUI 面板还在等），而 `tools/pre-execute` 是全局 waterfall，所有 agent 都覆盖得到。
 
-**已知边界**：只拦"带 `sandbox_permissions` 的就地升权"（当前工具面里其它动作不需要审批）；`allow-once` 是会话级放宽而非"仅此一次"，所以计次上限是按护栏而不是按次数精确实现的。
+**已知边界**：只拦"带 `sandbox_permissions` 的就地升权"（当前工具面里其它动作不需要审批）；`allow-once` 是会话级放宽而非"仅此一次"，所以计次上限是按护栏而不是按次数精确实现的；三次上限按会话落盘、重启不忘，但新建会话仍会得到新的三次。
 
 环境变量 `DSH_RPC_TOKEN` 可覆盖 token（优先级高于文件），适合 CI 或不想落盘的场景。
 

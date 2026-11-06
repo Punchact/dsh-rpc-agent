@@ -60,6 +60,8 @@ function fakeController({
   hostCwd = "/host/resolved",
   models = null,
   stuckAfterSnapshot = false,
+  stuckBeforeSnapshot = false,
+  stuckOnReturn = false,
 } = {}) {
   const events = [...historical];
   const subscribers = new Set();
@@ -208,6 +210,12 @@ function fakeController({
       const onAbort = () => out.close();
       signal?.addEventListener("abort", onAbort, { once: true });
       try {
+        if (stuckBeforeSnapshot) {
+          // A Host that accepted the subscription and then stopped answering: the
+          // very first frame never arrives, so nothing bounds `history` unless the
+          // bridge bounds it itself.
+          await new Promise(() => {});
+        }
         yield {
           type: "snapshot",
           header: {},
@@ -230,6 +238,10 @@ function fakeController({
         subscribers.delete(push);
         signal?.removeEventListener("abort", onAbort);
         out.close();
+        if (stuckOnReturn) {
+          // Teardown that never completes: the answer must not wait for it.
+          await new Promise(() => {});
+        }
       }
     },
   };
@@ -1435,4 +1447,23 @@ test("with approvals on, a preset change cannot skip the gate to full access", a
   // Nothing wider than the current preset is an escalation, so it still works.
   await methods.configure({ sessionId: created.sessionId, permissionPreset: "workspace-write" });
   assert.equal(permissions.applied.at(-1).name, "workspace-write");
+});
+
+test("a snapshot read that never answers reports a timeout instead of hanging", async () => {
+  const controller = fakeController({ stuckBeforeSnapshot: true });
+  const started = Date.now();
+  await assert.rejects(
+    () => build(controller, { historyBudgetMs: 150 }).history({ sessionId: "session-test" }),
+    /stopped answering/,
+  );
+  assert.ok(Date.now() - started < 5_000, "the deadline, not the Host, ends the read");
+});
+
+test("a Host that never finishes closing still lets history answer", async () => {
+  const controller = fakeController({ stuckOnReturn: true });
+  const started = Date.now();
+  const result = await build(controller, { historyBudgetMs: 5_000 }).history({ sessionId: "session-test" });
+  assert.equal(result.sessionId, "session-test");
+  assert.ok(Array.isArray(result.records));
+  assert.ok(Date.now() - started < 5_000, "cleanup is bounded, the answer is not");
 });
