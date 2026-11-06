@@ -1,12 +1,44 @@
 # dsh-rpc-agent
 
-把 DeepSeek Harness 变成本机可调用的 RPC 服务：任何本地 agent —— Claude Code、Codex CLI、Cursor、Trae，或你自己写的脚本 —— 都能把任务交给 DSH，拿回它的最终回答。
+> 把本机的 DeepSeek Harness 变成一个可调用的 RPC / MCP 服务：Claude Code、Cursor、Codex、Trae，或你自己写的脚本，都能把任务交给 DSH，再拿回它的结果。
 
-[English](./README.en.md) · 非官方项目 · MIT
+[![npm version](https://img.shields.io/npm/v/@punchact/dsh-rpc-agent)](https://www.npmjs.com/package/@punchact/dsh-rpc-agent)
+[![npm downloads](https://img.shields.io/npm/dm/@punchact/dsh-rpc-agent)](https://www.npmjs.com/package/@punchact/dsh-rpc-agent)
+[![install size](https://packagephobia.com/badge?p=@punchact/dsh-rpc-agent)](https://packagephobia.com/result?p=@punchact/dsh-rpc-agent)
+[![node](https://img.shields.io/node/v/@punchact/dsh-rpc-agent)](https://nodejs.org/)
+[![license](https://img.shields.io/npm/l/@punchact/dsh-rpc-agent)](./LICENSE)
 
-> **本项目与 DeepSeek 官方无关。** 它是第三方插件，由社区开发者独立维护，不获 DeepSeek 背书。使用前请先读 [第 7 节](#7-安全模型)：拿到本插件的 token，等于拿到在这台机器上驱动 DSH 执行动作的权限。
+[English](./README.en.md) · [设计说明](./docs/design.md) · [变更记录](./CHANGELOG.md) · [发版手册](./docs/release.md) · [安全策略](./SECURITY.md)
 
-## 这是什么
+> [!IMPORTANT]
+> **与 DeepSeek 官方无关。** 这是第三方插件，由社区独立维护，不获 DeepSeek 背书。
+>
+> **拿到 token 就等于拿到"在这台机器上让 DSH 替你执行动作"的权限。** 装之前请读[安全模型](#安全模型)。
+
+## 60 秒上手
+
+```powershell
+# 1. 装进 DSH 的 profile（默认 profile 是 desktop）
+dsh plugin add @punchact/dsh-rpc-agent
+
+# 2. 确认它在跑。端口每次启动都可能变，这条命令会打印当前地址
+node "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\bin\dsh-rpc.mjs" ping
+
+# 3. 把 MCP 入口注册给你的 agent（这里是 Claude Code，Cursor/Codex 见下文）
+claude mcp add dsh -- node "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\bin\dsh-rpc-mcp.mjs"
+```
+
+然后在你的 agent 里说一句「用 `dsh_ask` 问 DSH：只回复两个字：收到」，或者直接用 CLI：
+
+```powershell
+# 上一条里那个 dsh-rpc.mjs 的完整路径，收进变量省点打字
+$cli = "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\bin\dsh-rpc.mjs"
+node $cli ask "只回复两个字：收到" --cwd . --json
+```
+
+`ask` 默认**不阻塞**，立刻返回句柄；要看结果用 `dsh_wait` / `wait --session …`。这是刻意的——外层 agent 的工具调用通常有 300 秒硬上限，长任务必须能"先接单、后交货"。
+
+## 它是什么
 
 DSH 在这里不是一个模型，而是一个**完整的 agent**——带自己的工具、技能、MCP 服务器、沙箱与会话上下文。本插件只做一件很薄的事：把 HTTP 或 MCP 上的一句话转成 Host 的一次提问，再把结果转回来。
 
@@ -18,33 +50,76 @@ client (Claude Code / Cursor / Codex / CLI / your script)
 http://127.0.0.1:<port>/dsh-rpc   ->   DSH agent
 ```
 
-端口**不是固定的**：DSH 每次启动由系统分配，重启后会变。`node bin/dsh-rpc.mjs ping` 输出的 `origin` 就是当前地址；插件同时把它写进 `endpoint.json`，客户端每次调用现读该文件（见 [第 8 节](#8-端口与连接稳定性)）。
+端口**不是固定的**：DSH 每次启动由系统分配，重启后就变。`ping` 打印的 `origin` 是当前地址，插件同时把它写进 `endpoint.json`，客户端每次调用现读（见[端口与连接稳定性](#端口与连接稳定性)）。
 
-仓库与插件包名都是 `dsh-rpc-agent`。命令行（`dsh-rpc`、`dsh-rpc-mcp`）、端点路径（`/dsh-rpc`）、状态目录（`~/.dsh/dsh-rpc`）与 `DSH_RPC_*` 环境变量保持不变——它们是运行时契约，改了会让已装好的配置和已配对的 token 一起失效。
+**它不是什么**：
 
-## 目录
+| 你可能想用它做 | 更好的选择 |
+| --- | --- |
+| 就问一句、看个回答 | 直接在 DSH GUI 里问，不必绕一层 |
+| 定时、后台、报警式的任务 | DSH 自己的定时任务机制，不是本插件职责 |
+| 从另一台机器驱动这台 DSH | 本插件为 loopback 设计，`allowRemote` 只关白名单、不增强认证 |
 
-1. [四条接入路径](#1-四条接入路径)
-2. [端点与凭据](#2-端点与凭据)
-3. [方法](#3-方法)
-4. [错误码](#4-错误码)
-5. [配置](#5-配置)
-6. [安装与更新](#6-安装与更新)
-7. [安全模型](#7-安全模型)
-8. [端口与连接稳定性](#8-端口与连接稳定性)
-9. [从 GUI 跟进 CLI 发起的任务](#9-从-gui-跟进-cli-发起的任务)
-10. [设置页里的状态面板](#10-设置页里的状态面板)
-11. [验证](#11-验证)
-12. [已知边界](#12-已知边界)
-13. [排障](#13-排障)
+仓库与包名都是 `dsh-rpc-agent`；命令行（`dsh-rpc`、`dsh-rpc-mcp`）、端点路径（`/dsh-rpc`）、状态目录（`~/.dsh/dsh-rpc`）与 `DSH_RPC_*` 环境变量属运行时契约，改名会让已装好的配置与已配对的 token 一起失效。
 
-其他文档：[变更记录](./CHANGELOG.md) · [安全策略](./SECURITY.md) · [发版手册](./docs/release.md) · [设计说明](./docs/design.md)
+## 亮点
 
-**版本**：npm 上最新发布的是 [`0.7.7`](https://www.npmjs.com/package/@punchact/dsh-rpc-agent)。本文件描述的是**仓库当前代码**，两版之间的差异见 [CHANGELOG](./CHANGELOG.md) 顶部。
+- **零运行期依赖**：装进 profile 只多一个包，不引入 peer 解析或版本冲突。
+- **会话是真的**：走 Host 的 `sessionController`，所以同一轮在 GUI 侧栏看得到、能接手、有日志与用量。
+- **长任务不会被误判成失败**：非阻塞句柄 + `wait` 增量 + 明确的 `outcome:` / `note:` / `next:`，不触发外层重试。
+- **跨重启不丢**：粘性会话表、升权台账、"放宽未还"的欠账都落盘，重启后继续。
+- **无人值守也不卡死**：`approvals.mode` 三档，`delegate` 把升权决定交给派发方。
+- **调用方断开就停手，但不杀你的工作**：abort ≠ cancel，那一轮还在 GUI 里跑。
+- **端口随启动器走**：`endpoint.json` + `health --wait`，客户端不用写死地址。
+- **每条对外承诺都有用例守着**：182 例单元 + 变异验证 + 真宿主集成测试。
 
----
+## 安装与更新
 
-## 1. 四条接入路径
+**从 npm 装（推荐）**。本包是标准 DSH bundle，注册表装与本地目录装走同一套 pnpm 路径：
+
+```bash
+dsh plugin add @punchact/dsh-rpc-agent
+```
+
+或在 DSH 里直接说：
+
+```js
+plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent" })
+```
+
+非默认 profile 加 `--profile <name>`；钉版本写全 `@punchact/dsh-rpc-agent@0.7.7`，不写则取 `latest`。npm 上最新是 [`0.7.7`](https://www.npmjs.com/package/@punchact/dsh-rpc-agent)，本文件描述的是**仓库当前代码**，两者差异见 [CHANGELOG](./CHANGELOG.md) 顶部。
+
+三件在 npm 路线上容易踩的事：
+
+1. **装进来的是拷贝，不是链接。** 装完再改本地工作区的源码**不会**影响运行中的插件。要边改边试就用下面那条路线。
+2. **刚发布的版本可能被 pnpm 的冷静期拦下。** 发布当天用注册表 spec 装会失败（`minimumReleaseAge` 未满）。要么钉一个已过窗口的版本，要么在 profile 的 `pnpm-workspace.yaml` 里显式放行——pnpm 有时会自己追加这一行：
+
+   ```yaml
+   minimumReleaseAgeExclude:
+     - '@punchact/dsh-rpc-agent@0.4.1 || 0.4.4 || 0.5.3 || 0.7.6 || 0.7.7'
+   ```
+
+3. **想确认装的是哪一份**：用 `cordis_inspect_query`（`Config.listConfigs`，`input: {"entry":"include:dsh-rpc-bridge"}`）看返回的 `packageDir`——指向 `<profile>\node_modules\@punchact\dsh-rpc-agent` 是 npm 路线，指向你的工作区是链接路线。**版本号本身不能当证据**，它读的是包里那个 `package.json`。
+
+版本历史见 [Releases](https://github.com/Punchact/dsh-rpc-agent/releases)；**0.4.4 起每版都由 OIDC 发布并带 SLSA provenance**（`/-/npm/v1/attestations/@punchact%2Fdsh-rpc-agent@<版本>` 返回 200）。`0.4.1` / `0.4.2` 已撤回，注册表上取不到。
+
+**从本地目录装（改源码时用）**：
+
+```js
+plugin_manager({ action: "install_bundle", target: "<absolute-path-to-your-clone>" })
+```
+
+- 这种安装是**指向本目录的链接**，改完源码不需要重装。
+- 但宿主不会因文件变化重新 `import`；要让新的 `lib/*.mjs` 生效，把插件行关一次再开：
+
+```js
+plugin_manager({ action: "set_plugin", target: "include:dsh-rpc-bridge", enabled: false })
+plugin_manager({ action: "set_plugin", target: "include:dsh-rpc-bridge", enabled: true  })
+```
+
+`bin/` 与 `test/` 是独立进程，改动无需重载。发版流程见 [docs/release.md](./docs/release.md)。
+
+## 四条接入路径
 
 | 方式 | 适合 | 入口 |
 | --- | --- | --- |
@@ -53,9 +128,9 @@ http://127.0.0.1:<port>/dsh-rpc   ->   DSH agent
 | HTTP JSON-RPC | 任何语言的进程 | `POST /dsh-rpc` |
 | JS 客户端库 | Node 侧集成 | `@punchact/dsh-rpc-agent/http-client` |
 
-### 1.1 MCP（推荐）
+### MCP（推荐）
 
-`bin/` 指**包内**的 `bin/` 目录。从 npm 装（[第 6 节](#6-安装与更新)的推荐路线）时它在 `%USERPROFILE%\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\` 下。
+`bin/` 指**包内**的 `bin/` 目录。从 npm 装时它在 `%USERPROFILE%\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\` 下。
 
 ```powershell
 claude mcp add dsh -- node "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\bin\dsh-rpc-mcp.mjs"
@@ -74,7 +149,7 @@ Cursor / Codex 用配置文件等价写法（Windows 下 JSON 里的反斜杠要
 }
 ```
 
-走本地克隆那条路线时，把路径换成 `<path-to-your-clone>\bin\dsh-rpc-mcp.mjs`。本文余下示例都写 `node bin/...`，等价于"当前目录位于包内时执行"。
+走本地克隆那条路线时，把路径换成 `<path-to-your-clone>\bin\dsh-rpc-mcp.mjs`。本文余下示例写 `node bin/...`，等价于"当前目录位于包内时执行"。
 
 暴露 **9 个工具**：
 
@@ -95,11 +170,11 @@ Cursor / Codex 用配置文件等价写法（Windows 下 JSON 里的反斜杠要
 | 参数 | 说明 |
 | --- | --- |
 | `prompt`（**必填**） | 要交给 DSH 的那句话；要自包含 |
-| `project?` | 粘性会话的键（见 1.1.1） |
+| `project?` | 粘性会话的键（见下） |
 | `session_id?` | 复用已有会话 |
 | `wait?` | **默认 `false`**：立刻返回句柄；`true` 才阻塞等这一轮 |
-| `mode?` | `turn`（默认）/ `steer` / `queue`，见 [第 3 节](#3-方法) |
-| `cwd?` / `workspace_id?` / `agent_preset?` | 只在新建会话时有效，二者互斥 |
+| `mode?` | `turn`（默认）/ `steer` / `queue` |
+| `cwd?` / `workspace_id?` / `agent_preset?` | 只在新建会话时有效，前两者互斥 |
 | `model?` / `reasoning_effort?` / `permission?` | 会话级设置，复用会话时也能改 |
 | `timeout_ms?` | 这一轮的等待预算 |
 
@@ -107,7 +182,7 @@ Cursor / Codex 用配置文件等价写法（Windows 下 JSON 里的反斜杠要
 
 MCP 服务器与被调用的 Harness 会话**不共享上下文**——给 `dsh_ask` 的 prompt 要自包含。
 
-#### 1.1.1 粘性会话
+### 粘性会话
 
 `dsh_ask` 不带 `session_id` 时不会盲目新建：它按 `${客户端名}::${project ?? cwd}` 查 `~/.dsh/dsh-rpc/sessions.json`，命中且会话还在、还不是空会话，就**接着用同一个会话**；否则新建并回写。同一个 `project` 的第二次调用会落在上次那个会话里——这就是"一个项目一个会话"。
 
@@ -120,7 +195,7 @@ MCP 服务器与被调用的 Harness 会话**不共享上下文**——给 `dsh_
 
 单个会话攒太久会变成上下文负担，所以同一键累计 **200 次** `ask` 后自动轮换：新建会话、把旧 id 放在结果的 `previousSessionId` 里（`rotated: true`）。这个阈值数的是**本桥投递的次数**，不是宿主总消息数——宿主没有廉价的计数接口。
 
-### 1.2 CLI
+### CLI
 
 ```powershell
 node bin/dsh-rpc.mjs health                  # 免鉴权探活
@@ -145,7 +220,7 @@ node bin/dsh-rpc.mjs call dsh.sessions.history '{"sessionId":"session-xxxx"}' --
 
 退出码：`0` 完成 · `1` 失败或该轮未正常结束 · `2` 用法错误 · `3` 连不上 Harness。
 
-### 1.3 直接 HTTP
+### 直接 HTTP
 
 ```powershell
 $endpoint = (Get-Content "$env:USERPROFILE\.dsh\dsh-rpc\endpoint.json" -Raw | ConvertFrom-Json).url
@@ -158,7 +233,7 @@ Invoke-RestMethod -Method Post -Uri $endpoint `
 
 `endpoint.json` 由插件每次启动重写，所以这样取地址不需要知道端口。
 
-### 1.4 JS 客户端库
+### JS 客户端库
 
 ```js
 import { rpcCall } from "@punchact/dsh-rpc-agent/http-client";
@@ -167,51 +242,11 @@ const answer = await rpcCall("dsh.sessions.ask", { text: "总结一下这个仓�
 console.log(answer.text, answer.usage);
 ```
 
-这个子路径由 `exports` 声明（`"./http-client": "./lib/client.mjs"`）。本地克隆里等价于 `import … from "<path-to-your-clone>/lib/client.mjs"`。
+这个子路径由 `exports` 声明（`"./http-client": "./lib/client.mjs"`）。本地克隆里等价于 `import … from "<path-to-your-clone>/lib/client.mjs"`。`rpcCall` 直接 resolve 成方法的 `result`；失败时抛出的 Error 带 `code` / `data` / `status`，可按错误码分支。
 
-`rpcCall` 直接 resolve 成方法的 `result`；失败时抛出的 Error 带 `code` / `data` / `status`，可按错误码分支。
-
----
-
-## 2. 端点与凭据
-
-| 项 | 值 |
-| --- | --- |
-| RPC 端点 | `POST /dsh-rpc`（JSON-RPC 2.0） |
-| 流式端点 | `POST /dsh-rpc/stream`（NDJSON） |
-| 探活 | `GET /dsh-rpc/health`（**免鉴权**） |
-| 凭据 | `Authorization: Bearer <token>` 或 `X-DSH-RPC-Token: <token>` |
-| token 文件 | `%USERPROFILE%\.dsh\dsh-rpc\token`（32 字节随机 hex，0600） |
-| 端点描述 | `%USERPROFILE%\.dsh\dsh-rpc\endpoint.json`（每次启动重写） |
-
-完整地址形如 `http://127.0.0.1:<port>/dsh-rpc`。`<port>` 由 DSH 决定，每次启动可能不同。`endpoint.json`：
-
-```jsonc
-{
-  "url": "http://127.0.0.1:3820/dsh-rpc",
-  "origin": "http://127.0.0.1:3820",
-  "path": "/dsh-rpc",
-  "version": "0.7.7",                        // 正在运行的那份插件自报的版本
-  "plugin": "dsh-rpc-agent",
-  "pid": 12345,                              // 写这个文件的 Host 进程
-  "startedAt": "2026-11-05T01:05:58.000Z",   // 该进程的启动时刻
-  "updatedAt": "2026-11-05T01:06:31.924Z"    // 本次写入时刻
-}
-```
-
-`pid` 与 `startedAt` 是给客户端判断"Harness 重启过没有"用的：两者都没变却连不上，说明不是端口漂移。
-
-- **token 自动生成**：插件首次激活时生成并落盘，CLI/MCP 自动读取，无需手工配置。
-- **只服务 loopback**：默认仅接受 `127.0.0.1` / `::1` / `::ffff:127.0.0.1`，其它来源 403。要开放到局域网须显式打开 `allowRemote`。
-- **健康检查故意免鉴权**：只回 `{ok, plugin, version, protocol, authenticated}`，不含会话或配置。
-
----
-
-## 3. 方法
+## 方法
 
 全部方法都在 `dsh.` 命名空间下；CLI 别名 `ping` / `discover` / `ask` / `models` 也可直接当 JSON-RPC method 用。
-
-### 3.1 方法总表
 
 | 方法 | 参数 | 返回 |
 | --- | --- | --- |
@@ -242,7 +277,39 @@ console.log(answer.text, answer.usage);
 
 `mode` 取 `turn`（默认：只在会话空闲时投递，正在跑就返回 `-32004` 并附 `data.next`）、`steer`（插入正在跑的轮次）、`queue`（等当前轮次结束）。`turn` 是桥自己的判据——宿主只认 `steer` / `queue`，桥在投递前用基线快照判断。给别的值返回 `-32602`，不会悄悄降级。
 
-### 3.2 轮次结果
+**错误码**（`error.data` 里保留 Host 的原始 `kind` 与 `details`）：
+
+| code | 含义 |
+| --- | --- |
+| `-32700` | 请求体不是合法 JSON |
+| `-32600` | 不是合法 JSON-RPC 请求 |
+| `-32601` | 未知方法 |
+| `-32602` | 参数非法（缺字段、空文本、sessionId 不合法…） |
+| `-32603` | 插件内部错误 |
+| `-32000` | Host 侧失败（无法归类） |
+| `-32001` | token 缺失或错误 |
+| `-32002` | 来源不是 loopback 且未开 `allowRemote` |
+| `-32003` | 会话不存在（Host `session/not-found`） |
+| `-32004` | 会话忙：`session/agent-busy`、`session/writer-held`、`session/conflict`，或同一会话已有 bridge 在等轮次 |
+| `-32005` | 等待超时 |
+| `-32006` | 调用被取消 |
+
+**MCP 层**：工具结果**只在调用本身失败时**才是错误（错误码 + `next:` 提示）。轮次的 `status` 一律写进正文 `outcome:` 行；除 `completed` 外每种结束原因都额外给 `note:`（人话解释）与 `next:`（下一步）。遇到本插件不认识的 `kind` 不是异常——宿主的 `TurnEndReasonMap` 可合并扩展，这类结局一律降级为"unverified，先查 `dsh_sessions()`"，绝不冒充 `completed`。
+
+### 流式端点
+
+`POST /dsh-rpc/stream`，请求体与 `ask` 的参数一致，响应是每行一个 JSON：
+
+```jsonc
+{ "type": "session", "sessionId": "session-…", "cwd": "…", "agentPreset": null }   // 仅新建会话时
+{ "type": "progress", "frame": { "type": "event", "event": { "type": "turn/start" } } }
+{ "type": "result", "sessionId": "session-…", "status": "completed" }              // 最后一帧
+{ "type": "error", "error": { "kind": "…", "message": "…" } }                      // 或这一帧
+```
+
+客户端断开时，该次等待会被中止（不取消 Harness 里的轮次）。
+
+## 轮次结果与等待
 
 `ask`（阻塞）与 `wait` 返回同一种结构：
 
@@ -277,7 +344,7 @@ console.log(answer.text, answer.usage);
 }
 ```
 
-`wait:false` 的 `ask`（**MCP 工具 `dsh_ask` 的默认行为**）返回的是一张**句柄**，字段不同：
+`wait:false` 的 `ask`（**MCP 工具 `dsh_ask` 的默认行为**）返回的是一张**句柄**：
 
 ```jsonc
 {
@@ -301,22 +368,25 @@ console.log(answer.text, answer.usage);
 - `timeout` 表示等待超时，**不会**取消该轮；这类结果没有 `turn/end` 可引用，`reason` 由桥给出 `{kind:"timeout", message:"…it keeps running"}`。
 - `partial: true` 只出现在 `status:"unknown"` 时：事件流没等到 `turn/end` 就结束了，`text` 是半截。
 - `cwd` 只在 `created:true` 时回填。
-- `waiting-approval` 只在 `approvals.mode=delegate` 且这一轮正等你回答时出现，见 [5.1](#51-无人值守会话与升权approvals)。
+- `waiting-approval` 只在 `approvals.mode=delegate` 且这一轮正等你回答时出现，见[权限与升权](#权限与升权)。
 
 `tools` 的 `output` 单条截断 4000 字、整轮共享 20000 字预算，超出会写 `… (omitted, N chars: this turn's tool-output budget of 20000 is spent)`。
 
-### 3.3 等待、增量与截止
+### `since` 只回增量
 
-- **`since` 只回增量**：不传是整轮，传了就只返回 `seq > since` 的事件，`text` 随之只含这段；`status`/`turn`/`tools`/`usage`/`sandbox` 仍描述整轮，`cursor` 照常前进。轮询进度用 `since: <上次的 cursor>`，不要重投。
-- **等待是分片循环**：单次 HTTP 请求活不过五分钟（Node 内建 fetch 的 `headersTimeout` 是 300 秒，实测 303.9 秒报 `fetch failed`），所以桥把一次等待切成 `maxWaitSliceMs`（默认 **120000**，上限 240000）返回 `status:"timeout"` 并附 `sliceMs`/`requestedMs`，由调用方续等。**CLI 与 MCP 工具已经替你循环**，直接传总预算即可；自己写客户端的人要么分片，要么别请求超过 300 秒的等待。
+不传是整轮；传了就只返回 `seq > since` 的事件，`text` 随之只含这段。**`status` / `turn` / `tools` / `usage` / `sandbox` 仍描述整轮**，`cursor` 照常前进。轮询进度用 `since: <上次的 cursor>`，不要重投。
+
+### 分片等待与截止
+
+- **单次 HTTP 请求活不过五分钟**：Node 内建 `fetch` 的 `headersTimeout` 是 300 秒，实测 303.9 秒报 `fetch failed`。所以桥把一次等待切成 `maxWaitSliceMs`（默认 **120000**，上限 240000）返回 `status:"timeout"` 并附 `sliceMs` / `requestedMs`，由调用方续等。**CLI 与 MCP 工具已经替你循环**，直接传总预算即可；自己写客户端要么分片，要么别请求超过 300 秒的等待。
 - `waitedMs` 是墙钟：尾片不足 1 秒时会抬到 1000 ms 下限，所以可能比预算多出最多 1 秒；`slices` 是实际请求次数。
-- **答案由我们的截止写出，不由宿主决定**：每次读事件都与本次运行的截止赛跑，末尾清理（向宿主注销事件流）也只在 1 秒内等待——宿主卡住时它会拖慢我们一次，但拖不住答案。
-- **"还没好"不是失败**：`status:"timeout"` 只是这一片到期，轮次仍在 Harness 里跑。重投等于重新提问，会多开会话、重复副作用。要进度用 `wait`/`history`。
+- **答案由我们的截止写出，不由宿主决定**：每次读事件都与本次运行的截止赛跑，末尾清理（向宿主注销事件流）也只在 1 秒内等待——宿主卡住时会拖慢我们一次，但拖不住答案。
+- **"还没好"不是失败**：`status:"timeout"` 只说明这一片到期，轮次仍在 Harness 里跑。重投等于重新提问，会多开会话、重复副作用。要进度用 `wait` / `history`。
 - **轮次归属**：投递 prompt 后，本插件从事件流里找自己那条 `user/message`（`source.rpcId` 等于本次 `requestId`），以它落在哪一轮为准。因此**同一会话里有别人插话时，不会把别人的回答当成你的**——那一轮的 `turn/end` 会被跳过，继续等自己那一轮。
 
-### 3.4 工作区、模型、推理等级、权限
+## 工作区、模型、推理等级
 
-这四个都是 DSH 自己的概念，桥只做转发，不新造开关。
+这三个都是 DSH 自己的概念，桥只做转发，不新造开关。
 
 **位置（工作区 / 目录）只在创建会话时决定。** `workspaceId` 走 `workspace.attachSession`，会话因此出现在 GUI 侧栏的对应工作区下；`cwd` 只设置目录、不挂工作区。二者互斥，同时给会被拒绝（`-32602`）。复用已有会话时再传位置参数同样被拒绝——要换位置就新建。`agentPreset` 同理，只在创建时生效。
 
@@ -327,13 +397,14 @@ node bin/dsh-rpc.mjs workspaces                            # 先看有哪些
 node bin/dsh-rpc.mjs ask "看下这个项目" --workspace ws-1      # 进去
 node bin/dsh-rpc.mjs models | head -40
 node bin/dsh-rpc.mjs ask "重新想想" --session session-xxxx --model anthropic/opus-4.6 --effort high
-node bin/dsh-rpc.mjs permissions
-node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
 ```
 
 **模型名**可写 `provider/model`；只写裸 id 时，桥会去模型目录里查——唯一命中就用，命中多个就报错并列出可消歧的写法，命中零个就让你去看 `dsh.models`。**不会替你猜一个。** `reasoningEffort` 必须和 `model` 同一次请求给出：Host 没有"读回当前模型"的接口。
 
-> ⚠️ **换模型会把选择存成 profile 默认**（Host 自己的行为，和你在 GUI 里换模型一样）。外部 agent 换过去之后，你在 GUI 新开的会话也会用那个模型。
+> [!WARNING]
+> **换模型会把选择存成 profile 默认**（Host 自己的行为，和你在 GUI 里换模型一样）。外部 agent 换过去之后，你在 GUI 新开的会话也会用那个模型。
+
+## 权限与升权
 
 **权限预设**是"沙箱模式 + 审批策略"的组合；名字先按 Host 的 catalog 校验，未知名字直接报错并列出可选项。每项带一句 `cost`，因为部署自带的 `description` 往往是空的。
 
@@ -343,80 +414,16 @@ node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
 2. `next.args` 只带 `session_id`：**换成 `danger-full-access` 重问一次的决定由你来做**，桥不代你决定，也不把那个参数塞进返回值（否则被挡住的 agent 用自己的措辞就能促成升权）；
 3. **只升一次**。这一档审批策略是 `never`，升上去之后这一轮不再有任何拦截——它不是"更宽的默认档"，而是"被挡住时的最后一招"，用过之后应在回答里说明。
 
-如果 `approvals.mode` 是 `delegate`，闸门会在工具执行前就拦住这次升权并转给你（见 [5.1](#51-无人值守会话与升权approvals)），此时不必换预设重问，只要回答那条待批请求。
-
 为什么升权必须由外层来做：DSH 的沙箱会在被拒输出末尾提示"可以带 `sandbox_permissions` 重试"，但桥驱动的会话是无人值守的——`approval: ask` 时没有应答者，请求被归一成 `unavailable`（那不放行）；`approval: never` 时系统提示词直接禁止请求升权。两条路都堵死，只能由调用方换预设重新发问。
 
 升权阶梯是封闭表：`read-only` 可以升到 `workspace-write` 或 `danger-full-access`，而 **`workspace-write` 只能升到 `danger-full-access`**——没有中间档。
 
-### 3.5 流式端点
-
-`POST /dsh-rpc/stream`，请求体与 `ask` 的参数一致，响应是每行一个 JSON：
-
-```jsonc
-{ "type": "session", "sessionId": "session-…", "cwd": "…", "agentPreset": null }   // 仅新建会话时
-{ "type": "progress", "frame": { "type": "event", "event": { "type": "turn/start" } } }
-{ "type": "result", "sessionId": "session-…", "status": "completed" }              // 最后一帧
-{ "type": "error", "error": { "kind": "…", "message": "…" } }                      // 或这一帧
+```powershell
+node bin/dsh-rpc.mjs permissions
+node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
 ```
 
-客户端断开时，该次等待会被中止（不取消 Harness 里的轮次）。
-
----
-
-## 4. 错误码
-
-JSON-RPC 标准码之外，本插件用 `-3200x` 段表达业务语义：
-
-| code | 含义 |
-| --- | --- |
-| `-32700` | 请求体不是合法 JSON |
-| `-32600` | 不是合法 JSON-RPC 请求 |
-| `-32601` | 未知方法 |
-| `-32602` | 参数非法（缺字段、空文本、sessionId 不合法…） |
-| `-32603` | 插件内部错误 |
-| `-32000` | Host 侧失败（无法归类） |
-| `-32001` | token 缺失或错误 |
-| `-32002` | 来源不是 loopback 且未开 `allowRemote` |
-| `-32003` | 会话不存在（Host `session/not-found`） |
-| `-32004` | 会话忙：Host 的 `session/agent-busy`、`session/writer-held`、`session/conflict`，或同一会话已有 bridge 在等轮次 |
-| `-32005` | 等待超时 |
-| `-32006` | 调用被取消 |
-
-`error.data` 里保留 `kind`（Host 的原始错误码）与 `details`。
-
-**MCP 层**：工具结果**只在调用本身失败时**才是错误（错误码 + `next:` 提示）。轮次的 `status` 一律写进正文 `outcome:` 行；除 `completed` 外每种结束原因都额外给 `note:`（人话解释）与 `next:`（下一步）。遇到本插件不认识的 `kind` 不是异常——宿主的 `TurnEndReasonMap` 可合并扩展，这类结局一律降级为"unverified，先查 `dsh_sessions()`"，绝不冒充 `completed`。
-
----
-
-## 5. 配置
-
-通过 `cordis.patch.yml` 的 `config` 配置，全部有默认值：
-
-```yaml
-- insert:
-    - id: dsh-rpc-bridge
-      name: '@punchact/dsh-rpc-agent'
-      config:
-        token: ''              # 留空则自动生成并落盘
-        allowRemote: false     # 允许非 loopback 来源
-        defaultCwd: ''         # ask 未给 cwd 时用这个，再回落到进程 cwd
-        defaultAgentPreset: '' # 新建会话的默认 preset
-        defaultTimeoutMs: 600000
-        maxWaitSliceMs: 120000 # 单次响应等待时长，见第 8 节
-        historyBudgetMs: 30000 # 一次 history 快照最多等多久
-        maxBodyBytes: 1048576
-        maxSessions: 200       # 同时进行的等待上限
-        approvals:
-          mode: off            # off（默认）| deny | delegate
-          deadlineMs: 60000    # delegate：等调用方回答的时长，超时视为拒绝
-```
-
-其余键：`enabled`、`tokenFile`（自定义 token 路径）、`path`（默认 `/dsh-rpc`）、`logRequests`。
-
-环境变量 `DSH_RPC_TOKEN` 可覆盖 token（优先级高于文件），适合 CI 或不想落盘的场景。
-
-### 5.1 无人值守会话与升权（`approvals`）
+### 无人值守会话与升权（`approvals`）
 
 桥创建的会话没有人坐在 GUI 前面。模型一旦带上 `sandbox_permissions` 请求升权，宿主就把这次调用挂起等人回答——**等多久取决于有没有应答者**，而桥创建的子会话没有。现场实测过两次：`approval/asked` 之后一直没有 `approval/decided`，调用方每次都在 120 秒预算上超时。
 
@@ -445,7 +452,7 @@ approvals.mode=deny refused a sandbox escalation to "danger-full-access" for too
 
 要点：
 
-- **轮次停在待批时，调用会立刻返回**：`dsh_ask`/`dsh_wait` 返回 `status: "waiting-approval"` 与 `pendingApproval`，并给出指向 `dsh_approvals_resolve` 的 `next`。否则调用方就卡在"回答自己那个问题"的循环里。
+- **轮次停在待批时，调用会立刻返回**：`dsh_ask` / `dsh_wait` 返回 `status: "waiting-approval"` 与 `pendingApproval`，并给出指向 `dsh_approvals_resolve` 的 `next`。否则调用方就卡在"回答自己那个问题"的循环里。
 - **没人回答就是拒绝**：`deadlineMs` 到期按拒绝处理，绝不自动放行。
 - **放宽只在被批准的那次调用期间成立**：宿主没有"允许一次"的接口，桥手上只有会话级预设这一个杠杆，所以批准后临时切换预设，调用结束（`tools/post-execute`）立刻恢复；另有 5 分钟兜底定时器。下行应答者抛错、结果处理抛错、宿主取消，三种路径都会恢复原状；`dispose()` 在插件卸载时兜底。
 - **按会话计次，每会话最多 3 次**：同一会话同时只允许一个升权调用在跑（同 tick 的并发请求只产生一条待批记录），窗口期内其它不升权的调用会被**扣留**到窗口结束，避免搭便车。
@@ -457,62 +464,35 @@ approvals.mode=deny refused a sandbox escalation to "danger-full-access" for too
 
 **重启之后**：每会话已用的升权次数、本桥拥有的会话、以及"这次放宽还没还回去"的欠账都写在 `$DSH_HOME/dsh-rpc/approvals.json`（0600、`.tmp` 后 rename 的原子替换）。重启不会把额度清零，也不会让闸门对旧会话失声；进程被杀、放宽没来得及收回时，下一次启动会读这份台账把 preset 还回去（还失败只记 warn）。`approvals.mode=off` 时不写这个文件。
 
+> [!NOTE]
 > **为什么不用 `ctx.on("approval/request")`**：审批服务经 `scopeTarget(req.agent, req.agent)` 派发，只会走到"该 agent 自己组合里"的应答者。实测在插件上下文和 root 上下文上各注册一次，真实升权时监听器**一次都没被调用**（GUI 面板还在等），而 `tools/pre-execute` 是全局 waterfall，所有 agent 都覆盖得到。
 
-**已知边界**：只拦"带 `sandbox_permissions` 的就地升权"；`allow-once` 是会话级放宽而非"仅此一次"，所以 3 次上限是按护栏而不是按精确次数实现；新建会话仍会得到新的三次。
+## 配置
 
----
+通过 `cordis.patch.yml` 的 `config` 配置，全部有默认值：
 
-## 6. 安装与更新
-
-**从 npm 装（推荐）**。本包是标准 DSH bundle，注册表装与本地目录装走同一套 pnpm 路径：
-
-```bash
-dsh plugin add @punchact/dsh-rpc-agent
+```yaml
+- insert:
+    - id: dsh-rpc-bridge
+      name: '@punchact/dsh-rpc-agent'
+      config:
+        token: ''              # 留空则自动生成并落盘
+        allowRemote: false     # 允许非 loopback 来源
+        defaultCwd: ''         # ask 未给 cwd 时用这个，再回落到进程 cwd
+        defaultAgentPreset: '' # 新建会话的默认 preset
+        defaultTimeoutMs: 600000
+        maxWaitSliceMs: 120000 # 单次响应等待时长
+        historyBudgetMs: 30000 # 一次 history 快照最多等多久
+        maxBodyBytes: 1048576
+        maxSessions: 200       # 同时进行的等待上限
+        approvals:
+          mode: off            # off（默认）| deny | delegate
+          deadlineMs: 60000    # delegate：等调用方回答的时长，超时视为拒绝
 ```
 
-或在 DSH 里直接说：
+其余键：`enabled`、`tokenFile`（自定义 token 路径）、`path`（默认 `/dsh-rpc`）、`logRequests`。环境变量 `DSH_RPC_TOKEN` 可覆盖 token（优先级高于文件），适合 CI 或不想落盘的场景。
 
-```js
-plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent" })
-```
-
-非默认 profile 加 `--profile <name>`（桌面端是 `desktop`）。要钉版本就写全：`dsh plugin add @punchact/dsh-rpc-agent@0.7.7`；不写则取 `latest`。
-
-三件在 npm 路线上容易踩的事：
-
-1. **装进来的是拷贝，不是链接。** 装完之后改本地工作区的源码**不会**影响运行中的插件。要边改边试就用下面那条路线。
-2. **刚发布的版本可能被 pnpm 的冷静期拦下。** 新版本发布当天用注册表 spec 装会失败（`minimumReleaseAge` 未满）。要么改用已过窗口的版本，要么在 profile 的 `pnpm-workspace.yaml` 里显式放行——pnpm 有时会自己追加这一行：
-
-   ```yaml
-   minimumReleaseAgeExclude:
-     - '@punchact/dsh-rpc-agent@0.4.1 || 0.4.4 || 0.5.3 || 0.7.6 || 0.7.7'
-   ```
-
-3. **想确认装的是哪一份**：用 `cordis_inspect_query`（`Config.listConfigs`，`input: {"entry":"include:dsh-rpc-bridge"}`）看返回的 `packageDir`——指向 `<profile>\node_modules\@punchact\dsh-rpc-agent` 就是 npm 路线，指向你的工作区就是链接路线。**版本号本身不能当证据**，它读的是包里那个 `package.json`。
-
-版本历史见 [Releases](https://github.com/Punchact/dsh-rpc-agent/releases)；**0.4.4 起每版都由 OIDC 发布并带 SLSA provenance**（`/-/npm/v1/attestations/@punchact%2Fdsh-rpc-agent@<版本>` 返回 200）。`0.4.1` / `0.4.2` 已被撤回，注册表上取不到。
-
-**从本地目录装（改源码时用）**：
-
-```js
-plugin_manager({ action: "install_bundle",
-                 target: "<absolute-path-to-your-clone>" })
-```
-
-- 这种安装是**指向本目录的链接**，改完源码不需要重装。
-- 但宿主不会因文件变化重新 `import`；要让新的 `lib/*.mjs` 生效，把插件行关一次再开：
-
-```js
-plugin_manager({ action: "set_plugin", target: "include:dsh-rpc-bridge", enabled: false })
-plugin_manager({ action: "set_plugin", target: "include:dsh-rpc-bridge", enabled: true  })
-```
-
-`bin/` 与 `test/` 是独立进程，改动无需重载。发版流程见 [docs/release.md](./docs/release.md)。
-
----
-
-## 7. 安全模型
+## 安全模型
 
 **一句话：本插件的 bearer token 等价于"在这台机器上让 DSH 替你执行动作"的权限。**
 
@@ -533,15 +513,28 @@ plugin_manager({ action: "set_plugin", target: "include:dsh-rpc-bridge", enabled
 
 **共享机器**：token 文件就是凭据。不要抄进 shell 历史、CI 明文变量或聊天记录；怀疑泄漏就删掉该文件并重载插件——会重新生成，旧 token 立即失效。
 
----
-
-## 8. 端口与连接稳定性
+## 端口与连接稳定性
 
 DSH 的 Web 服务端口由启动器决定，桌面端交给系统分配，所以**重启后会变**。本插件不固定端口。
 
 **为什么不在 patch 里写死**：`dsh-web-app` 的 webserver 行用 `!!js` 取 `ctx.webStartup.port ?? 3080`；而 `cordis.patch.yml` 的覆写是**整行 config 替换**，写死就要把 `host` / `tls` / `compression` 等键全部重述，官方升级引入新键时会静默丢掉。端口被占时 DSH 还会起不来。
 
 **端点由插件发布**：每次激活调用 `ctx.webServer.getOrigin()` 拿真实地址写进 `endpoint.json`；客户端（CLI / MCP / `lib/client.mjs`）**每次调用都重新读**，不缓存。
+
+```jsonc
+{
+  "url": "http://127.0.0.1:3820/dsh-rpc",
+  "origin": "http://127.0.0.1:3820",
+  "path": "/dsh-rpc",
+  "version": "0.7.7",                        // 正在运行的那份插件自报的版本
+  "plugin": "dsh-rpc-agent",
+  "pid": 12345,                              // 写这个文件的 Host 进程
+  "startedAt": "2026-11-05T01:05:58.000Z",   // 该进程的启动时刻
+  "updatedAt": "2026-11-05T01:06:31.924Z"    // 本次写入时刻
+}
+```
+
+`pid` 与 `startedAt` 是给客户端判断"Harness 重启过没有"用的：两者都没变却连不上，说明不是端口漂移。
 
 **重启窗口内只重试一种错**：客户端仅对 `ECONNREFUSED`（TCP 被拒、请求没发出去）重读端点重试一次；`ECONNRESET` / `EPIPE` / 超时**不重试**，因为字节可能已被对方收下，重发有重复投递 prompt 的风险。显式 `--url` 或 `DSH_RPC_URL` 也不重试。
 
@@ -551,7 +544,7 @@ DSH 的 Web 服务端口由启动器决定，桌面端交给系统分配，所�
 node bin/dsh-rpc.mjs health --wait 15000; if ($?) { node bin/dsh-rpc.mjs ask "接着干" --session session-xxxx }
 ```
 
-`--wait` 每 250ms 重读端点并探活，就绪返回 0（打印耗时），超时返回 3。
+`--wait` 每 250 ms 重读端点并探活，就绪返回 0（打印耗时），超时返回 3。
 
 **仍可能失败的情形**：Harness 启动中插件尚未激活（`endpoint.json` 还是上一次的地址）；同时跑多个实例（单文件，后写覆盖先写）。这两种请用 `--url` 显式指定。
 
@@ -559,9 +552,7 @@ node bin/dsh-rpc.mjs health --wait 15000; if ($?) { node bin/dsh-rpc.mjs ask "�
 
 **被中止的调用怎么记账**：记在 `/status` 的 `calls.outcomes`，不是 `errors`——`timeouts` 是"等到预算用完"，`cancelledByClient` 是"调用方先走了"。
 
----
-
-## 9. 从 GUI 跟进 CLI 发起的任务
+## 在 GUI 里跟进
 
 CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输出。但被驱动的那一轮**是 Harness 里的真会话**，所以它同时出现在 GUI：
 
@@ -580,9 +571,7 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 
 **审批仍由 GUI 或你的策略决定**：若那一轮触发需要人工批准的工具调用，它会挂在 Host 侧等待；没人打开会话时会一直等到 `timeoutMs` 用完——此时 `ask` 返回 `status:"timeout"`，且**不会**取消该轮（可在 GUI 里继续，或 `dsh.sessions.cancel`）。
 
----
-
-## 10. 设置页里的状态面板
+## 状态面板
 
 装好之后，设置窗口左侧多出一项 **「RPC 桥接」**（`设置 → RPC 桥接`）。它回答的是"桥现在活着吗、刚才谁调过什么"：
 
@@ -605,9 +594,37 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 
 > 端口变了不用管：页面请求的是固定路径 `/dsh-rpc/status`（插件在 `path` 被改时会额外保留这个别名），而状态数据里的 `origin` 永远是当前真实的监听地址。
 
----
+## 已知边界
 
-## 11. 验证
+- **同一会话只允许一个「提问型」运行**：两个 `ask` 并发时第二个默认返回 `-32004`；加 `queue: true` 则排队（在它自己的 `timeoutMs` 内，超时 `-32005`），排队期间 `ping` / 状态页能看到 `state: "queued"`。这只约束本插件——GUI 或别的 agent 仍可插话；轮次归属靠 `rpcId` 认领，不会把别人的回答当成你的，代价是要等它跑完才轮到你。`wait` 不受限。
+- **`wait` 只看得见快照窗口**：靠 `follow` 首帧快照判断"当前/最后一轮"，窗口上限 500 条事件。极长会话若快照已截断到目标轮次之前，可能把状态报成 `completed`；要精确值就带 `sessionId` 调 `history` 复核。
+- **批量请求串行执行**：一个 HTTP batch 里的多条 JSON-RPC **按顺序**执行，一条慢 `ask` 会挡住同批后续请求。要并发请用多个连接。
+- **不复制审批策略**：Harness 侧仍按自己的审批与沙箱策略执行；需要人工批准的工具可能让该轮长时间挂起。`permissionPreset` 下发的是该会话默认预设，不是放行。
+- **位置只在创建时决定**：`workspaceId` / `cwd` 对已有会话无效，桥直接拒绝而不是默默忽略。换位置 = 新建会话。
+- **换模型会改 profile 默认**：`selectModel` 是 Host 的模型切换入口，它会把选择存成 profile 默认。
+- **权限预设依赖可选服务**：本部署若没有 `permissionPresets` 服务，传 `permissionPreset` 会得到 `-32000` 并说明原因。
+- **工作区只增不删**：桥只暴露 `workspaces.list` / `workspaces.create`；删除与改名请用 GUI。
+- **只转发 Host 允许的会话**：`sessions.list` 与 `history` 经 Host 的 `remoteAccess` 过滤。
+- **正文截断**：单轮保留事件上限 4000 条；超长会话的 `text` 仍完整（来自 `assistant/message`），但 `tools` 列表可能被截断。
+- **token 泄漏面**：token 与 DSH 其它凭据同级落盘。**本桥创建的子会话读得到它**——子代理与调用方是同一个系统用户，`workspace-write` 沙箱也允许读用户目录（2026-11-06 实测：子会话读到 token 后能直接 `POST /dsh-rpc` 调 `dsh.ping`）。所以 `approvals.delegate` 的批准权防的是**误操作与提示注入**，不防"同机同用户的进程自己想升权"。
+- **审批闸门只拦一条路**：`deny` / `delegate` 拦的是**工具参数里的 `sandbox_permissions`**。通过 `configure` 改预设或新建会话时指定 `permissionPreset` 走的是另一条路——前者在 `approvals.mode` 非 `off` 时被禁止，但**新建**会话时由调用方自己选的预设不受闸门约束（那是派发方的决定，不是子代理的）。
+- **未声明 `Config` schema**：插件用手写校验读 row 的 `config`，而不是导出 `Config`（保持零依赖）。代价是 `cordis_inspect_query` 里这行显示 `status: absent`，也没有可视化表单；配置项见[配置](#配置)。
+
+## 排障
+
+| 现象 | 原因 / 处理 |
+| --- | --- |
+| `dsh-rpc: 401` | token 不匹配。删掉 `%USERPROFILE%\.dsh\dsh-rpc\token` 后重载插件即重新生成 |
+| `403` | 来源不是 loopback；确认没走代理，或打开 `allowRemote` |
+| `-32004 … already has a bridge run waiting for its turn` | 同一会话已有 `ask`/`prompt` 在等轮次；换一个会话，或等它结束（`wait` 可并行观察） |
+| 退出码 `3`（连不上） | Harness 没在跑，或插件的行被禁用；先 `node bin/dsh-rpc.mjs health` 探活 |
+| 改了源码但行为没变 | 宿主缓存了模块：`set_plugin` 关一次再开 |
+| 改了源码但行为没变（npm 装的） | npm 路线装的是拷贝，与工作区无关；要边改边试请用本地目录安装 |
+| 安装时报冷静期 / 版本取不到 | 刚发布的版本可能还在 `minimumReleaseAge` 窗口内；钉一个已过窗口的版本，或按[安装与更新](#安装与更新)放行 |
+| `Cannot read properties of undefined (reading 'throwIfAborted')` | 旧版本把 Host 的 `prompt`/`list` 用 `undefined` 调用；已修 |
+| 插件行状态 `absent` | 正常：插件不导出 `Config` schema，`cordis_inspect_query` 里没有 config 契约 |
+
+## 开发与验证
 
 ```powershell
 cd dsh-rpc-plugin
@@ -617,7 +634,8 @@ node test/e2e.mjs --cwd .      # 14 例：端到端，打真实 Harness
 node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harness
 ```
 
-十个套件各自钉住什么：
+<details>
+<summary>十个套件各自钉住什么</summary>
 
 | 套件 | 例 | 钉住 |
 | --- | --- | --- |
@@ -632,50 +650,22 @@ node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harnes
 | `client` | 6 | 客户端重试与报错 |
 | `status` | 6 | `/status` 载荷与路由挂载契约 |
 
+</details>
+
 `npm test` 按固定顺序跑这十段；`npm run test:host` 跑真宿主集成；`npm run test:e2e` / `npm run test:edge` 要活的 Harness。
 
-**别用 `node --test`**：它会为每个文件 fork 子进程，在 DSH 沙箱里被 `spawn EPERM` 挡住。
+> [!TIP]
+> **别用 `node --test`**：它会为每个文件 fork 子进程，在 DSH 沙箱里被 `spawn EPERM` 挡住。
 
 几个值得单独说的：
 
 - **真宿主集成**不用假 `webServer`：`new Context()` + `ctx.plugin(WebServer, {host:'127.0.0.1', port: 0})` 起真监听，再 `apply()`，然后真发 HTTP 断言 `/health` 200、无 token 的 RPC 401、`/status` 的 `origin` 与真实监听一致，**最后跑插件自己的 disposer 并断言 `/health` 与 `/status` 都变 404**。这是唯一能抓住"上一代路由残留导致重载失败"这一真实事故的测试。
-- **端到端**走的是与外部 agent 完全相同的 `lib/client.mjs`，因此跑绿即证明 plugin → Host `sessionController` → HTTP → JSON-RPC → 调用方 整条链路成立。
+- **端到端**走的是与外部 agent 完全相同的 `lib/client.mjs`，因此跑绿即证明 plugin → Host `sessionController` → HTTP → JSON-RPC → 调用方整条链路成立。
 - **边界**检查协议层：batch、通知、id 形态、鉴权头、超大 body（应得真正的 413 而不是断连）、参数注入防护、超时钳制、并发 ask、`limit` 语义。
 - **端口漂移**（手工）：把 `endpoint.json` 的 url 改成死端口再跑 `dsh-rpc ping`，应得退出码 3 与含 `nothing is listening`、`pid`、`health --wait` 的可读报错。
-- **显示核验**：Plugins 页里的插件行标题与图标已目视确认（`RPC Bridge` + 本包图标）。`plugin_manager list_bundles` 输出的是 `package.json` 的 `description`，和前台显示不是同一来源，别拿它当 locale 生效的证据。
 
 上次实跑：单元 182/182、宿主 1/1（2026-11-06）；端到端 14/14、边界 24/24（2026-11-05）。
 
----
+## 许可证
 
-## 12. 已知边界
-
-- **同一会话只允许一个「提问型」运行**：两个 `ask` 并发时第二个默认返回 `-32004`；加 `queue: true` 则排队（在它自己的 `timeoutMs` 内，超时 `-32005`），排队期间 `ping`/状态页能看到 `state: "queued"`。这只约束本插件——GUI 或别的 agent 仍可插话；轮次归属靠 `rpcId` 认领，不会把别人的回答当成你的，代价是要等它跑完才轮到你。`wait` 不受限。
-- **`wait` 只看得见快照窗口**：靠 `follow` 首帧快照判断"当前/最后一轮"，窗口上限 500 条事件。极长会话若快照已截断到目标轮次之前，可能把状态报成 `completed`；要精确值就带 `sessionId` 调 `history` 复核。
-- **批量请求串行执行**：一个 HTTP batch 里的多条 JSON-RPC **按顺序**执行，一条慢 `ask` 会挡住同批后续请求。要并发请用多个连接。
-- **不复制审批策略**：Harness 侧仍按自己的审批与沙箱策略执行；需要人工批准的工具可能让该轮长时间挂起。`permissionPreset` 下发的是该会话默认预设，不是放行。
-- **位置只在创建时决定**：`workspaceId` / `cwd` 对已有会话无效，桥直接拒绝而不是默默忽略。换位置 = 新建会话。
-- **换模型会改 profile 默认**：`selectModel` 是 Host 的模型切换入口，它会把选择存成 profile 默认。
-- **权限预设依赖可选服务**：本部署若没有 `permissionPresets` 服务，传 `permissionPreset` 会得到 `-32000` 并说明原因。
-- **工作区只增不删**：桥只暴露 `workspaces.list` / `workspaces.create`；删除与改名请用 GUI。
-- **只转发 Host 允许的会话**：`sessions.list` 与 `history` 经 Host 的 `remoteAccess` 过滤。
-- **正文截断**：单轮保留事件上限 4000 条；超长会话的 `text` 仍完整（来自 `assistant/message`），但 `tools` 列表可能被截断。
-- **token 泄漏面**：token 与 DSH 其它凭据同级落盘。**本桥创建的子会话读得到它**——子代理与调用方是同一个系统用户，`workspace-write` 沙箱也允许读用户目录（2026-11-06 实测：子会话读到 token 后能直接 `POST /dsh-rpc` 调 `dsh.ping`）。所以 `approvals.delegate` 的批准权防的是**误操作与提示注入**，不防"同机同用户的进程自己想升权"。
-- **审批闸门只拦一条路**：`deny` / `delegate` 拦的是**工具参数里的 `sandbox_permissions`**。通过 `configure` 改预设或新建会话时指定 `permissionPreset` 走的是另一条路——前者在 `approvals.mode` 非 `off` 时被禁止，但**新建**会话时由调用方自己选的预设不受闸门约束（那是派发方的决定，不是子代理的）。
-- **未声明 `Config` schema**：插件用手写校验读 row 的 `config`，而不是导出 `Config`（保持零依赖）。代价是 `cordis_inspect_query` 里这行显示 `status: absent`，也没有可视化表单；配置项见 [第 5 节](#5-配置)。
-
----
-
-## 13. 排障
-
-| 现象 | 原因 / 处理 |
-| --- | --- |
-| `dsh-rpc: 401` | token 不匹配。删掉 `%USERPROFILE%\.dsh\dsh-rpc\token` 后重载插件即重新生成 |
-| `403` | 来源不是 loopback；确认没走代理，或打开 `allowRemote` |
-| `-32004 … already has a bridge run waiting for its turn` | 同一会话已有 `ask`/`prompt` 在等轮次；换一个会话，或等它结束（`wait` 可并行观察） |
-| 退出码 `3`（连不上） | Harness 没在跑，或插件的行被禁用；先 `node bin/dsh-rpc.mjs health` 探活 |
-| 改了源码但行为没变 | 宿主缓存了模块：`set_plugin` 关一次再开 |
-| 改了源码但行为没变（npm 装的） | npm 路线装的是拷贝，与工作区无关；要边改边试请用本地目录安装 |
-| 安装时报冷静期 / 版本取不到 | 刚发布的版本可能还在 `minimumReleaseAge` 窗口内；钉一个已过窗口的版本，或按 [第 6 节](#6-安装与更新)放行 |
-| `Cannot read properties of undefined (reading 'throwIfAborted')` | 旧版本把 Host 的 `prompt/list` 用 `undefined` 调用；已修 |
-| 插件行状态 `absent` | 正常：插件不导出 `Config` schema，`cordis_inspect_query` 里没有 config 契约 |
+[MIT](./LICENSE) © 2026 Punchact。设计取舍见 [docs/design.md](./docs/design.md)，安全策略见 [SECURITY.md](./SECURITY.md)，发版流程见 [docs/release.md](./docs/release.md)。
