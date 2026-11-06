@@ -6,7 +6,15 @@
 // first and then live `{type:'event', event}` frames.
 
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test, { after } from "node:test";
+
+// The sticky-session registry lives under `$DSH_HOME/dsh-rpc/`. A suite that
+// remembered a session between runs would make "created" vs "reused" depend on
+// what ran five minutes ago, so every run gets its own home.
+process.env.DSH_HOME = mkdtempSync(join(tmpdir(), "dsh-rpc-home-"));
 
 import { resolveConfig } from "../lib/config.mjs";
 import { createMethods } from "../lib/methods.mjs";
@@ -529,12 +537,14 @@ test("cancel forwards to the controller", async () => {
 test("sessions.list maps the host summary shape", async () => {
   const result = await build(fakeController()).listSessions({});
   assert.equal(result.total, 1);
+  assert.equal(result.sort, "updatedAt");
   assert.deepEqual(result.items[0], {
     sessionId: "session-test",
     running: false,
     blank: false,
     agentAvailable: true,
     updatedAt: 1,
+    createdAt: null,
     cwd: "/tmp",
     agentPreset: null,
     origin: null,
@@ -1081,4 +1091,120 @@ test("a timed-out wait still says why, instead of leaving reason null", async ()
   assert.equal(result.timedOut, true);
   assert.equal(result.reason?.kind, "timeout");
   assert.match(result.reason?.message ?? "", /keeps running/);
+});
+
+// ------------------------------------------------------------ 0.5.0: sticky sessions
+
+test("a project's second ask reuses the session the first one created", async () => {
+  const methods = build(fakeController({ script: happyScript }));
+  const first = await methods.ask({ text: "第一件事", project: "sticky-a" });
+  assert.equal(first.created, true);
+  assert.equal(first.reused, undefined);
+
+  const second = await methods.ask({ text: "第二件事", project: "sticky-a" });
+  assert.equal(second.created, false);
+  assert.equal(second.reused, true, "the project must carry the session forward");
+  assert.equal(second.sessionId, first.sessionId);
+});
+
+test("reuse: never always starts a fresh session", async () => {
+  const methods = build(fakeController({ script: happyScript }));
+  const first = await methods.ask({ text: "甲", project: "sticky-b", reuse: "never" });
+  const second = await methods.ask({ text: "乙", project: "sticky-b", reuse: "never" });
+  assert.equal(first.created, true);
+  assert.equal(second.created, true);
+  assert.equal(second.reused, undefined);
+});
+
+test("two clients do not inherit each other's sticky session", async () => {
+  const methods = build(fakeController({ script: happyScript }));
+  const mine = await methods.ask({ text: "甲", project: "sticky-c", namespace: "agent-a" });
+  const theirs = await methods.ask({ text: "乙", project: "sticky-c", namespace: "agent-b" });
+  assert.equal(theirs.created, true, "a different client is a different scope");
+  const back = await methods.ask({ text: "丙", project: "sticky-c", namespace: "agent-a" });
+  assert.equal(back.sessionId, mine.sessionId);
+});
+
+test("a recorded session that the Host no longer has is not reused", async () => {
+  const controller = fakeController({ script: happyScript });
+  const methods = build(controller);
+  const first = await methods.ask({ text: "甲", project: "sticky-d" });
+  assert.equal(first.created, true);
+  // The Host forgets every session: the registry must not insist on a dead id.
+  controller.list = async () => ({ items: [] });
+  const second = await methods.ask({ text: "乙", project: "sticky-d" });
+  assert.equal(second.created, true);
+});
+
+test("an unknown mode or reuse value is refused, not silently mapped", async () => {
+  const methods = build(fakeController({ script: happyScript }));
+  await assert.rejects(
+    () => methods.ask({ text: "甲", mode: "detach" }),
+    (error) => error.code === -32602 && /mode/.test(error.message),
+  );
+  await assert.rejects(
+    () => methods.ask({ text: "甲", reuse: "sometimes" }),
+    (error) => error.code === -32602 && /reuse/.test(error.message),
+  );
+});
+
+test("mode: turn refuses a session that is already running, and names the way out", async () => {
+  // A turn started without holding a bridge slot (fire-and-forget `prompt`) is
+  // exactly the case the old busy check missed: `prompting` is empty, the Host is
+  // running. Default mode must refuse rather than append a follow-up silently.
+  const controller = fakeController({ script: [{ kind: "start", turn: 1 }, { kind: "text", turn: 1, text: "跑着" }] });
+  const methods = build(controller);
+  await methods.prompt({ sessionId: "session-test", text: "先跑起来" });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  await assert.rejects(
+    () => methods.ask({ sessionId: "session-test", text: "插队" }),
+    (error) =>
+      error.code === -32004 &&
+      /already running/.test(error.message) &&
+      error.data?.next?.tool === "dsh_wait" &&
+      error.data?.next?.args?.session_id === "session-test",
+  );
+});
+
+test("a sticky session rotates after the bridge's ask budget, and says which one it left", async () => {
+  const { forgetEntry, lookupEntry, registryKey, rememberEntry } = await import("../lib/registry.mjs");
+  const { ROTATE_AFTER_ASKS } = await import("../lib/registry.mjs");
+  const key = registryKey({ namespace: "mcp", project: "sticky-rot" });
+  await forgetEntry(key);
+  await rememberEntry(key, { sessionId: "session-old", asks: ROTATE_AFTER_ASKS });
+
+  const controller = fakeController({ script: happyScript });
+  controller.list = async () => ({
+    items: [{ sessionId: "session-old", running: false, blank: false, updatedAt: 2, cwd: "/tmp" }],
+  });
+  const result = await build(controller).ask({ text: "新一轮", project: "sticky-rot" });
+  assert.equal(result.rotated, true);
+  assert.equal(result.previousSessionId, "session-old");
+  assert.notEqual(result.sessionId, "session-old");
+  assert.equal((await lookupEntry(key)).sessionId, result.sessionId);
+});
+
+// ------------------------------------------------------------ 0.5.0: listSessions
+
+test("sessions.list filters by cwd prefix and sorts newest first", async () => {
+  const controller = fakeController();
+  controller.list = async () => ({
+    items: [
+      { sessionId: "s-old", running: false, blank: false, updatedAt: "2026-01-01T00:00:00.000Z", cwd: "C:\\work\\proj" },
+      { sessionId: "s-new", running: false, blank: false, updatedAt: "2026-02-01T00:00:00.000Z", cwd: "C:\\work\\proj\\sub" },
+      { sessionId: "s-other", running: false, blank: false, updatedAt: "2026-03-01T00:00:00.000Z", cwd: "C:\\elsewhere" },
+    ],
+  });
+  const methods = build(controller);
+
+  const scoped = await methods.listSessions({ cwd: "C:/work/proj" });
+  assert.deepEqual(scoped.items.map((item) => item.sessionId), ["s-new", "s-old"], "prefix match, newest first");
+  assert.equal(scoped.total, 2);
+
+  const everything = await methods.listSessions({});
+  assert.deepEqual(everything.items.map((item) => item.sessionId), ["s-other", "s-new", "s-old"]);
+
+  const byCreated = await methods.listSessions({ sort: "createdAt" });
+  assert.equal(byCreated.sort, "createdAt", "a sort the Host cannot answer still sorts deterministically");
 });

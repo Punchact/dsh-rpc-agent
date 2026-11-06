@@ -17,31 +17,59 @@ import { formatToolResult, formatToolError } from "../lib/mcp-format.mjs";
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_INFO = { name: "dsh-rpc", version: PLUGIN_VERSION, title: "DeepSeek Harness bridge" };
 
+// The sticky-session namespace. Two agents pointed at the same directory must not
+// share a session, so the client's own name (sent in `initialize`) becomes part of
+// the registry key. `mcp` is the fallback for clients that send no `clientInfo`.
+let clientNamespace = "mcp";
+
 const TOOLS = [
   {
     name: "dsh_ask",
     title: "Ask DeepSeek Harness",
     description:
       "Delegate a task to DeepSeek Harness, a full agent with its own file tools, shell, skills and MCP servers, and return its answer. " +
-      "Omit session_id to start a fresh session. The Harness works in its own process and session; it does not share this agent's context, " +
-      "so make the prompt self-contained. " +
-      'For work that may outlast your own tool timeout, pass wait:false: the call then returns a handle (session_id + request_id) in ' +
-      'milliseconds instead of blocking. Either way the answer line starts with "outcome:" — read that, not the tool error flag, to learn ' +
-      "what happened. A turn that is still running is NOT a failure: collect it with dsh_wait and never resend the prompt.",
+      "The Harness works in its own process and session; it does not share this agent's context, so make the prompt self-contained. " +
+      "Sessions are STICKY: name the same `project` (or `cwd`) on the next call and the same session is reused — do not pass session_id " +
+      "unless you are deliberately continuing a session the registry does not know about. " +
+      "wait defaults to false: the call returns a handle (session_id + request_id) in milliseconds, and you collect the answer with " +
+      'dsh_wait. Pass wait:true only when the task is known to finish quickly. The answer line starts with "outcome:" — read that, not ' +
+      "the tool error flag, to learn what happened. A turn that is still running is NOT a failure: collect it with dsh_wait and never " +
+      "resend the prompt.",
     inputSchema: {
       type: "object",
       properties: {
         prompt: { type: "string", description: "Self-contained task or question for the Harness agent." },
+        project: {
+          type: "string",
+          description:
+            "Sticky-session scope: any stable label for the work (a repo name, a ticket id). The next call with the same project — from " +
+            "this client — reuses the session it created. Falls back to `cwd` when omitted.",
+        },
+        reuse: {
+          type: "string",
+          enum: ["auto", "never", "latest"],
+          description:
+            'auto (default) reuses the session recorded for this project; never always creates a fresh session; latest ignores the ' +
+            "recorded session id and takes the most recently updated session for the project.",
+        },
+        mode: {
+          type: "string",
+          enum: ["turn", "steer", "queue"],
+          description:
+            'turn (default) delivers only into an idle session and fails with a busy error if one is running; steer injects into the ' +
+            'running turn; queue waits for it. A busy error is not a failure — follow the running turn with dsh_wait instead.',
+        },
         wait: {
           type: "boolean",
           description:
-            "true (default) blocks until the turn finishes and returns its answer. false returns a handle immediately: " +
-            "use dsh_wait to collect the result. Prefer false when the task may take minutes.",
+            "false (default) returns a handle immediately: use dsh_wait to collect the result. true blocks until the turn finishes " +
+            "and returns its answer in the same call — only when the work is known to be short.",
         },
         cwd: {
           type: "string",
           description:
-            "Working directory for a new session. Defaults to the Harness default. Exclusive with workspace_id. Refused when session_id is given — where a session lives is fixed at creation.",
+            "Working directory for a new session, and the fallback sticky scope when `project` is omitted. Defaults to the Harness " +
+            "default. Exclusive with workspace_id. Refused when session_id is given — where a session lives is fixed at creation.",
         },
         workspace_id: {
           type: "string",
@@ -109,10 +137,23 @@ const TOOLS = [
   {
     name: "dsh_sessions",
     title: "List Harness sessions",
-    description: "List DeepSeek Harness sessions with their id, working directory, and running/blank state.",
+    description:
+      "List DeepSeek Harness sessions with their id, working directory, and running/blank state. Use it to find the session a sticky " +
+      "project already has, or to check whether a turn is still running before resending anything.",
     inputSchema: {
       type: "object",
-      properties: { limit: { type: "integer", minimum: 1, maximum: 500, description: "Maximum sessions to return (default 50)." } },
+      properties: {
+        limit: { type: "integer", minimum: 1, maximum: 500, description: "Maximum sessions to return (default 50)." },
+        cwd: {
+          type: "string",
+          description: "Only sessions at or under this directory (prefix match). Use it to see one project's sessions.",
+        },
+        sort: {
+          type: "string",
+          enum: ["updatedAt", "createdAt"],
+          description: "Newest first by this field (default updatedAt).",
+        },
+      },
       additionalProperties: false,
     },
   },
@@ -231,13 +272,18 @@ async function handleLine(line) {
   try {
     switch (method) {
       case "initialize":
+        {
+          const name = request.params?.clientInfo?.name;
+          if (typeof name === "string" && name.trim()) clientNamespace = name.trim();
+        }
         reply(id, {
           protocolVersion: PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: false } },
           serverInfo: SERVER_INFO,
           instructions:
             "Use dsh_ask to delegate a self-contained task to DeepSeek Harness and get its answer back. " +
-            "Harness runs as an independent agent with its own tools and session; it cannot see this conversation.",
+            "Harness runs as an independent agent with its own tools and session; it cannot see this conversation. " +
+            "Sessions are sticky per project: pass `project` (or `cwd`) and the next call with the same project reuses that session.",
         });
         return;
 
@@ -321,8 +367,17 @@ async function callTool(name, args) {
           params.permissionPreset = args.permission.trim();
         }
         if (args.queue === true) params.queue = true;
-        if (args.wait === false) params.wait = false;
+        // 0.5.0: the handle shape is the default. Blocking is the opt-in, because a
+        // caller whose own tool budget is 300 s cannot finish a 10-minute turn and
+        // the timeout then looks like a failure that invites a resend.
+        if (args.wait !== true) params.wait = false;
         if (Number.isInteger(args.timeout_ms)) params.timeoutMs = args.timeout_ms;
+        if (typeof args.project === "string" && args.project.trim()) params.project = args.project.trim();
+        if (typeof args.reuse === "string" && args.reuse.trim()) params.reuse = args.reuse.trim();
+        if (typeof args.mode === "string" && args.mode.trim()) params.mode = args.mode.trim();
+        // The sticky registry is namespaced per client so two agents that happen to
+        // work in the same directory do not inherit each other's session.
+        params.namespace = clientNamespace;
 
         const result = await rpcCall("dsh.sessions.ask", params, { timeoutMs: turnBudget(args.timeout_ms) });
         return formatToolResult(result);
@@ -365,6 +420,8 @@ async function callTool(name, args) {
       case "dsh_sessions": {
         const params = {};
         if (Number.isInteger(args.limit)) params.limit = args.limit;
+        if (typeof args.cwd === "string" && args.cwd.trim()) params.cwd = args.cwd.trim();
+        if (typeof args.sort === "string" && args.sort.trim()) params.sort = args.sort.trim();
         const result = await rpcCall("dsh.sessions.list", params);
         const lines = (result.items ?? []).map(
           (item) =>
