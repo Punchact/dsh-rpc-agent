@@ -175,9 +175,9 @@ console.log(answer.text, answer.usage);
 | `dsh.sessions.configure` | `sessionId, model?, reasoningEffort?, permissionPreset?` | `{sessionId, selected?, permissionPreset?}`：给已有会话换模型/推理等级/权限 |
 | `dsh.sessions.list` | `limit?` | `{total, items:[{sessionId, running, blank, cwd, updatedAt, …}]}` |
 | `dsh.sessions.create` | `workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?` | `{sessionId, agentPreset, cwd, selected?, permissionPreset?}`：`workspaceId` 与 `cwd` 互斥；都不传就交给 Host 决定，`cwd` 回读 Host 实际挂载的目录。**不接受 `sessionId`**——id 由 Host 分配，传了会 `-32602`，不会悄悄换成另一个 id |
-| `dsh.sessions.ask` | `text, sessionId?, workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?, mode?, queue?, timeoutMs?` | 见下方**轮次结果**；`sessionId` 省略时新建会话，`created:true`。同一会话已有 bridge 在等轮次时默认返回 `-32004`，加 `queue: true` 则排队等它结束（受自己的 `timeoutMs` 约束） |
+| `dsh.sessions.ask` | `text, sessionId?, workspaceId? \| cwd?, agentPreset?, model?, reasoningEffort?, permissionPreset?, mode?, queue?, timeoutMs?, wait?` | 见下方**轮次结果**；`sessionId` 省略时新建会话，`created:true`。同一会话已有 bridge 在等轮次时默认返回 `-32004`，加 `queue: true` 则排队等它结束（受自己的 `timeoutMs` 约束） |
 | `dsh.sessions.prompt` | `sessionId, text, mode?` | `{accepted, sessionId, requestId, mode}`，立即返回、不等轮次；**不占住会话**，所以并发的 `ask` 仍可能抢走那一轮——要结果就配 `dsh.sessions.wait` |
-| `dsh.sessions.wait` | `sessionId, timeoutMs?` | 等待该会话**当前/下一个**轮次结束并返回轮次结果 |
+| `dsh.sessions.wait` | `sessionId, timeoutMs?, since?` | 等待该会话**当前/下一个**轮次结束并返回轮次结果；`since` 只回该游标之后的事件（增量轮询用） |
 | `dsh.sessions.cancel` | `sessionId` | `{accepted, sessionId}`：中断正在进行的轮次，保留待处理队列 |
 | `dsh.sessions.history` | `sessionId, limit?` | `{cursor, turn, running, messageCount, records[]}`，只读快照 |
 
@@ -257,16 +257,46 @@ node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
   "requestId": "rpc-…",
   "created": true,                // 本次是否新建了会话
   "cursor": 4,
+  "since": 4,                     // 只有传了 since 才出现：本结果里的事件都 > since
   "turnStartedAt": 1793807450349
 }
 ```
 
+`wait:false` 的 `ask` 不等轮次，返回的是一张**句柄**，字段不同：
+
+```jsonc
+{
+  "sessionId": "session-…",
+  "requestId": "rpc-…",
+  "status": "running",            // 还没跑完
+  "turn": null,                   // 句柄里不带轮次号，用 wait 收的时候才知道
+  "text": "",
+  "accepted": true,
+  "mode": "queue",                // 这一句是以 queue 还是 steer 投递的
+  "created": false,
+  "cwd": "…",
+  "permissionPreset": "read-only"           // 若本次应用过预设
+}
+```
+
 - `status` 一律来自该轮自己的 `turn/end` 原因，**不会**把被取消的轮次报成 `completed`。
-- `timeout` 表示等待超时，**不会**取消该轮——必要时再调 `dsh.sessions.cancel`。
+- `turn/end` 若**没带 `reason`**，`status` 报 `unknown`、`reason` 给出 `{kind:"unknown", message:"the Host ended the turn without a reason; treat this outcome as unverified"}`——类型上 `reason` 必填，但那是 TypeScript 联合类型，运行时并不校验；没法描述的结局按成功报是最难查的一种错。
+- `timeout` 表示等待超时，**不会**取消该轮——必要时再调 `dsh.sessions.cancel`。这类结果没有 `turn/end` 可引用，`reason` 于是由桥给出 `{kind:"timeout", message:"…it keeps running"}`，而不是留空。
 - `partial: true` 只出现在 `status:"unknown"` 时：事件流没等到 `turn/end` 就结束了，`text` 是半截，不要当完整回答用。
 - `cwd` 只在 `created:true` 时回填。
 - `sandbox.denied` **只认 Host 写进工具输出的固定标记**（`[sandbox: file access denied`），不从回答正文里猜同义词；工具输出取不到时，退而扫该轮正文。宁可漏报，不误报。
 - `sandbox` 与 `next` 都不是错误：`status` 与工具错误的判定不受影响，这一轮确实跑完了，只是一步动作被挡住。拿到 `next` 就照它再问一次，**不要**用同一档重试，也不要为此新开会话。
+- `wait:false` 是给"自己的工具超时比这轮任务短"的调用方用的：它立刻返回句柄（上面第二个示例），任务在 DSH 里继续跑，结果靠 `dsh_wait` 收。**句柄不占轮次槽位**，也不登记为本插件正在等待的运行；因此在它跑起来到 `dsh_wait` 接手之间有一个毫秒级的窗口，同一会话此时再来一次 `ask` 会被 `-32004` 挡住而不是悄悄排队。
+- `queue: true` 与 `wait: false` 是互斥的两个要求：前者要"等轮次空出来"，后者根本不等待。同时给会返回 `-32602`，而不是悄悄忽略其中一个。
+- `since` 让 `wait` 只回增量：不传就是整轮（默认），传了就只返回 `seq > since` 的事件，`text` 随之只含这段；`status`/`turn`/`tools`/`usage`/`sandbox` 仍然描述整轮（增量只收窄正文与事件），`cursor` 照常前进。轮询进度用 `since: <上次的 cursor>`，不要重投。
+
+**MCP 层怎么渲染**（`bin/dsh-rpc-mcp.mjs`）：工具结果**只在调用本身失败时**才是错误（错误码 + `next:` 提示）。轮次的 `status` 一律写进正文的 `outcome:` 行，`timeout`/`partial`/`accepted` 再追加一行
+
+```
+next: the turn is still running — do NOT resend the prompt. Call dsh_wait({ session_id: "…", timeout_ms: 600000, since: 31 }) to collect it.
+```
+
+这条是给调用方的模型看的：**"还没好"不是失败，重投等于重新提问**。之所以不能靠 `status` 判断——`status` 是 Host 的自由字符串（`reason.kind` 原样透出），任何白名单都会漏。
 
 **轮次归属**：`ask` 不只靠"基线轮次 + 1"的猜测。投递 prompt 后，本插件会从事件流里找自己那条 `user/message`（`source.rpcId` 等于本次请求的 `requestId`），以它落在哪一轮为准。因此**同一会话里有别人（GUI 或其他 agent）先插话时，不会把别人的回答当成你的**——那一轮的 `turn/end` 会被跳过，继续等自己那一轮。
 

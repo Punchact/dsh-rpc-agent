@@ -10,6 +10,34 @@
 
 暂无。
 
+## [0.4.5] - 2026-11-06
+
+### 新增
+
+- `dsh_ask`（及 `dsh.sessions.ask`）新增 `wait`，默认 `true`。`wait:false` 立刻返回句柄
+  `{sessionId, requestId, mode, status:"running", turn:null, text:"", accepted:true}`，任务在 DSH 里继续跑，
+  用 `dsh_wait` 收结果——给"调用方自己的工具超时短于这轮任务"的场景用。
+- `dsh_wait`（及 `dsh.sessions.wait`）新增 `since` 游标：只返回该序号之后的事件（`text` 随之只含这段），
+  `status`/`turn`/`tools`/`usage`/`sandbox` 仍描述整轮（增量只收窄正文），`cursor` 照常前进。轮询进度用它，不要重投。
+
+### 修复
+
+- **"还没好"不再被渲染成工具错误。** 之前 MCP 工具结果按 `status !== "completed"` 判 `isError`，
+  而 `status` 是 Host 的 `reason.kind` 原样透出；于是一次 `timeout` 就变成"工具失败"，调用方据此重投，
+  重投等于重新提问。现在 `isError` 只在调用本身失败时为真。
+- 工具结果正文固定带 `outcome:` 行；`timeout` / `partial` / 未等待的 `accepted` 再带一行 `next:`，
+  直接写明"不要重投，用 `dsh_wait({ session_id, since })` 收"。
+- 失败的调用也带 `next:`：按 JSON-RPC 码给出下一步（`-32003` 查会话、`-32004` 跟随或排队、
+  `-32005` 放弃等槽、`-32006` 取消）。
+- `wait` 在"没有可等的轮次、直接返回上一轮"这条路径上补上了 `since` 收窄（原先只有等待路径支持）。
+- `queue: true` 与 `wait: false` 相矛盾时直接返回 `-32602`，不再悄悄忽略其中一个。
+- `timeout` 结果不再留空的 `reason`：等待超时时那一轮没有 `turn/end` 可引用，现在由桥填
+  `{kind:"timeout", message:"… it keeps running"}`，调用方不必再从"没有原因"里猜发生了什么。
+- **没有 `reason` 的 `turn/end` 不再报成功。** `TurnEndReason` 是 TypeScript 联合类型，跨进程传的是普通
+  JSON，运行时不校验；宿主少写一个字段，旧代码就落到 `endEvent ? "completed" : "unknown"`，把一轮**没人描述过**
+  的结局报成 `completed`。现在这种情形 `status` 为 `unknown`、`reason` 为
+  `{kind:"unknown", message:"the Host ended the turn without a reason; treat this outcome as unverified"}`。
+
 ## [0.4.4] - 2026-11-05
 
 ### 修复

@@ -182,6 +182,10 @@ function fakeController({
             });
           } else if (step.kind === "end") {
             append("turn/end", { turn: step.turn, reason: step.reason ?? { kind: "completed" } });
+          } else if (step.kind === "rawEnd") {
+            // A `turn/end` with no `reason` field at all: the union requires one,
+            // but the union is a type, not a runtime guard.
+            append("turn/end", { turn: step.turn });
           }
         }
       })();
@@ -303,6 +307,39 @@ test("ask reports the turn-end reason when the turn was aborted", async () => {
   assert.equal(result.status, "aborted");
   assert.equal(result.text, "partial");
   assert.deepEqual(result.reason, { kind: "aborted", reason: "user" });
+});
+
+test("a turn that ended without a reason is unverified, not completed", async () => {
+  const controller = fakeController({
+    script: [
+      { kind: "start", turn: 1 },
+      { kind: "text", turn: 1, text: "did it finish?" },
+      { kind: "rawEnd", turn: 1 },
+    ],
+  });
+  const result = await build(controller).ask({ text: "go" });
+  // `TurnEndReason` is a union, and a union is not a runtime guard: a Host that
+  // omits the field would otherwise be reported as a successful turn.
+  assert.equal(result.status, "unknown", "an unrecorded ending must not read as success");
+  assert.equal(result.reason?.kind, "unknown");
+  assert.match(result.reason?.message ?? "", /without a reason/);
+  assert.equal(result.text, "did it finish?", "the text is still returned");
+  assert.equal(result.partial, false, "a turn that did end is not a partial read");
+});
+
+test("an unlisted turn-end kind keeps its own name instead of being coerced", async () => {
+  const controller = fakeController({
+    script: [
+      { kind: "start", turn: 1 },
+      { kind: "text", turn: 1, text: "truncated" },
+      { kind: "end", turn: 1, reason: { kind: "max-tokens" } },
+    ],
+  });
+  const result = await build(controller).ask({ text: "go" });
+  // `TurnEndReasonMap` is merge-extensible, so a backend variant must survive
+  // verbatim rather than be mapped onto a known outcome.
+  assert.equal(result.status, "max-tokens");
+  assert.deepEqual(result.reason, { kind: "max-tokens" });
 });
 
 test("ask waits for the next turn when the session already had one", async () => {
@@ -934,3 +971,114 @@ test("ask applies options and reports them alongside the turn", async () => {
 });
 
 
+
+// --- 0.4.5: R2 (ask can return a handle) and R4 (wait can return a delta) ---
+
+test("ask with wait:false hands back a handle instead of waiting for the turn", async () => {
+  const controller = fakeController({ script: happyScript });
+  const result = await build(controller).ask({ text: "long job", wait: false });
+
+  assert.equal(result.accepted, true);
+  assert.equal(result.status, "running");
+  assert.equal(result.turn, null);
+  assert.equal(result.text, "");
+  assert.equal(result.sessionId, "session-test");
+  assert.match(result.requestId, /^rpc-/);
+  assert.equal(controller.prompts.length, 1, "the prompt must still be submitted");
+});
+
+test("queue and wait:false are refused together instead of silently ignoring one", async () => {
+  const controller = fakeController({ script: happyScript });
+
+  await assert.rejects(
+    () => build(controller).ask({ text: "x", wait: false, queue: true }),
+    (error) => error.code === -32602 && /queue.*wait: false/.test(error.message),
+  );
+  assert.equal(controller.prompts.length, 0, "a contradictory request must not reach the Host");
+});
+
+test("a non-blocking ask refuses to stack onto a turn that is already running", async () => {
+  const controller = fakeController({ script: happyScript });
+  controller.list = async (_request, signal) => {
+    signal?.throwIfAborted();
+    return { items: [{ sessionId: "session-test", running: true, blank: false, updatedAt: 1 }] };
+  };
+
+  await assert.rejects(
+    () => build(controller).ask({ sessionId: "session-test", text: "again", wait: false }),
+    (error) => error.code === -32004 && /already running a turn/.test(error.message),
+  );
+  assert.equal(controller.prompts.length, 0, "a refused request must not reach the Host");
+});
+
+const historicalTurn = [
+  { type: "turn/start", seq: 1, time: 1, data: { turn: 1 } },
+  {
+    type: "assistant/message",
+    seq: 2,
+    time: 2,
+    data: { turn: 1, step: 1, message: { content: [{ type: "text", text: "旧答案" }] } },
+  },
+  { type: "turn/end", seq: 3, time: 3, data: { turn: 1, reason: { kind: "completed" } } },
+];
+
+test("wait with since returns only what happened after that cursor", async () => {
+  const controller = fakeController({ historical: historicalTurn });
+  const result = await build(controller).wait({ sessionId: "session-test", since: 2 });
+
+  assert.equal(result.since, 2);
+  assert.equal(result.turn, 1);
+  assert.equal(result.text, "", "the text before the cursor must not be replayed");
+  assert.ok(result.cursor >= 3, `cursor must still advance (got ${result.cursor})`);
+});
+
+const historicalTurnWithTool = [
+  { type: "turn/start", seq: 1, time: 1, data: { turn: 1 } },
+  { type: "tool/call", seq: 2, time: 2, data: { turn: 1, step: 1, callId: "c1", name: "bash", arguments: { command: "ls" } } },
+  {
+    type: "tool/result",
+    seq: 3,
+    time: 3,
+    data: { turn: 1, step: 1, callId: "c1", message: { toolCallId: "c1", content: [{ type: "text", text: "a.txt" }] } },
+  },
+  {
+    type: "assistant/message",
+    seq: 4,
+    time: 4,
+    data: { turn: 1, step: 2, message: { content: [{ type: "text", text: "旧答案" }] } },
+  },
+  { type: "turn/end", seq: 5, time: 5, data: { turn: 1, reason: { kind: "completed" } } },
+];
+
+/**
+ * A delta is about the prose. Reporting an empty tool list next to a delta
+ * would let a polling caller conclude the turn did nothing, when in fact it
+ * ran commands before the cursor.
+ */
+test("a delta answer still reports the whole turn's tool calls", async () => {
+  const controller = fakeController({ historical: historicalTurnWithTool });
+  const result = await build(controller).wait({ sessionId: "session-test", since: 4 });
+
+  assert.equal(result.text, "", "earlier text must not be replayed");
+  assert.equal(result.tools.length, 1, "a delta must not hide the tool call it excluded");
+  assert.equal(result.tools[0].name, "bash");
+  assert.equal(result.tools[0].output, "a.txt");
+});
+
+test("wait without since still replays the whole turn", async () => {
+  const controller = fakeController({ historical: historicalTurn });
+  const result = await build(controller).wait({ sessionId: "session-test" });
+
+  assert.equal(result.text, "旧答案");
+  assert.equal(result.since, undefined, "no since means no delta marker");
+});
+
+test("a timed-out wait still says why, instead of leaving reason null", async () => {
+  const controller = fakeController({ script: [{ kind: "start", turn: 1 }, { kind: "text", turn: 1, text: "还没完" }] });
+  const result = await build(controller).ask({ text: "slow", timeoutMs: 60 });
+
+  assert.equal(result.status, "timeout");
+  assert.equal(result.timedOut, true);
+  assert.equal(result.reason?.kind, "timeout");
+  assert.match(result.reason?.message ?? "", /keeps running/);
+});

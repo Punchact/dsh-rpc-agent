@@ -12,6 +12,7 @@
 
 import { rpcCall } from "../lib/client.mjs";
 import { PLUGIN_VERSION } from "../lib/version.mjs";
+import { formatToolResult, formatToolError } from "../lib/mcp-format.mjs";
 
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_INFO = { name: "dsh-rpc", version: PLUGIN_VERSION, title: "DeepSeek Harness bridge" };
@@ -21,13 +22,22 @@ const TOOLS = [
     name: "dsh_ask",
     title: "Ask DeepSeek Harness",
     description:
-      "Delegate a task to DeepSeek Harness, a full agent with its own file tools, shell, skills and MCP servers, and return its final answer. " +
+      "Delegate a task to DeepSeek Harness, a full agent with its own file tools, shell, skills and MCP servers, and return its answer. " +
       "Omit session_id to start a fresh session. The Harness works in its own process and session; it does not share this agent's context, " +
-      "so make the prompt self-contained.",
+      "so make the prompt self-contained. " +
+      'For work that may outlast your own tool timeout, pass wait:false: the call then returns a handle (session_id + request_id) in ' +
+      'milliseconds instead of blocking. Either way the answer line starts with "outcome:" — read that, not the tool error flag, to learn ' +
+      "what happened. A turn that is still running is NOT a failure: collect it with dsh_wait and never resend the prompt.",
     inputSchema: {
       type: "object",
       properties: {
         prompt: { type: "string", description: "Self-contained task or question for the Harness agent." },
+        wait: {
+          type: "boolean",
+          description:
+            "true (default) blocks until the turn finishes and returns its answer. false returns a handle immediately: " +
+            "use dsh_wait to collect the result. Prefer false when the task may take minutes.",
+        },
         cwd: {
           type: "string",
           description:
@@ -109,11 +119,20 @@ const TOOLS = [
   {
     name: "dsh_wait",
     title: "Wait for a Harness turn",
-    description: "Block until the turn currently running on a session finishes, then return its assistant text.",
+    description:
+      "Block until the turn currently running on a session finishes, then return its text. This is the supported way to collect work after " +
+      "a timeout or after dsh_ask with wait:false — do not resend the prompt. Pass the `since` cursor from the previous answer to get only " +
+      "what happened afterwards.",
     inputSchema: {
       type: "object",
       properties: {
         session_id: { type: "string", description: "Session to wait on." },
+        since: {
+          type: "integer",
+          minimum: 0,
+          description:
+            "Return only what happened after this cursor (the `cursor` value from a previous result). Omit for the whole turn.",
+        },
         timeout_ms: { type: "integer", minimum: 1000, maximum: 3600000 },
       },
       required: ["session_id"],
@@ -278,7 +297,9 @@ async function callTool(name, args) {
     switch (name) {
       case "dsh_ask": {
         const prompt = typeof args.prompt === "string" ? args.prompt : "";
-        if (prompt.trim().length === 0) return toolError("`prompt` is required");
+        if (prompt.trim().length === 0) {
+          return formatToolError("`prompt` is required", undefined, "pass the task as a self-contained prompt string");
+        }
         const params = { text: prompt };
         const sessionId = typeof args.session_id === "string" ? args.session_id.trim() : "";
         if (sessionId) params.sessionId = sessionId;
@@ -300,10 +321,11 @@ async function callTool(name, args) {
           params.permissionPreset = args.permission.trim();
         }
         if (args.queue === true) params.queue = true;
+        if (args.wait === false) params.wait = false;
         if (Number.isInteger(args.timeout_ms)) params.timeoutMs = args.timeout_ms;
 
         const result = await rpcCall("dsh.sessions.ask", params, { timeoutMs: turnBudget(args.timeout_ms) });
-        return toolResult(result);
+        return formatToolResult(result);
       }
 
       case "dsh_workspaces": {
@@ -353,16 +375,17 @@ async function callTool(name, args) {
 
       case "dsh_wait": {
         const sessionId = typeof args.session_id === "string" ? args.session_id.trim() : "";
-        if (!sessionId) return toolError("`session_id` is required");
+        if (!sessionId) return formatToolError("`session_id` is required", undefined, "call dsh_sessions() to find the session id");
         const params = { sessionId };
+        if (Number.isInteger(args.since)) params.since = args.since;
         if (Number.isInteger(args.timeout_ms)) params.timeoutMs = args.timeout_ms;
         const result = await rpcCall("dsh.sessions.wait", params, { timeoutMs: turnBudget(args.timeout_ms) });
-        return toolResult(result);
+        return formatToolResult(result);
       }
 
       case "dsh_cancel": {
         const sessionId = typeof args.session_id === "string" ? args.session_id.trim() : "";
-        if (!sessionId) return toolError("`session_id` is required");
+        if (!sessionId) return formatToolError("`session_id` is required", undefined, "call dsh_sessions() to find the session id");
         const result = await rpcCall("dsh.sessions.cancel", { sessionId });
         return { content: [{ type: "text", text: `cancelled ${result.sessionId}` }] };
       }
@@ -379,38 +402,14 @@ async function callTool(name, args) {
       }
 
       default:
-        return toolError(`unknown tool: ${name}`);
+        return formatToolError(`unknown tool: ${name}`, undefined, "call tools/list for the supported names");
     }
   } catch (error) {
-    return toolError(error instanceof Error ? error.message : String(error), error?.data);
+    // `code` is the JSON-RPC code the bridge answered with; toolError turns it
+    // into the concrete next step instead of leaving the caller to guess.
+    return formatToolError(error instanceof Error ? error.message : String(error), error?.data, error?.code);
   }
 }
 
-function toolResult(result) {
-  const text = typeof result?.text === "string" && result.text.length > 0 ? result.text : "(the Harness returned no text)";
-  const meta = [
-    `session ${result?.sessionId ?? "?"}`,
-    `turn ${result?.turn ?? "?"}`,
-    result?.status ?? "unknown",
-    typeof result?.durationMs === "number" ? `${(result.durationMs / 1000).toFixed(1)}s` : null,
-    Array.isArray(result?.tools) && result.tools.length > 0 ? `${result.tools.length} tool calls` : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-
-  const content = [
-    { type: "text", text },
-    { type: "text", text: `— ${meta}` },
-  ];
-  if (result?.reason && result.status !== "completed") {
-    content.push({ type: "text", text: `reason: ${JSON.stringify(result.reason)}` });
-  }
-  return { content, isError: result?.status !== "completed" && result?.status !== "idle" };
-}
-
-function toolError(message, data) {
-  const text = data === undefined ? message : `${message}\n${JSON.stringify(data)}`;
-  return { content: [{ type: "text", text }], isError: true };
-}
 
 log(`ready (${SERVER_INFO.name} ${SERVER_INFO.version})`);
