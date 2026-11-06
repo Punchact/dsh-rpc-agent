@@ -182,6 +182,10 @@ function fakeController({
             });
           } else if (step.kind === "end") {
             append("turn/end", { turn: step.turn, reason: step.reason ?? { kind: "completed" } });
+          } else if (step.kind === "rawEnd") {
+            // A `turn/end` with no `reason` field at all: the union requires one,
+            // but the union is a type, not a runtime guard.
+            append("turn/end", { turn: step.turn });
           }
         }
       })();
@@ -303,6 +307,39 @@ test("ask reports the turn-end reason when the turn was aborted", async () => {
   assert.equal(result.status, "aborted");
   assert.equal(result.text, "partial");
   assert.deepEqual(result.reason, { kind: "aborted", reason: "user" });
+});
+
+test("a turn that ended without a reason is unverified, not completed", async () => {
+  const controller = fakeController({
+    script: [
+      { kind: "start", turn: 1 },
+      { kind: "text", turn: 1, text: "did it finish?" },
+      { kind: "rawEnd", turn: 1 },
+    ],
+  });
+  const result = await build(controller).ask({ text: "go" });
+  // `TurnEndReason` is a union, and a union is not a runtime guard: a Host that
+  // omits the field would otherwise be reported as a successful turn.
+  assert.equal(result.status, "unknown", "an unrecorded ending must not read as success");
+  assert.equal(result.reason?.kind, "unknown");
+  assert.match(result.reason?.message ?? "", /without a reason/);
+  assert.equal(result.text, "did it finish?", "the text is still returned");
+  assert.equal(result.partial, false, "a turn that did end is not a partial read");
+});
+
+test("an unlisted turn-end kind keeps its own name instead of being coerced", async () => {
+  const controller = fakeController({
+    script: [
+      { kind: "start", turn: 1 },
+      { kind: "text", turn: 1, text: "truncated" },
+      { kind: "end", turn: 1, reason: { kind: "max-tokens" } },
+    ],
+  });
+  const result = await build(controller).ask({ text: "go" });
+  // `TurnEndReasonMap` is merge-extensible, so a backend variant must survive
+  // verbatim rather than be mapped onto a known outcome.
+  assert.equal(result.status, "max-tokens");
+  assert.deepEqual(result.reason, { kind: "max-tokens" });
 });
 
 test("ask waits for the next turn when the session already had one", async () => {

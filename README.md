@@ -280,6 +280,7 @@ node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
 ```
 
 - `status` 一律来自该轮自己的 `turn/end` 原因，**不会**把被取消的轮次报成 `completed`。
+- `turn/end` 若**没带 `reason`**，`status` 报 `unknown`、`reason` 给出 `{kind:"unknown", message:"the Host ended the turn without a reason; treat this outcome as unverified"}`——类型上 `reason` 必填，但那是 TypeScript 联合类型，运行时并不校验；没法描述的结局按成功报是最难查的一种错。
 - `timeout` 表示等待超时，**不会**取消该轮——必要时再调 `dsh.sessions.cancel`。这类结果没有 `turn/end` 可引用，`reason` 于是由桥给出 `{kind:"timeout", message:"…it keeps running"}`，而不是留空。
 - `partial: true` 只出现在 `status:"unknown"` 时：事件流没等到 `turn/end` 就结束了，`text` 是半截，不要当完整回答用。
 - `cwd` 只在 `created:true` 时回填。

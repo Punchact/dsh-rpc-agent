@@ -33,6 +33,10 @@
 - `queue: true` 与 `wait: false` 相矛盾时直接返回 `-32602`，不再悄悄忽略其中一个。
 - `timeout` 结果不再留空的 `reason`：等待超时时那一轮没有 `turn/end` 可引用，现在由桥填
   `{kind:"timeout", message:"… it keeps running"}`，调用方不必再从"没有原因"里猜发生了什么。
+- **没有 `reason` 的 `turn/end` 不再报成功。** `TurnEndReason` 是 TypeScript 联合类型，跨进程传的是普通
+  JSON，运行时不校验；宿主少写一个字段，旧代码就落到 `endEvent ? "completed" : "unknown"`，把一轮**没人描述过**
+  的结局报成 `completed`。现在这种情形 `status` 为 `unknown`、`reason` 为
+  `{kind:"unknown", message:"the Host ended the turn without a reason; treat this outcome as unverified"}`。
 
 ## [0.4.4] - 2026-11-05
 

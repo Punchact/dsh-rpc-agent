@@ -10,3 +10,7 @@ token
 Thumbs.db
 *.log
 *.tmp
+
+# local scratch: one-off verification scripts and the sandbox npm cache
+_tmp/
+.npm-cache/
