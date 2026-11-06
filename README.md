@@ -22,7 +22,7 @@ dsh-rpc CLI ───────────────────┼──�
 
 **其他文档**：[变更记录](./CHANGELOG.md) · [安全策略](./SECURITY.md) · [发版手册](./docs/release.md) · [设计说明](./docs/design.md)
 
-**版本**：npm 上最新发布的是 [`0.7.6`](https://www.npmjs.com/package/@punchact/dsh-rpc-agent)（`npm view @punchact/dsh-rpc-agent version` 可查；注册表刚更新时 `npm view` 可能滞后一两分钟）。本文件描述的是**仓库当前代码**，两版之间的差异见 [CHANGELOG](./CHANGELOG.md) 顶部。
+**版本**：npm 上最新发布的是 [`0.7.7`](https://www.npmjs.com/package/@punchact/dsh-rpc-agent)（`npm view @punchact/dsh-rpc-agent version` 可查；注册表刚更新时 `npm view` 可能滞后一两分钟）。本文件描述的是**仓库当前代码**，两版之间的差异见 [CHANGELOG](./CHANGELOG.md) 顶部。
 
 ---
 
@@ -161,7 +161,7 @@ console.log(answer.text, answer.usage);
   "url": "http://127.0.0.1:3820/dsh-rpc",
   "origin": "http://127.0.0.1:3820",
   "path": "/dsh-rpc",
-  "version": "0.7.6",                        // 正在运行的那份插件自报的版本
+  "version": "0.7.7",                        // 正在运行的那份插件自报的版本
   "plugin": "dsh-rpc-agent",
   "pid": 12345,                              // 写这个文件的 Host 进程
   "startedAt": "2026-11-05T01:05:58.000Z",   // 该进程的启动时刻
@@ -446,7 +446,7 @@ dsh plugin add @punchact/dsh-rpc-agent
 plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent" })
 ```
 
-非默认 profile 加 `--profile <name>`（桌面端是 `desktop`）。要钉版本就写全：`dsh plugin add @punchact/dsh-rpc-agent@0.7.6`；不写则取 `latest`。
+非默认 profile 加 `--profile <name>`（桌面端是 `desktop`）。要钉版本就写全：`dsh plugin add @punchact/dsh-rpc-agent@0.7.7`；不写则取 `latest`。
 
 三件在 npm 路线上容易踩的事：
 
@@ -454,7 +454,7 @@ plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent" })
 2. **刚发布的版本可能被 pnpm 的冷静期拦下。** 实测：新版本发布当天用注册表 spec 装会失败（`minimumReleaseAge` 未满）。要么改用已过冷静期的版本，要么在 profile 的 `pnpm-workspace.yaml` 里显式放行——pnpm 有时会自己追加这一行，写法是：
    ```yaml
    minimumReleaseAgeExclude:
-     - '@punchact/dsh-rpc-agent@0.4.1 || 0.4.4 || 0.5.3 || 0.7.6'
+     - '@punchact/dsh-rpc-agent@0.4.1 || 0.4.4 || 0.5.3 || 0.7.6 || 0.7.7'
    ```
 3. **想确认装的是哪一份**：用 `cordis_inspect_query`（`Config.listConfigs`，`input: {"entry":"include:dsh-rpc-bridge"}`）看返回的 `packageDir`——指向 `<profile>\node_modules\@punchact\dsh-rpc-agent` 就是 npm 路线，指向你的工作区就是链接路线。**版本号本身不能当证据**，它读的是包里那个 `package.json`；也可以比 `index.mjs` 的 inode 是否与工作区相同。
 
