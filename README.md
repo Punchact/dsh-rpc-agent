@@ -385,9 +385,20 @@ JSON-RPC 标准码之外，本插件用 `-3200x` 段表达业务语义：
         defaultTimeoutMs: 600000
         maxBodyBytes: 1048576
         maxSessions: 200       # 同时进行的等待上限
+        approvals:
+          mode: off            # off（默认）| deny
 ```
 
 其余键：`enabled`、`tokenFile`（自定义 token 路径）、`path`（默认 `/dsh-rpc`）、`logRequests`。
+
+### 无人值守会话撞上审批墙（`approvals.mode`）
+
+桥创建的会话没有人坐在 GUI 前面。当模型想升权（`sandbox_permissions`）或触发任何需要审批的动作时，宿主会把这次调用挂起等人回答——**等多久取决于有没有应答者**，而桥创建的子会话没有。现场实测过一次挂 10 分钟。
+
+- `off`（默认）：桥不注册任何应答者，保持宿主原本的 fail-closed 行为。
+- `deny`：桥只为自己创建的会话作答，一律回 `'rejected'`——模型立刻知道"不行"，可以在这一轮里把没做完的事写进报告，而不是卡住。它**只收紧权限，不放宽**；人在 GUI 里看着的会话不受影响（所有权只覆盖本进程创建的会话），被拒次数记在 `/status` 的 `calls.approvals.denied`。
+
+超过一轮之后还会用到？把 `mode` 改成 `deny` 是当前唯一可用的无人值守解法；"把批准权交给派发方 agent"（`delegate`）在设计文档里，尚未实现。
 
 环境变量 `DSH_RPC_TOKEN` 可覆盖 token（优先级高于文件），适合 CI 或不想落盘的场景。
 

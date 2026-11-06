@@ -225,6 +225,14 @@ That line exists because "not finished" used to look like a failure, and a retry
 
 `POST /dsh-rpc/stream` takes the same params and answers NDJSON: `{type:"session"}`, `{type:"progress", frame}`, then `{type:"result", …}` or `{type:"error", error}`.
 
+## Unattended sessions and approvals
+
+A session this bridge created has nobody in front of the GUI. When the model asks to escalate its sandbox (or any action needs approval), the Host parks that call until someone answers — and there is no one; one measured case hung for ten minutes.
+
+Set `approvals: { mode: "deny" }` in the plugin config and the bridge answers for the sessions it created: it returns `'rejected'` immediately, so the model learns "no" and can finish the turn with a note about what it could not do. It only ever removes privilege, and it never touches a session a human is watching — ownership covers only sessions this process created. Rejections are counted in `/status` under `calls.approvals.denied`.
+
+The default is `off`, which leaves the Host's own fail-closed behaviour in place. Handing the decision to the dispatching agent (`delegate`) is designed in the plan document but not implemented.
+
 ## Security model
 
 **One line: the bearer token is permission to make the Harness act on this machine.**

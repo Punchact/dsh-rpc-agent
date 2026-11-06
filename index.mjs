@@ -10,9 +10,11 @@
 //  * Fail loud on a bad config, stay inert (but loaded) when disabled.
 
 import { endpointPath, loadOrCreateToken, tokenPath, writeEndpoint } from "./lib/auth.mjs";
+import { createApprovalResponder } from "./lib/approvals.mjs";
 import { MAX_WAIT_SLICE_MS, MIN_WAIT_SLICE_MS, resolveConfig } from "./lib/config.mjs";
 import { buildDispatcher, registerRoutes } from "./lib/http.mjs";
 import { createMethods } from "./lib/methods.mjs";
+import { isOwnedSession } from "./lib/owned.mjs";
 import { createStats } from "./lib/stats.mjs";
 import { PLUGIN_NAME, PLUGIN_VERSION } from "./lib/version.mjs";
 
@@ -68,6 +70,24 @@ export function apply(ctx, input = {}) {
     log,
     stats,
   });
+
+  // Answer approvals for our own sessions (lib/approvals.mjs). Off by default:
+  // the Host already fails closed with nobody answering, and taking a decision
+  // away from a human watching the GUI is not a safe default.
+  const answerApproval = createApprovalResponder({
+    mode: config.approvals.mode,
+    isOwned: isOwnedSession,
+    onDeny: () => stats.recordApproval("denied"),
+    log,
+  });
+  if (answerApproval) {
+    if (typeof ctx.on === "function") {
+      ctx.on("approval/request", answerApproval);
+      log.info?.("[dsh-rpc] approvals.mode=deny: answering for sessions this bridge created");
+    } else {
+      log.warn?.("[dsh-rpc] approvals.mode=deny needs ctx.on: the approval answerer is not registered");
+    }
+  }
 
   // Publish the endpoint so out-of-process callers (CLI, MCP bridge, curl) can
   // discover url + token without being told the port. `getOrigin()` throws
