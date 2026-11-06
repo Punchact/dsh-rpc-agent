@@ -290,11 +290,24 @@ node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
 - `queue: true` 与 `wait: false` 是互斥的两个要求：前者要"等轮次空出来"，后者根本不等待。同时给会返回 `-32602`，而不是悄悄忽略其中一个。
 - `since` 让 `wait` 只回增量：不传就是整轮（默认），传了就只返回 `seq > since` 的事件，`text` 随之只含这段；`status`/`turn`/`tools`/`usage`/`sandbox` 仍然描述整轮（增量只收窄正文与事件），`cursor` 照常前进。轮询进度用 `since: <上次的 cursor>`，不要重投。
 
-**MCP 层怎么渲染**（`bin/dsh-rpc-mcp.mjs`）：工具结果**只在调用本身失败时**才是错误（错误码 + `next:` 提示）。轮次的 `status` 一律写进正文的 `outcome:` 行，`timeout`/`partial`/`accepted` 再追加一行
+**MCP 层怎么渲染**（`bin/dsh-rpc-mcp.mjs` + `lib/mcp-format.mjs`）：工具结果**只在调用本身失败时**才是错误（错误码 + `next:` 提示）。轮次的 `status` 一律写进正文的 `outcome:` 行；**每一种结束原因都会额外给一行 `note:`（人话解释）与一行 `next:`（下一步），只有 `completed` 两者都没有**：
+
+```
+— outcome: aborted · session … · turn 5 · 12.3s · 3 tool calls · cursor 88
+note: the turn was stopped (cause: user — the Host cannot tell a bridge cancel from someone pressing stop)
+reason: {"kind":"aborted","reason":{"kind":"user"}}
+next: do not resend blindly: ask the human whether to continue, then resend with the same session_id
+```
+
+`aborted` / `blocked` / `error` / `max-tokens` / `interrupted` / `forked` / `refusal` / `unknown` 各有自己的措辞：`aborted` 说清是谁停的（`user` / `parent` / `hook{reason}` / `disposed` / `legacy`），`error` 把 `LlmFailure` 的 `code` 与 `message` 拼成一句"这不是工具失败"，`max-tokens` 提醒再发一次还会被截断。**遇到本插件不认识的 `kind` 不是异常**——宿主的 `TurnEndReasonMap` 是可合并扩展的（源码注释原文：`a backend-added variant cannot be listed`），这类结局一律降级为"unverified，先查 `dsh_sessions()`"，绝不冒充 `completed`。
+
+还在跑时仍给收集提示：
 
 ```
 next: the turn is still running — do NOT resend the prompt. Call dsh_wait({ session_id: "…", timeout_ms: 600000, since: 31 }) to collect it.
 ```
+
+`partial` 则**不再断言"还在跑"**（它只说明流里没有 `turn/end`，宿主可能已经随之消失）：`next:` 要求先 `dsh_sessions()` 确认，再决定是 `dsh_wait` 还是重投。
 
 这条是给调用方的模型看的：**"还没好"不是失败，重投等于重新提问**。之所以不能靠 `status` 判断——`status` 是 Host 的自由字符串（`reason.kind` 原样透出），任何白名单都会漏。
 

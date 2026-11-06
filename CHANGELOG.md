@@ -25,8 +25,8 @@
 - **"还没好"不再被渲染成工具错误。** 之前 MCP 工具结果按 `status !== "completed"` 判 `isError`，
   而 `status` 是 Host 的 `reason.kind` 原样透出；于是一次 `timeout` 就变成"工具失败"，调用方据此重投，
   重投等于重新提问。现在 `isError` 只在调用本身失败时为真。
-- 工具结果正文固定带 `outcome:` 行；`timeout` / `partial` / 未等待的 `accepted` 再带一行 `next:`，
-  直接写明"不要重投，用 `dsh_wait({ session_id, since })` 收"。
+- 工具结果正文固定带 `outcome:` 行；**每一种结束原因都带一行 `note:`（人话解释）与一行 `next:`（下一步）**，
+  只有 `completed` 两者都没有。
 - 失败的调用也带 `next:`：按 JSON-RPC 码给出下一步（`-32003` 查会话、`-32004` 跟随或排队、
   `-32005` 放弃等槽、`-32006` 取消）。
 - `wait` 在"没有可等的轮次、直接返回上一轮"这条路径上补上了 `since` 收窄（原先只有等待路径支持）。
@@ -37,6 +37,12 @@
   JSON，运行时不校验；宿主少写一个字段，旧代码就落到 `endEvent ? "completed" : "unknown"`，把一轮**没人描述过**
   的结局报成 `completed`。现在这种情形 `status` 为 `unknown`、`reason` 为
   `{kind:"unknown", message:"the Host ended the turn without a reason; treat this outcome as unverified"}`。
+- **六种"非完成"结局不再零提示。** `aborted`（并区分 `user` / `parent` / `hook{reason}` / `disposed` / `legacy`）、
+  `blocked`、`error`（带 `LlmFailure` 的 `code` 与 `message`，并说明"这不是工具失败"）、`max-tokens`、
+  `interrupted`、`forked`、`refusal` 现在各有一句归属清楚的解释与下一步；宿主新增的、本插件不认识的 `kind`
+  降级为"unverified，先查 `dsh_sessions()`"，绝不冒充 `completed`。
+- `partial` 的提示不再断言"仍在运行"：它只表示流里没有 `turn/end`，宿主可能已经随之消失，因此先要求
+  `dsh_sessions()` 确认再决定 `dsh_wait` 还是重投。
 
 ## [0.4.4] - 2026-11-05
 

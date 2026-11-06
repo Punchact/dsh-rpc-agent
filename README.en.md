@@ -184,11 +184,24 @@ A **turn result** carries `sessionId`, `turn`, `status` (`completed` / `aborted`
 
 **Deltas** — `wait` accepts `since`: with it, only events after that sequence are returned (so `text` is just that slice), while `status`, `turn`, `tools`, `usage` and `sandbox` still describe the whole turn — the delta narrows the prose only — and `cursor` still advances. Poll with `since: <last cursor>`; never re-send the prompt.
 
-**How MCP renders this** — a tool result is an error **only when the call itself failed** (with a code and a `next:` hint). The turn's `status` goes into an `outcome:` line, and `timeout` / `partial` / `accepted` add:
+**How MCP renders this** — a tool result is an error **only when the call itself failed** (with a code and a `next:` hint). The turn's `status` goes into an `outcome:` line, and **every end reason also gets a `note:` (plain-English explanation) plus a `next:` step — only `completed` gets neither**:
+
+```
+— outcome: aborted · session … · turn 5 · 12.3s · 3 tool calls · cursor 88
+note: the turn was stopped (cause: user — the Host cannot tell a bridge cancel from someone pressing stop)
+reason: {"kind":"aborted","reason":{"kind":"user"}}
+next: do not resend blindly: ask the human whether to continue, then resend with the same session_id
+```
+
+`aborted` / `blocked` / `error` / `max-tokens` / `interrupted` / `forked` / `refusal` / `unknown` each get their own wording: `aborted` names who stopped it (`user` / `parent` / `hook{reason}` / `disposed` / `legacy`), `error` turns the `LlmFailure` `code` and `message` into one line saying "this is not a tool failure", and `max-tokens` warns that resending will be truncated again. **A `kind` this bridge has never seen is not an anomaly** — the Host's `TurnEndReasonMap` is merge-extensible (source comment: `a backend-added variant cannot be listed`), so such outcomes degrade to "unverified, check `dsh_sessions()` first" instead of passing as `completed`.
+
+While the turn is still running you get the collection hint:
 
 ```
 next: the turn is still running — do NOT resend the prompt. Call dsh_wait({ session_id: "…", timeout_ms: 600000, since: 31 }) to collect it.
 ```
+
+A `partial` result no longer claims "still running" (it only means the stream ended without a `turn/end`; the Host may have died with it): its `next:` asks for `dsh_sessions()` first, then `dsh_wait` or a resend.
 
 That line exists because "not finished" used to look like a failure, and a retry after that is a *new prompt* — which is how one task became four sessions. `status` cannot be used for the decision: it is the Host's free-form `reason.kind`.
 
