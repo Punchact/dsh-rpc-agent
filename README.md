@@ -71,7 +71,7 @@ http://127.0.0.1:<port>/dsh-rpc   ->   DSH agent
 - **无人值守也不卡死**：`approvals.mode` 三档，`delegate` 把升权决定交给派发方。
 - **调用方断开就停手，但不杀你的工作**：abort ≠ cancel，那一轮还在 GUI 里跑。
 - **端口随启动器走**：`endpoint.json` + `health --wait`，客户端不用写死地址。
-- **每条对外承诺都有用例守着**：182 例单元 + 变异验证 + 真宿主集成测试。
+- **每条对外承诺都有用例守着**：183 例单元 + 变异验证 + 真宿主集成测试。
 
 ## 安装与更新
 
@@ -628,7 +628,7 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 一次跑完十段，共 182 例；不需要 Harness，也不需要 npm install
+npm test                       # 一次跑完十段，共 183 例；不需要 Harness，也不需要 npm install
 node test/host.test.mjs        # 1 例：真宿主集成（需先 npm ci）
 node test/e2e.mjs --cwd .      # 14 例：端到端，打真实 Harness
 node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harness
@@ -664,7 +664,7 @@ node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harnes
 - **边界**检查协议层：batch、通知、id 形态、鉴权头、超大 body（应得真正的 413 而不是断连）、参数注入防护、超时钳制、并发 ask、`limit` 语义。
 - **端口漂移**（手工）：把 `endpoint.json` 的 url 改成死端口再跑 `dsh-rpc ping`，应得退出码 3 与含 `nothing is listening`、`pid`、`health --wait` 的可读报错。
 
-上次实跑：单元 182/182、宿主 1/1（2026-11-06）；端到端 14/14、边界 24/24（2026-11-05）。
+上次实跑：单元 183/183（CI）、宿主 1/1（2026-11-06）；本机同一提交 182 通过 + 1 例因沙箱禁止子进程（`spawn EPERM`）失败；端到端 14/14、边界 24/24（2026-11-05）。
 
 ## 许可证
 

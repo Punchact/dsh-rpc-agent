@@ -55,7 +55,7 @@ node -e "…"            # 见上一版的实际做法：用一次性脚本改 l
 
 # 3. 本地全绿
 npm run check:version
-npm test               # 十段共 182 例
+npm test               # 十段共 183 例
 npm run check:package  # 向 npm 要真实打包清单再核对
 
 # 4. 常规 PR 流程合进 main
@@ -126,7 +126,7 @@ probe` 那一步的输出。**不要**把这些开关当成常规流程的一部
 
 ## 验证
 
-- `npm test`：十段共 182 例（列出各段数字）。
+- `npm test`：十段共 183 例（列出各段数字）。
 - 变异验证：把某处改坏 → 哪条用例变红（写清"哪处、哪条"）。
 - `check:version` / `check:package` 的实际输出（文件数、unpacked 大小）。
 - 真宿主验证（若有）：一句话结论 + 会话 id 前 8 位。
