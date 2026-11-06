@@ -227,9 +227,15 @@ That line exists because "not finished" used to look like a failure, and a retry
 
 ## Unattended sessions and approvals
 
-A session this bridge created has nobody in front of the GUI. When the model asks to escalate its sandbox (or any action needs approval), the Host parks that call until someone answers — and there is no one; one measured case hung for ten minutes.
+A session this bridge created has nobody in front of the GUI. When the model asks to escalate its sandbox (`sandbox_permissions`), the Host parks that call until someone answers — and there is no one. Two measured cases: `approval/asked` was written, no `approval/decided` ever followed, and the caller timed out on its 120-second budget both times.
 
-Set `approvals: { mode: "deny" }` in the plugin config and the bridge answers for the sessions it created: it returns `'rejected'` immediately, so the model learns "no" and can finish the turn with a note about what it could not do. It only ever removes privilege, and it never touches a session a human is watching — ownership covers only sessions this process created. Rejections are counted in `/status` under `calls.approvals.denied`.
+Set `approvals: { mode: "deny" }` and the bridge installs a `tools/pre-execute` gate that refuses **in-place escalation** from the sessions it created. A call carrying `sandbox_permissions` is denied before dispatch, and the model is told:
+
+`approvals.mode=deny refused a sandbox escalation to "danger-full-access" for tool "pwsh"; the call was not executed.`
+
+It only ever removes privilege: calls that do not escalate are untouched, and sessions this process did not create — including everything a human is watching — are passed straight through to their own answerer. Rejections are counted in `/status` under `calls.approvals.denied`.
+
+> **Why not `ctx.on("approval/request")`**: the approval service dispatches through `scopeTarget(req.agent, req.agent)`, which only reaches answerers inside that agent's own composition. Measured on a live escalation: listeners registered on this plugin's context *and* on the root context were never called (the GUI panel stayed waiting), while `tools/pre-execute` is a global waterfall that reaches every agent.
 
 The default is `off`, which leaves the Host's own fail-closed behaviour in place. Handing the decision to the dispatching agent (`delegate`) is designed in the plan document but not implemented.
 

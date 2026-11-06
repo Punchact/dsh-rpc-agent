@@ -391,14 +391,18 @@ JSON-RPC 标准码之外，本插件用 `-3200x` 段表达业务语义：
 
 其余键：`enabled`、`tokenFile`（自定义 token 路径）、`path`（默认 `/dsh-rpc`）、`logRequests`。
 
-### 无人值守会话撞上审批墙（`approvals.mode`）
+### 无人值守会话撞上沙箱升权（`approvals.mode`）
 
-桥创建的会话没有人坐在 GUI 前面。当模型想升权（`sandbox_permissions`）或触发任何需要审批的动作时，宿主会把这次调用挂起等人回答——**等多久取决于有没有应答者**，而桥创建的子会话没有。现场实测过一次挂 10 分钟。
+桥创建的会话没有人坐在 GUI 前面。模型一旦带上 `sandbox_permissions` 请求升权，宿主就把这次调用挂起等人回答——**等多久取决于有没有应答者**，而桥创建的子会话没有。现场实测过两次：`approval/asked` 之后一直没有 `approval/decided`，调用方每次都在 120 秒预算上超时。
 
-- `off`（默认）：桥不注册任何应答者，保持宿主原本的 fail-closed 行为。
-- `deny`：桥只为自己创建的会话作答，一律回 `'rejected'`——模型立刻知道"不行"，可以在这一轮里把没做完的事写进报告，而不是卡住。它**只收紧权限，不放宽**；人在 GUI 里看着的会话不受影响（所有权只覆盖本进程创建的会话），被拒次数记在 `/status` 的 `calls.approvals.denied`。
+- `off`（默认）：桥不挂任何 gate，保持宿主原本的 fail-closed 行为。
+- `deny`：桥在 `tools/pre-execute` 上挂一个前置 gate，**只拒绝"就地升权"**。本桥创建的会话里，带 `sandbox_permissions` 的调用在派发前就被拒，模型立刻收到：
+  `approvals.mode=deny refused a sandbox escalation to "danger-full-access" for tool "pwsh"; the call was not executed.`
+  它**只收紧权限、不放宽**：不升权的调用完全不受影响，不是本进程创建的会话（包括人在 GUI 里看着的那些）一律放行给它们自己的应答者。被拒次数记在 `/status` 的 `calls.approvals.denied`。
 
-超过一轮之后还会用到？把 `mode` 改成 `deny` 是当前唯一可用的无人值守解法；"把批准权交给派发方 agent"（`delegate`）在设计文档里，尚未实现。
+> **为什么不用 `ctx.on("approval/request")`**：审批服务经 `scopeTarget(req.agent, req.agent)` 派发，只会走到"该 agent 自己组合里"的应答者。实测在插件上下文和 root 上下文上各注册一次，真实升权时监听器**一次都没被调用**（GUI 面板还在等），而 `tools/pre-execute` 是全局 waterfall，所有 agent 都覆盖得到。
+
+"把批准权交给派发方 agent"（`delegate`）在设计文档里，尚未实现。
 
 环境变量 `DSH_RPC_TOKEN` 可覆盖 token（优先级高于文件），适合 CI 或不想落盘的场景。
 

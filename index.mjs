@@ -10,7 +10,7 @@
 //  * Fail loud on a bad config, stay inert (but loaded) when disabled.
 
 import { endpointPath, loadOrCreateToken, tokenPath, writeEndpoint } from "./lib/auth.mjs";
-import { createApprovalResponder } from "./lib/approvals.mjs";
+import { createApprovalGate } from "./lib/approvals.mjs";
 import { MAX_WAIT_SLICE_MS, MIN_WAIT_SLICE_MS, resolveConfig } from "./lib/config.mjs";
 import { buildDispatcher, registerRoutes } from "./lib/http.mjs";
 import { createMethods } from "./lib/methods.mjs";
@@ -71,21 +71,29 @@ export function apply(ctx, input = {}) {
     stats,
   });
 
-  // Answer approvals for our own sessions (lib/approvals.mjs). Off by default:
-  // the Host already fails closed with nobody answering, and taking a decision
-  // away from a human watching the GUI is not a safe default.
-  const answerApproval = createApprovalResponder({
+  // Refuse in-place escalations from our own sessions (lib/approvals.mjs). Off by
+  // default: the Host already fails closed with nobody answering, and taking a
+  // decision away from a human watching the GUI is not a safe default.
+  //
+  // The seam is `tools/pre-execute`, not `approval/request`: the approval service
+  // dispatches through `scopeTarget(req.agent, req.agent)`, which only reaches
+  // answerers inside the agent's own composition. Measured on a live session — a
+  // listener on this context (and on the root context) was never called while the
+  // GUI kept the dialog open. The pre-execute waterfall is global, so it can.
+  const escalateOrPass = createApprovalGate({
     mode: config.approvals.mode,
     isOwned: isOwnedSession,
     onDeny: () => stats.recordApproval("denied"),
     log,
   });
-  if (answerApproval) {
+  if (escalateOrPass) {
     if (typeof ctx.on === "function") {
-      ctx.on("approval/request", answerApproval);
-      log.info?.("[dsh-rpc] approvals.mode=deny: answering for sessions this bridge created");
+      ctx.on("tools/pre-execute", escalateOrPass, { prepend: true });
+      log.info?.(
+        "[dsh-rpc] approvals.mode=deny: refusing sandbox escalations from sessions this bridge created",
+      );
     } else {
-      log.warn?.("[dsh-rpc] approvals.mode=deny needs ctx.on: the approval answerer is not registered");
+      log.warn?.("[dsh-rpc] approvals.mode=deny needs ctx.on: the escalation gate is not registered");
     }
   }
 

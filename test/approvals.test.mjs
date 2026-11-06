@@ -1,9 +1,9 @@
-// The approval answerer and the ownership set that scopes it.
+// The escalation gate and the ownership set that scopes it.
 //
-// These tests are the whole point of extracting both modules: the rule "answer
-// only for sessions this bridge created, and only when the operator asked for
-// it" has to be checkable without a live Harness, an approval service, or a
-// human in the GUI.
+// These tests are the whole point of extracting both modules: the rule "refuse
+// in-place escalation only for sessions this bridge created, and only when the
+// operator asked for it" has to be checkable without a live Harness, an approval
+// service, or a human in the GUI.
 
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
@@ -13,7 +13,7 @@ import test from "node:test";
 
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), "dsh-rpc-approvals-"));
 
-import { APPROVAL_MODES, createApprovalResponder } from "../lib/approvals.mjs";
+import { APPROVAL_MODES, createApprovalGate, escalationOf } from "../lib/approvals.mjs";
 import { ConfigError, resolveConfig } from "../lib/config.mjs";
 import { createMethods } from "../lib/methods.mjs";
 import {
@@ -25,19 +25,21 @@ import {
 } from "../lib/owned.mjs";
 import { createStats } from "../lib/stats.mjs";
 
-const request = (sessionId, extra = {}) => ({
+const exec = (sessionId, args = {}, extra = {}) => ({
   agent: { session: { id: sessionId } },
-  toolName: "bash",
+  name: "bash",
   callId: "call-1",
-  reason: "needs 'danger-full-access' for this one command",
+  arguments: args,
   ...extra,
 });
 
-const delegateTo = (outcome) => {
+const allow = (sessionId, extra = {}) => exec(sessionId, {}, extra);
+
+const delegateTo = (decision) => {
   let calls = 0;
   const next = () => {
     calls += 1;
-    return Promise.resolve(outcome);
+    return Promise.resolve(decision);
   };
   next.calls = () => calls;
   return next;
@@ -67,63 +69,98 @@ test("the described config reports the mode without inventing others", () => {
   assert.deepEqual(resolveConfig({}).approvals, { mode: APPROVAL_MODES[0] });
 });
 
-// ------------------------------------------------------------- responder ----
+// ------------------------------------------------------------ escalation ----
 
-test("mode off installs no listener at all", () => {
-  assert.equal(createApprovalResponder({ mode: "off", isOwned: () => true }), null);
-  assert.equal(createApprovalResponder({ isOwned: () => true }), null);
+test("only a string sandbox_permissions counts as an escalation", () => {
+  assert.equal(escalationOf({ sandbox_permissions: "danger-full-access" }), "danger-full-access");
+  assert.equal(escalationOf({ sandbox_permissions: "  workspace-write  " }), "workspace-write");
+  assert.equal(escalationOf({ sandbox_permissions: "" }), "");
+  assert.equal(escalationOf({ sandbox_permissions: 1 }), "", "a number is not a mode");
+  assert.equal(escalationOf({}), "");
+  assert.equal(escalationOf(undefined), "");
 });
 
-test("a bridge-owned session is answered with a rejection, not a hang", async () => {
+// ------------------------------------------------------------------ gate ----
+
+test("mode off installs no gate at all", () => {
+  assert.equal(createApprovalGate({ mode: "off", isOwned: () => true }), null);
+  assert.equal(createApprovalGate({ isOwned: () => true }), null);
+});
+
+test("an escalation from a bridge-owned session is refused before it becomes a prompt", async () => {
   const denied = [];
   const lines = [];
-  const respond = createApprovalResponder({
+  const gate = createApprovalGate({
     mode: "deny",
     isOwned: (id) => id === "session-owned",
     onDeny: (decision) => denied.push(decision),
     log: { info: (line) => lines.push(line) },
   });
 
-  const next = delegateTo("allowed-once");
-  const outcome = await respond(request("session-owned"), next);
+  const next = delegateTo({ kind: "allow" });
+  const decision = await gate(exec("session-owned", { sandbox_permissions: "danger-full-access" }), next);
 
-  assert.equal(outcome, "rejected");
-  assert.equal(next.calls(), 0, "claiming the request means the next answerer never runs");
-  assert.deepEqual(denied, [{ sessionId: "session-owned", toolName: "bash", callId: "call-1" }]);
+  assert.equal(decision.kind, "deny");
+  assert.match(decision.reason, /danger-full-access/);
+  assert.match(decision.reason, /has no human to answer an approval prompt/);
+  assert.equal(decision.info.name, "DshRpcApprovalDenied");
+  assert.equal(decision.info.code, "APPROVAL_DENIED_BY_BRIDGE");
+  assert.equal(next.calls(), 0, "refusing the call means the tool body never runs");
+  assert.deepEqual(denied, [
+    { sessionId: "session-owned", toolName: "bash", callId: "call-1", escalation: "danger-full-access" },
+  ]);
   assert.equal(lines.length, 1);
-  assert.match(lines[0], /denied an approval for bash in session-owned/);
+  assert.match(lines[0], /refused a sandbox escalation to danger-full-access for bash in session-owned/);
+});
+
+test("an ordinary call from a bridge-owned session runs untouched", async () => {
+  const gate = createApprovalGate({
+    mode: "deny",
+    isOwned: () => true,
+    onDeny: () => assert.fail("nothing was escalated, so nothing may be counted"),
+  });
+  const next = delegateTo({ kind: "allow" });
+  assert.deepEqual(await gate(allow("session-owned"), next), { kind: "allow" });
+  assert.equal(next.calls(), 1);
 });
 
 test("a session this bridge did not create keeps its own answerer", async () => {
-  const respond = createApprovalResponder({
+  const gate = createApprovalGate({
     mode: "deny",
     isOwned: (id) => id === "session-owned",
     onDeny: () => assert.fail("must not count a denial it never made"),
   });
-
-  const next = delegateTo("allowed-once");
-  assert.equal(await respond(request("session-human"), next), "allowed-once");
+  const next = delegateTo({ kind: "allow" });
+  assert.deepEqual(await gate(exec("session-human", { sandbox_permissions: "danger-full-access" }), next), {
+    kind: "allow",
+  });
   assert.equal(next.calls(), 1);
 });
 
-test("an unreadable request is delegated instead of guessed at", async () => {
-  const respond = createApprovalResponder({ mode: "deny", isOwned: () => true });
-  const next = delegateTo("rejected");
+test("an unreadable call is delegated instead of guessed at", async () => {
+  const gate = createApprovalGate({ mode: "deny", isOwned: () => true });
+  const next = delegateTo({ kind: "allow" });
   // No agent, no session id: ownership cannot be established, so the safe
   // direction is silence.
-  assert.equal(await respond({ toolName: "bash" }, next), "rejected");
+  assert.deepEqual(await gate({ name: "bash", arguments: { sandbox_permissions: "danger-full-access" } }, next), {
+    kind: "allow",
+  });
   assert.equal(next.calls(), 1);
 });
 
 test("accounting cannot change the answer", async () => {
-  const respond = createApprovalResponder({
+  const gate = createApprovalGate({
     mode: "deny",
     isOwned: () => true,
     onDeny: () => {
       throw new Error("counter exploded");
     },
   });
-  assert.equal(await respond(request("session-owned"), delegateTo("allowed-once")), "rejected");
+  const decision = await gate(
+    exec("session-owned", { sandbox_permissions: "danger-full-access" }),
+    delegateTo({ kind: "allow" }),
+  );
+  assert.equal(decision.kind, "deny");
 });
 
 // ------------------------------------------------------------- ownership ----
