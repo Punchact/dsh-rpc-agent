@@ -4,7 +4,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@punchact/dsh-rpc-agent)](https://www.npmjs.com/package/@punchact/dsh-rpc-agent)
 [![npm downloads](https://img.shields.io/npm/dm/@punchact/dsh-rpc-agent)](https://www.npmjs.com/package/@punchact/dsh-rpc-agent)
-[![install size](https://packagephobia.com/badge?p=@punchact/dsh-rpc-agent)](https://packagephobia.com/result?p=@punchact/dsh-rpc-agent)
+[![unpacked size](https://img.shields.io/npm/unpacked-size/@punchact/dsh-rpc-agent)](https://www.npmjs.com/package/@punchact/dsh-rpc-agent?activeTab=code)
 [![node](https://img.shields.io/node/v/@punchact/dsh-rpc-agent)](https://nodejs.org/)
 [![license](https://img.shields.io/npm/l/@punchact/dsh-rpc-agent)](./LICENSE)
 
