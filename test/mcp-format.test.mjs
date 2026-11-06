@@ -283,3 +283,30 @@ test("a runaway tool result is capped, and says by how much", () => {
   assert.ok(text.length < 2600, "one huge result must not crowd out the meta and next lines");
   assert.match(text, /truncated 3000 of 5000 chars/);
 });
+
+
+test("a turn waiting for an approval hands the caller the approval, not a timeout", () => {
+  // The whole point of `delegate` is that the caller answers while the turn is
+  // stopped on the question. If this rendered as a timeout the caller would be
+  // told to wait for something that cannot finish until it answers.
+  const result = formatToolResult({
+    sessionId: "session-7",
+    turn: 3,
+    status: "waiting-approval",
+    timedOut: false,
+    pendingApproval: {
+      approvalId: "apv-9d0c",
+      sessionId: "session-7",
+      toolName: "bash",
+      escalation: "danger-full-access",
+      argv: "Set-Content -Path C:/Users/Andy/proof.txt -Value probe",
+      expiresAt: 1_800_000,
+    },
+  });
+  assert.equal(result.isError, false);
+  const text = textOf(result);
+  assert.match(text, /^session session-7\n/);
+  assert.match(text, /approval: apv-9d0c asks to widen this session to danger-full-access for bash/);
+  assert.match(text, /command: Set-Content -Path C:\/Users\/Andy\/proof\.txt/);
+  assert.match(text, /next: answer it with dsh_approvals_resolve\(/);
+});

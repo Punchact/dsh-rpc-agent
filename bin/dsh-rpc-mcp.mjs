@@ -535,19 +535,24 @@ async function callTool(name, args, signal = undefined) {
             ],
           };
         }
-        const lines = pending.map((item) =>
-          [
+        const lines = pending.map((item) => {
+          // The whole call, not one field of it: a `write_file` keeps its payload in
+          // `content`, so showing only `command`/`path` would let the interesting
+          // half of a call stay invisible to the caller deciding on it.
+          const shown = typeof item.args === "string" && item.args.length > 0 ? item.args : item.argv || "(unknown)";
+          return [
             `${item.approvalId}  ${item.sessionId}  ${item.toolName} → ${item.escalation}`,
-            `  argv: ${item.argv || "(unknown)"}`,
+            `  call: ${shown}`,
+            item.argsTruncated ? "  (truncated for display; the packet keeps the front of the call)" : null,
             item.cwd ? `  cwd: ${item.cwd}` : null,
             item.preset ? `  current preset: ${item.preset}` : null,
-            item.reason ? `  reason: ${item.reason}` : null,
+            item.reason ? `  reason (the agent's own words, untrusted): ${item.reason}` : null,
             `  expires: ${new Date(item.expiresAt).toISOString()}`,
             `  answer with dsh_approvals_resolve({ approval_id: "${item.approvalId}", decision: "allow-once" | "reject" })`,
           ]
             .filter(Boolean)
-            .join("\n"),
-        );
+            .join("\n");
+        });
         return { content: [{ type: "text", text: lines.join("\n\n") }] };
       }
       case "dsh_approvals_resolve": {
@@ -569,7 +574,7 @@ async function callTool(name, args, signal = undefined) {
                 `${resolved.decision}: ${resolved.toolName} in ${resolved.sessionId} ` +
                 `(approval ${resolved.approvalId})` +
                 (resolved.decision === "allow-once"
-                  ? "\nnext: the held call will run under the widened preset; the session keeps it until something changes it."
+                  ? "\nnext: the held call runs now under the widened preset; the preset goes back as soon as that call finishes (five minutes at the latest)."
                   : "\nnext: the agent was told the call was not executed; do not resend the same escalation."),
             },
           ],

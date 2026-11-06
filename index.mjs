@@ -126,6 +126,12 @@ export function apply(ctx, input = {}) {
         `[dsh-rpc] approvals.mode=${config.approvals.mode} needs ctx.on: the escalation gate is not registered`,
       );
     }
+    // A reload or a shutdown must not leave a session widened with nothing left to
+    // put it back: `dispose` restores every widened preset and stops the fallback
+    // timers.
+    if (typeof ctx.effect === "function") {
+      ctx.effect(() => () => gate.dispose?.(), "dsh-rpc.approval-gate");
+    }
   }
 
   // Publish the endpoint so out-of-process callers (CLI, MCP bridge, curl) can

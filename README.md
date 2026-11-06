@@ -411,7 +411,10 @@ JSON-RPC 标准码之外，本插件用 `-3200x` 段表达业务语义：
   | `dsh.approvals.pending({ sessionId?, waitMs? })` | 列出待批请求；`waitMs` 让它变成最多 120 秒的长轮询，一个调用就能等到 |
   | `dsh.approvals.resolve({ approvalId, decision: "allow-once"\|"reject", note? })` | 回答某一条 |
 
-  决策包字段：`approvalId`（随机 UUID，不可枚举）、`sessionId`、`toolName`、`callId`、`escalation`、`argv`（命令或路径的摘要）、`args`（**整包参数**的脱敏 JSON，凭证形状的值被打码，上限 4000 字）、`argsTruncated`、`cwd`、`preset`（会话**当前**的预设，读不到时为 null）、`reason`（子代理自述，已截断到 500 字）、`untrusted: true`（提醒你 `reason` 是它自己说的）、`createdAt`、`expiresAt`。MCP 侧对应 `dsh_approvals_pending` / `dsh_approvals_resolve`。
+  - **轮次停在待批时，调用会立刻返回**：`delegate` 模式下，如果这一轮是因为等你回答才停住的，`dsh_ask`/`dsh_wait` 不会一直阻塞到 `deadlineMs` —— 它们返回 `status: "waiting-approval"` 与 `pendingApproval`（以及指向 `dsh_approvals_resolve` 的 `next`）。否则调用方就卡在"回答自己那个问题"的循环里，等到超时也拿不到问题本身。
+- **放宽只在被批准的那次调用期间成立**：下行应答者抛错、结果处理抛错、宿主取消，三种路径都会把预设恢复原状（`dispose()` 在插件卸载时兜底）；同一会话在窗口期内不接受第二个升权，其它不升权的调用会被**扣留**到窗口结束，避免搭便车。`approvals.mode` 不是 `off` 时，`dsh.sessions.configure` 不能把会话直接改成 `danger-full-access`，也不能改不属于本桥的会话。
+
+决策包字段：`approvalId`（随机 UUID，不可枚举）、`sessionId`、`toolName`、`callId`、`escalation`、`argv`（命令或路径的摘要）、`args`（**整包参数**的脱敏 JSON，凭证形状的值被打码，上限 4000 字）、`argsTruncated`、`cwd`、`preset`（会话**当前**的预设，读不到时为 null）、`reason`（子代理自述，已截断到 500 字）、`untrusted: true`（提醒你 `reason` 是它自己说的）、`createdAt`、`expiresAt`。MCP 侧对应 `dsh_approvals_pending` / `dsh_approvals_resolve`。
 
   语义要点：**没人回答就是拒绝**（`deadlineMs` 到期按拒绝处理，绝不自动放行）；`allow-once` 通过临时切换该会话的 permission preset 生效——宿主没有"允许一次"的接口，桥手上只有会话级预设这一个杠杆，所以它**只在被批准的那次调用期间放宽**，调用结束（`tools/post-execute`）立刻恢复原预设，另有 5 分钟兜底定时器防止工具不上报时一直放宽；按会话计次，**每会话最多 3 次**，且同一会话同时只允许一个升权调用在跑（同 tick 的并发请求只会产生一条待批记录），之后一律拒绝；可请求的目标只有 `workspace-write` 与 `danger-full-access` 两档，其余不询问直接拒。放行与拒绝分别记在 `/status` 的 `calls.approvals.allowed` / `calls.approvals.denied`。挂起中被取消的调用会立刻收回它的待批请求（按拒绝处理），不会留下事后可批准的悬空条目。
 

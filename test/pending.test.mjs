@@ -21,7 +21,15 @@ process.env.DSH_HOME = mkdtempSync(join(tmpdir(), "dsh-rpc-pending-"));
 const SUITE_KEEPALIVE = setInterval(() => {}, 60_000);
 after(() => clearInterval(SUITE_KEEPALIVE));
 
-import { createApprovalGate } from "../lib/approvals.mjs";
+import { createApprovalGate, describeArgs, MAX_ARGV_CHARS } from "../lib/approvals.mjs";
+
+// Every gate in this file needs a readable current preset: without one the gate
+// refuses up front (it cannot promise to put the preset back), which most of the
+// cases below are not about. The default reader keeps them focused.
+function makeGate(options = {}) {
+  return createApprovalGate({ mode: "delegate", isOwned: () => true, currentPreset: () => "workspace-write", ...options });
+}
+
 import { resolveConfig } from "../lib/config.mjs";
 import { createMethods } from "../lib/methods.mjs";
 import { createPendingStore, MAX_PENDING } from "../lib/pending.mjs";
@@ -99,7 +107,7 @@ test("the store keeps a bounded number of pending requests", async () => {
 });
 
 test("delegate without a store or a preset applier degrades to deny", () => {
-  const gate = createApprovalGate({ mode: "delegate", isOwned: () => true });
+  const gate = makeGate({ mode: "delegate", isOwned: () => true });
   assert.equal(typeof gate.pre, "function");
   return Promise.resolve(gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }))).then((decision) => {
     assert.equal(decision.kind, "deny");
@@ -110,7 +118,7 @@ test("an allowed escalation widens the preset and lets the call run", async () =
   const store = createPendingStore({ deadlineMs: 5_000 });
   const widened = [];
   const allowed = [];
-  const gate = createApprovalGate({
+  const gate = makeGate({
     mode: "delegate",
     isOwned: () => true,
     store,
@@ -140,7 +148,7 @@ test("an allowed escalation widens the preset and lets the call run", async () =
 
 test("a rejected escalation never reaches the tool", async () => {
   const store = createPendingStore({ deadlineMs: 5_000 });
-  const gate = createApprovalGate({ mode: "delegate", isOwned: () => true, store, applyPreset: async () => {} });
+  const gate = makeGate({ mode: "delegate", isOwned: () => true, store, applyPreset: async () => {} });
 
   let passed = 0;
   const pending = gate.pre(escalation(), () => {
@@ -158,7 +166,7 @@ test("a rejected escalation never reaches the tool", async () => {
 
 test("an expired escalation is refused with its own reason", async () => {
   const store = createPendingStore({ deadlineMs: 10 });
-  const gate = createApprovalGate({ mode: "delegate", isOwned: () => true, store, applyPreset: async () => {} });
+  const gate = makeGate({ mode: "delegate", isOwned: () => true, store, applyPreset: async () => {} });
   const decision = await gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }));
   assert.equal(decision.kind, "deny");
   assert.match(decision.reason, /did not answer within the deadline/);
@@ -166,7 +174,7 @@ test("an expired escalation is refused with its own reason", async () => {
 
 test("an escalation outside the documented ladder is refused without asking", async () => {
   const store = createPendingStore({ deadlineMs: 5_000 });
-  const gate = createApprovalGate({ mode: "delegate", isOwned: () => true, store, applyPreset: async () => {} });
+  const gate = makeGate({ mode: "delegate", isOwned: () => true, store, applyPreset: async () => {} });
   const decision = await gate.pre(escalation("root"), () => Promise.resolve({ kind: "allow" }));
   assert.equal(decision.kind, "deny");
   assert.match(decision.reason, /Only workspace-write and danger-full-access may be requested/);
@@ -175,7 +183,7 @@ test("an escalation outside the documented ladder is refused without asking", as
 
 test("a session stops being asked after its allowance budget is spent", async () => {
   const store = createPendingStore({ deadlineMs: 5_000 });
-  const gate = createApprovalGate({ mode: "delegate", isOwned: () => true, store, applyPreset: async () => {} });
+  const gate = makeGate({ mode: "delegate", isOwned: () => true, store, applyPreset: async () => {} });
 
   const runOnce = async () => {
     const pending = gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }));
@@ -196,7 +204,7 @@ test("a session stops being asked after its allowance budget is spent", async ()
 
 test("a session this bridge did not create keeps its own answerer", async () => {
   const store = createPendingStore({ deadlineMs: 5_000 });
-  const gate = createApprovalGate({ mode: "delegate", isOwned: () => false, store, applyPreset: async () => {} });
+  const gate = makeGate({ mode: "delegate", isOwned: () => false, store, applyPreset: async () => {} });
   const decision = await gate.pre(escalation(), () => Promise.resolve({ kind: "allowed-once" }));
   assert.deepEqual(decision, { kind: "allowed-once" });
   assert.equal(store.size(), 0);
@@ -267,7 +275,7 @@ test("a cancelled call takes its question with it", async () => {
 test("the gate refuses as soon as the held call is cancelled", async () => {
   const store = createPendingStore({ deadlineMs: 30_000 });
   const controller = new AbortController();
-  const gate = createApprovalGate({
+  const gate = makeGate({
     mode: "delegate",
     isOwned: () => true,
     store,
@@ -285,7 +293,7 @@ test("the gate refuses as soon as the held call is cancelled", async () => {
 
 test("the decision packet carries the session's live preset", async () => {
   const store = createPendingStore({ deadlineMs: 5_000 });
-  const gate = createApprovalGate({
+  const gate = makeGate({
     mode: "delegate",
     isOwned: () => true,
     store,
@@ -300,23 +308,26 @@ test("the decision packet carries the session's live preset", async () => {
   assert.equal((await held).kind, "deny");
 });
 
-test("a preset reader that throws leaves the field null instead of failing the call", async () => {
+test("a preset reader that throws refuses the call instead of guessing", async () => {
   const store = createPendingStore({ deadlineMs: 5_000 });
-  const gate = createApprovalGate({
+  const widened = [];
+  const gate = makeGate({
     mode: "delegate",
     isOwned: () => true,
     store,
-    applyPreset: async () => "danger-full-access",
+    applyPreset: async (sessionId, name) => {
+      widened.push([sessionId, name]);
+    },
     currentPreset: () => {
       throw new Error("no permissionPresets service");
     },
   });
-  const held = gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }));
-  await tick();
-  const [packet] = store.list();
-  assert.equal(packet.preset, null);
-  store.resolve(packet.approvalId, "reject");
-  assert.equal((await held).kind, "deny");
+  const outcome = await gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }));
+  assert.equal(outcome.kind, "deny");
+  // Nothing was asked and nothing was widened: without the current preset the
+  // bridge cannot promise to put it back, so it must not start the transaction.
+  assert.equal(store.size(), 0);
+  assert.deepEqual(widened, []);
 });
 
 // ------------------------------------------------- one call, not a session ----
@@ -324,7 +335,7 @@ test("a preset reader that throws leaves the field null instead of failing the c
 const harness = (overrides = {}) => {
   const store = createPendingStore({ deadlineMs: 5_000 });
   const widened = [];
-  const gate = createApprovalGate({
+  const gate = makeGate({
     mode: "delegate",
     isOwned: () => true,
     store,
@@ -438,4 +449,116 @@ test("waitMs is validated instead of quietly clamped", async () => {
   }
   const ok = await methods.approvalsPending({ waitMs: 0 });
   assert.equal(ok.timedOut, true);
+});
+
+test("a downstream listener that throws still puts the preset back", async () => {
+  const store = createPendingStore({ deadlineMs: 5_000 });
+  const applied = [];
+  const gate = makeGate({
+    mode: "delegate",
+    isOwned: () => true,
+    store,
+    applyPreset: async (sessionId, preset) => {
+      applied.push(preset);
+    },
+    currentPreset: () => "workspace-write",
+  });
+
+  const held = gate.pre(escalation(), () => Promise.reject(new Error("a later listener exploded")));
+  await tick();
+  store.resolve(store.list()[0].approvalId, "allow-once");
+
+  await assert.rejects(held, /a later listener exploded/);
+  assert.deepEqual(applied, ["danger-full-access", "workspace-write"], "the preset went back before the error escaped");
+  assert.deepEqual(gate.widenedSessions(), [], "the session can escalate again instead of being stuck");
+});
+
+test("a result handler that throws cannot keep the session wide", async () => {
+  const store = createPendingStore({ deadlineMs: 5_000 });
+  const applied = [];
+  const gate = makeGate({
+    mode: "delegate",
+    isOwned: () => true,
+    store,
+    applyPreset: async (sessionId, preset) => {
+      applied.push(preset);
+    },
+    currentPreset: () => "workspace-write",
+  });
+
+  const held = gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }));
+  await tick();
+  store.resolve(store.list()[0].approvalId, "allow-once");
+  assert.equal((await held).kind, "allow");
+  assert.deepEqual(gate.widenedSessions(), ["session-mine"], "the call is running wide");
+
+  await assert.rejects(gate.post(escalation(), () => Promise.reject(new Error("post exploded"))), /post exploded/);
+  assert.deepEqual(applied, ["danger-full-access", "workspace-write"], "restoring ran even though next() threw");
+  assert.deepEqual(gate.widenedSessions(), []);
+});
+
+test("a call without a call id is refused before anybody is asked", async () => {
+  const store = createPendingStore({ deadlineMs: 5_000 });
+  const applied = [];
+  const gate = makeGate({
+    mode: "delegate",
+    isOwned: () => true,
+    store,
+    applyPreset: async (sessionId, preset) => {
+      applied.push(preset);
+    },
+    currentPreset: () => "workspace-write",
+  });
+
+  const decision = await gate.pre({ ...escalation(), callId: "" }, () => Promise.resolve({ kind: "allow" }));
+  assert.equal(decision.kind, "deny");
+  assert.match(decision.reason, /no call id/);
+  assert.deepEqual(applied, [], "nothing was widened, so nothing had to be put back");
+  assert.equal(store.size(), 0, "no approval was ever offered");
+});
+
+
+test("a call that asks for nothing is held while the session is widened", async () => {
+  // While an approved call has the session widened, every other call in that
+  // session would inherit the escalation it never asked for. The one running the
+  // approved command keeps its window; everybody else waits for it to end.
+  const store = createPendingStore({ deadlineMs: 5_000 });
+  const gate = makeGate({ store, applyPreset: async () => {} });
+  const held = gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }));
+  await tick();
+  const [packet] = store.list();
+
+  const plain = await gate.pre(
+    { agent: { session: { id: "session-mine" } }, name: "bash", callId: "call-2", arguments: { command: "echo hi" } },
+    () => Promise.resolve({ kind: "allow" }),
+  );
+  assert.equal(plain.kind, "deny");
+  assert.match(plain.reason, /temporarily widened/);
+
+  store.resolve(packet.approvalId, "allow-once");
+  assert.equal((await held).kind, "allow");
+});
+
+test("the gate stays silent when it cannot tell whose session it is", async () => {
+  // A missing ownership test is not a licence to answer for everybody: without a
+  // way to tell our sessions from a human's, silence is the only safe answer.
+  const store = createPendingStore({ deadlineMs: 5_000 });
+  const gate = createApprovalGate({ mode: "delegate", store, applyPreset: async () => {}, currentPreset: () => "workspace-write" });
+  const outcome = await gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }));
+  assert.equal(outcome.kind, "allow");
+  assert.equal(store.size(), 0);
+});
+
+test("the packet carries the whole call, redacted and bounded", () => {
+  const described = describeArgs({
+    command: "curl -H 'Authorization: Bearer SECRET123' https://example.test",
+    content: "x".repeat(5_000),
+    token: "abc",
+  });
+  assert.ok(!described.args.includes("SECRET123"), "the value-level scrub sees through a benign key");
+  assert.ok(!described.args.includes('"abc"'), "a sensitive key is masked whole");
+  assert.equal(described.truncated, true);
+  assert.ok(described.args.length <= MAX_ARGV_CHARS + 120, "args is bounded");
+  assert.ok(described.argv.length <= MAX_ARGV_CHARS + 120, "argv is bounded too, not a way around it");
+  assert.match(described.argv, /^curl /);
 });
