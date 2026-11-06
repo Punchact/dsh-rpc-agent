@@ -10,7 +10,7 @@
 //  * Fail loud on a bad config, stay inert (but loaded) when disabled.
 
 import { endpointPath, loadOrCreateToken, tokenPath, writeEndpoint } from "./lib/auth.mjs";
-import { resolveConfig } from "./lib/config.mjs";
+import { MAX_WAIT_SLICE_MS, MIN_WAIT_SLICE_MS, resolveConfig } from "./lib/config.mjs";
 import { buildDispatcher, registerRoutes } from "./lib/http.mjs";
 import { createMethods } from "./lib/methods.mjs";
 import { createStats } from "./lib/stats.mjs";
@@ -22,6 +22,16 @@ export const inject = ["webServer", "sessionController"];
 export function apply(ctx, input = {}) {
   const log = scopedLogger(ctx);
   const config = resolveConfig(input);
+
+  // A clamped slice is still safe, but silently ignoring a configured number is
+  // how a deployment ends up believing it waits four minutes when it waits two.
+  if (config.maxWaitSliceMsRequested !== undefined) {
+    log.warn?.(
+      `[dsh-rpc] maxWaitSliceMs ${config.maxWaitSliceMsRequested} is outside ` +
+        `${MIN_WAIT_SLICE_MS}..${MAX_WAIT_SLICE_MS}; using ${config.maxWaitSliceMs} ` +
+        "(one HTTP response cannot stay quiet for 300 s)",
+    );
+  }
 
   if (!config.enabled) {
     log.info?.("[dsh-rpc] loaded but disabled by config");

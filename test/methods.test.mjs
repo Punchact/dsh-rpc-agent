@@ -1281,5 +1281,20 @@ test("discover publishes the running config, so clients stop copying defaults", 
   assert.equal(info.plugin, "dsh-rpc-agent");
   assert.ok(info.config, "discover must carry the config the MCP layer reads");
   assert.equal(info.config.defaultTimeoutMs, 600_000);
-  assert.equal(info.config.maxWaitSliceMs, 240_000, "the slice ceiling is part of the contract");
+  assert.equal(info.config.maxWaitSliceMs, 120_000, "the slice default is part of the contract");
+});
+
+test("the wait slice default is two minutes and a stray value is clamped, not rejected", () => {
+  assert.equal(resolveConfig({}).maxWaitSliceMs, 120_000);
+  assert.equal(resolveConfig({}).maxWaitSliceMsRequested, undefined);
+
+  const tooBig = resolveConfig({ maxWaitSliceMs: 900_000 });
+  assert.equal(tooBig.maxWaitSliceMs, 240_000, "one response cannot wait longer than the ceiling");
+  assert.equal(tooBig.maxWaitSliceMsRequested, 900_000, "the operator can still see what was asked for");
+
+  const tooSmall = resolveConfig({ maxWaitSliceMs: 200 });
+  assert.equal(tooSmall.maxWaitSliceMs, 1_000, "a slice below one second is pointless");
+  assert.equal(tooSmall.maxWaitSliceMsRequested, 200);
+
+  assert.equal(resolveConfig({ maxWaitSliceMs: 90_000 }).maxWaitSliceMsRequested, undefined);
 });
