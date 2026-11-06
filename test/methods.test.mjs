@@ -1329,3 +1329,30 @@ test("a Host stream that never returns control cannot hold the answer past the s
   assert.equal(result.sliceMs, 1_000);
   assert.ok(elapsed < 3_000, `answered at the slice boundary, not when the Host felt like it (${elapsed} ms)`);
 });
+
+
+test("a finished call lets go of the caller's abort signal", async () => {
+  // Only a real AbortSignal is forwarded by the RPC layer, so the observation has
+  // to happen on the instance itself: shadow add/removeEventListener to see the
+  // subscription and its release.
+  const controller = new AbortController();
+  const signal = controller.signal;
+  const added = [];
+  const removed = [];
+  const realAdd = signal.addEventListener.bind(signal);
+  const realRemove = signal.removeEventListener.bind(signal);
+  signal.addEventListener = (type, listener, options) => {
+    if (type === "abort") added.push(listener);
+    return realAdd(type, listener, options);
+  };
+  signal.removeEventListener = (type, listener, options) => {
+    if (type === "abort") removed.push(listener);
+    return realRemove(type, listener, options);
+  };
+
+  const methods = build(fakeController({ script: happyScript }));
+  const result = await methods.ask({ sessionId: "session-test", text: "go" }, { signal });
+  assert.equal(result.status, "completed");
+  assert.equal(added.length, 1, "the run must subscribe to the caller's signal");
+  assert.ok(removed.includes(added[0]), "and let go of it when the call ends");
+});

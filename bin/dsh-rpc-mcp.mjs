@@ -13,6 +13,7 @@
 import { rpcCall, waitForTurn, WAIT_SLICE_MS } from "../lib/client.mjs";
 import { PLUGIN_VERSION } from "../lib/version.mjs";
 import { formatToolResult, formatToolError } from "../lib/mcp-format.mjs";
+import { createInflight } from "../lib/inflight.mjs";
 
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_INFO = { name: "dsh-rpc", version: PLUGIN_VERSION, title: "DeepSeek Harness bridge" };
@@ -207,8 +208,10 @@ const TOOLS = [
 let buffer = "";
 let pending = 0;
 // One controller per in-flight client request, so `notifications/cancelled` has
-// something to abort. Keyed by String(id): ids may be numbers or strings.
-const inflight = new Map();
+// something to abort. The registry remembers which controller it registered per
+// id: a client may reuse an id once its request finished, and a late completion
+// must not evict the controller of the request that took the id over.
+const inflight = createInflight();
 let closing = false;
 
 // Requests are answered concurrently, so end-of-input must not tear the process
@@ -298,10 +301,8 @@ async function handleLine(line) {
 
       case "notifications/cancelled": {
         const target = request.params?.requestId ?? request.params?.id ?? null;
-        const controller = target === null ? undefined : inflight.get(String(target));
-        if (controller) {
+        if (target !== null && inflight.cancel(target)) {
           log(`cancelled by the client: ${String(target)}`);
-          controller.abort();
         }
         return;
       }
@@ -319,12 +320,12 @@ async function handleLine(line) {
         const name = params.name;
         const args = params.arguments ?? {};
         const controller = new AbortController();
-        if (id !== null) inflight.set(String(id), controller);
+        if (id !== null) inflight.begin(id, controller);
         let outcome;
         try {
           outcome = await callTool(name, args, controller.signal);
         } finally {
-          if (id !== null) inflight.delete(String(id));
+          if (id !== null) inflight.settle(id, controller);
         }
         // A notification carries no id and must never be answered.
         if (!isNotification) reply(id, outcome);

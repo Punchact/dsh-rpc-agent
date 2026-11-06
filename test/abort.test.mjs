@@ -8,8 +8,14 @@
  *    tests cannot prove this, because it never emits `close`.
  * 2. The counters tell a timed-out turn apart from a client that left, which is
  *    the difference between "the bridge is slow" and "nobody is listening".
- * 3. `notifications/cancelled` reaches an in-flight `tools/call` in the stdio MCP
- *    server, and an unknown request id is a no-op rather than a crash.
+ * 3. `notifications/cancelled` with an unknown request id is a no-op rather than a
+ *    crash (stdio MCP server, real child process).
+ * 4. The in-flight registry behind that handler: a client may reuse an id once its
+ *    request finished, and a late completion must not evict the newer controller.
+ *
+ * What is *not* covered here: cancelling a known id while its `tools/call` is still
+ * running. That needs a live Harness behind the MCP server, so it is exercised by
+ * hand against a running bridge, not by this file.
  */
 
 import test from "node:test";
@@ -24,6 +30,7 @@ import { fileURLToPath } from "node:url";
 import { registerRoutes } from "../lib/http.mjs";
 import { resolveConfig } from "../lib/config.mjs";
 import { createStats } from "../lib/stats.mjs";
+import { createInflight } from "../lib/inflight.mjs";
 
 const TOKEN = "b".repeat(48);
 const REPO = fileURLToPath(new URL("..", import.meta.url));
@@ -242,5 +249,73 @@ test("notifications/cancelled is accepted, and an unknown id is a no-op", { time
         resolve();
       });
     });
+  }
+});
+
+
+// ------------------------------------------------------- audit findings ----
+
+test("a late completion cannot evict a newer request that reused the id", () => {
+  const inflight = createInflight();
+  const first = inflight.begin("7");
+  const second = inflight.begin("7");
+  assert.equal(inflight.size, 1);
+
+  // The older request finishing must not remove the newer controller.
+  assert.equal(inflight.settle(7, first.controller), false);
+  assert.equal(inflight.size, 1);
+  assert.equal(second.controller.signal.aborted, false);
+
+  // ...so a cancel for the id still reaches the request that owns it now.
+  assert.equal(inflight.cancel("7"), true);
+  assert.equal(second.controller.signal.aborted, true);
+  assert.equal(first.controller.signal.aborted, false);
+
+  // And the owner can still clean up after itself.
+  assert.equal(inflight.settle("7", second.controller), true);
+  assert.equal(inflight.size, 0);
+  assert.equal(inflight.cancel("7"), false);
+});
+
+test("a caller that hangs up is not counted as an error, even when the method throws", { timeout: 20_000 }, async () => {
+  let started = false;
+  const bridge = await serve(async () => {
+    started = true;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    throw new Error("boom after the caller left");
+  });
+  try {
+    const { req } = post(bridge.port, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "dsh.sessions.wait" }));
+    await waitFor(() => started, 5_000, "dispatch to start");
+    req.destroy();
+    await waitFor(() => bridge.stats.snapshot().outcomes.cancelledByClient === 1, 5_000, "the cancelled counter");
+    const snapshot = bridge.stats.snapshot();
+    assert.equal(snapshot.errors, 0, "the caller leaving is not the bridge failing");
+    assert.equal(snapshot.outcomes.cancelledByClient, 1);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("a batch stops dispatching once the caller has hung up", { timeout: 20_000 }, async () => {
+  let calls = 0;
+  const bridge = await serve(async () => {
+    calls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    return { ok: true };
+  });
+  try {
+    const body = JSON.stringify([
+      { jsonrpc: "2.0", id: 1, method: "dsh.ping" },
+      { jsonrpc: "2.0", id: 2, method: "dsh.ping" },
+      { jsonrpc: "2.0", id: 3, method: "dsh.ping" },
+    ]);
+    const { req } = post(bridge.port, body);
+    await waitFor(() => calls >= 1, 5_000, "the first batch member to start");
+    req.destroy();
+    await new Promise((resolve) => setTimeout(resolve, 1_400));
+    assert.equal(calls, 1, "the remaining members must not be dispatched to a closed socket");
+  } finally {
+    await bridge.close();
   }
 });
