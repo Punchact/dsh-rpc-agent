@@ -71,7 +71,7 @@ Repository and package name are both `dsh-rpc-agent`; the commands (`dsh-rpc`, `
 - **Unattended sessions cannot hang forever**: three `approvals.mode` settings; `delegate` hands the escalation decision to the caller.
 - **A caller that hangs up stops the call, not your work**: abort ≠ cancel; the turn keeps running in the GUI.
 - **The port follows the launcher**: `endpoint.json` plus `health --wait`, so no client hard-codes an address.
-- **Every promise is guarded by a test**: 182 unit cases, mutation checks, and a real-host integration test.
+- **Every promise is guarded by a test**: 183 unit cases, mutation checks, and a real-host integration test.
 
 ## Install and update
 
@@ -628,7 +628,7 @@ Everything the page shows comes from that read-only endpoint; it writes nothing.
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # ten suites at once, 182 cases; needs no Harness and no npm install
+npm test                       # ten suites at once, 183 cases; needs no Harness and no npm install
 node test/host.test.mjs        # 1 case: real-host integration (needs npm ci first)
 node test/e2e.mjs --cwd .      # 14 cases: end to end against a real Harness
 node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a real Harness
@@ -664,7 +664,7 @@ A few worth calling out:
 - **Edge** probes the protocol layer: batches, notifications, id shapes, auth headers, oversized bodies (a genuine 413, not a dropped connection), parameter-injection defences, timeout clamping, concurrent asks, `limit` semantics.
 - **Port drift** (manual): point `endpoint.json` at a dead port and run `dsh-rpc ping`; expect exit code 3 and a readable error mentioning `nothing is listening`, `pid` and `health --wait`.
 
-Last actual run: unit 182/182, host 1/1 (2026-11-06); end-to-end 14/14, edge 24/24 (2026-11-05).
+Last actual run: unit 183/183 (CI), host 1/1 (2026-11-06); locally the same commit gives 182 passes plus one case that the sandbox blocks (`spawn EPERM`); end-to-end 14/14, edge 24/24 (2026-11-05).
 
 ## License
 
