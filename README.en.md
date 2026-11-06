@@ -38,7 +38,7 @@ prints the current `origin`; the plugin also writes it to `endpoint.json`, which
 [Release handbook](./docs/release.md) · [Design notes](./docs/design.md)
 
 **Version**: the latest published version on npm is
-[`0.7.6`](https://www.npmjs.com/package/@punchact/dsh-rpc-agent) (`npm view @punchact/dsh-rpc-agent version`; the
+[`0.7.7`](https://www.npmjs.com/package/@punchact/dsh-rpc-agent) (`npm view @punchact/dsh-rpc-agent version`; the
 registry can lag a minute or two right after a publish). This file describes the **code in the repository**; the
 difference between the two is at the top of [CHANGELOG](./CHANGELOG.md).
 
@@ -196,7 +196,7 @@ can branch on the error code directly.
   "url": "http://127.0.0.1:3820/dsh-rpc",
   "origin": "http://127.0.0.1:3820",
   "path": "/dsh-rpc",
-  "version": "0.7.6",                        // the version the running plugin reports
+  "version": "0.7.7",                        // the version the running plugin reports
   "plugin": "dsh-rpc-agent",
   "pid": 12345,                              // the Host process that wrote this file
   "startedAt": "2026-11-05T01:05:58.000Z",   // when that process started
@@ -585,7 +585,7 @@ plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent" })
 ```
 
 For a non-default profile add `--profile <name>` (`desktop` on the desktop app). To pin a version, spell it out:
-`dsh plugin add @punchact/dsh-rpc-agent@0.7.6`; otherwise `latest` is used.
+`dsh plugin add @punchact/dsh-rpc-agent@0.7.7`; otherwise `latest` is used.
 
 Three things that bite on the npm route:
 
@@ -596,7 +596,7 @@ Three things that bite on the npm route:
    the profile's `pnpm-workspace.yaml` — pnpm sometimes appends this line itself; the shape is:
    ```yaml
    minimumReleaseAgeExclude:
-     - '@punchact/dsh-rpc-agent@0.4.1 || 0.4.4 || 0.5.3 || 0.7.6'
+     - '@punchact/dsh-rpc-agent@0.4.1 || 0.4.4 || 0.5.3 || 0.7.6 || 0.7.7'
    ```
 3. **To check which copy is running**: use `cordis_inspect_query` (`Config.listConfigs`, `input:
    {"entry":"include:dsh-rpc-bridge"}`) and read `packageDir` — `<profile>\node_modules\@punchact\dsh-rpc-agent` means
