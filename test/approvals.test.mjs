@@ -9,9 +9,14 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), "dsh-rpc-approvals-"));
+
+// Pending-approval timers are unref'd (a held approval must never keep the Host
+// alive), so an awaited expiry has nothing holding the loop open by itself.
+const SUITE_KEEPALIVE = setInterval(() => {}, 60_000);
+after(() => clearInterval(SUITE_KEEPALIVE));
 
 import { APPROVAL_MODES, createApprovalGate, escalationOf } from "../lib/approvals.mjs";
 import { ConfigError, resolveConfig } from "../lib/config.mjs";

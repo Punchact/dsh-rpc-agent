@@ -9,9 +9,17 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), "dsh-rpc-pending-"));
+
+// The store unrefs its timers on purpose: a pending approval must never keep the
+// Host process alive. The consequence is that an awaited expiry has nothing
+// holding the event loop open — on Node 22 the run then reports "Promise
+// resolution is still pending but the event loop has already resolved". The
+// suite keeps one handle for its own duration.
+const SUITE_KEEPALIVE = setInterval(() => {}, 60_000);
+after(() => clearInterval(SUITE_KEEPALIVE));
 
 import { createApprovalGate } from "../lib/approvals.mjs";
 import { resolveConfig } from "../lib/config.mjs";
