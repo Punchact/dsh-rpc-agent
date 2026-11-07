@@ -30,6 +30,22 @@ after(() => clearInterval(SUITE_KEEPALIVE));
 
 const ORIGIN = { getOrigin: () => "http://127.0.0.1:0" };
 
+async function waitFor(predicate, message) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (await predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail(message);
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 function bus() {
   const queue = [];
   const waiters = [];
@@ -57,6 +73,8 @@ function fakeController({
   script = [],
   scripts = null,
   historical = [],
+  distinctSessions = false,
+  timeline = null,
   hostCwd = "/host/resolved",
   models = null,
   stuckAfterSnapshot = false,
@@ -67,6 +85,7 @@ function fakeController({
   const subscribers = new Set();
   const prompts = [];
   const created = [];
+  const sessions = new Map();
   const cancelled = [];
   const inspected = [];
   const selections = [];
@@ -94,7 +113,9 @@ function fakeController({
 
     async create(request) {
       created.push(request);
-      return { sessionId: "session-test", agentPreset: request.agentPreset };
+      const sessionId = distinctSessions ? `session-${created.length}` : "session-test";
+      if (distinctSessions) sessions.set(sessionId, { running: false, blank: true, cwd: hostCwd });
+      return { sessionId, agentPreset: request.agentPreset };
     },
 
     async inspect(sessionId, signal) {
@@ -105,9 +126,11 @@ function fakeController({
 
     async list(_request, signal) {
       requireSignal(signal);
-      return {
-        items: [{ sessionId: "session-test", running: false, blank: false, updatedAt: 1, cwd: "/tmp" }],
-      };
+      if (!distinctSessions) {
+        return { items: [{ sessionId: "session-test", running: false, blank: false, updatedAt: 1, cwd: "/tmp" }] };
+      }
+      const items = [...sessions].map(([sessionId, status]) => ({ sessionId, ...status, updatedAt: 1 }));
+      return { items };
     },
 
     async modelCatalog() {
@@ -118,6 +141,7 @@ function fakeController({
     async selectModel(request) {
       // The Host declares `selectModel(request)` without a signal argument, so the
       // bridge must not invent one — this fake fails loudly if it ever does.
+      timeline?.push({ kind: "model", request });
       selections.push(request);
       const selected = { provider: request.provider, model: request.model };
       if (request.reasoningEffort !== undefined) selected.reasoningEffort = request.reasoningEffort;
@@ -131,10 +155,17 @@ function fakeController({
 
     prompt(request, signal) {
       requireSignal(signal);
+      timeline?.push({ kind: "prompt", request });
       prompts.push(request);
       // `scripts` gives each prompt its own turn sequence, which is what a queued
       // second run needs: it must observe its own turn, not replay the first one's.
-      const steps = scripts ? (scripts[prompts.length - 1] ?? []) : script;
+      const promptIndex = prompts.length - 1;
+      const steps = scripts ? (scripts[promptIndex] ?? []) : script;
+      const session = sessions.get(request.sessionId);
+      if (session) {
+        session.blank = false;
+        session.running = true;
+      }
       void (async () => {
         // Steering joins a turn that is already running, so the Host appends the
         // message without a fresh `turn/start`; model that explicitly.
@@ -192,7 +223,9 @@ function fakeController({
               },
             });
           } else if (step.kind === "end") {
+            if (step.gate) await step.gate;
             append("turn/end", { turn: step.turn, reason: step.reason ?? { kind: "completed" } });
+            if (session) session.running = false;
           } else if (step.kind === "rawEnd") {
             // A `turn/end` with no `reason` field at all: the union requires one,
             // but the union is a type, not a runtime guard.
@@ -274,13 +307,14 @@ function fakeWorkspaces({ items = [] } = {}) {
   };
 }
 
-function fakePermissions({ options = [], defaultPreset = null } = {}) {
+function fakePermissions({ options = [], defaultPreset = null, timeline = null } = {}) {
   return {
     applied: [],
     async catalog() {
       return { options, defaultOptions: {}, defaultPreset };
     },
     set(session, name) {
+      timeline?.push({ kind: "permission", sessionId: session?.id, name });
       this.applied.push({ sessionId: session?.id, name });
     },
   };
@@ -1214,6 +1248,140 @@ test("concurrent first asks for one sticky key create one session", async () => 
   assert.equal(controller.prompts.length, 2, "both prompts are still delivered to the shared session");
   const { lookupEntry, registryKey } = await import("../lib/registry.mjs");
   assert.equal((await lookupEntry(registryKey({ project: "sticky-single-flight" }))).asks, 2);
+});
+
+test("concurrent default-turn asks for one sticky key queue on one active session", async () => {
+  const { lookupEntry, registryKey } = await import("../lib/registry.mjs");
+  const firstTurnEnd = deferred();
+  const timeline = [];
+  const controller = fakeController({
+    distinctSessions: true,
+    timeline,
+    models: twoProviderModels,
+    scripts: [
+      [
+        { kind: "start", turn: 1 },
+        { kind: "text", turn: 1, text: "first answer" },
+        { kind: "end", turn: 1, gate: firstTurnEnd.promise },
+      ],
+      [
+        { kind: "start", turn: 2 },
+        { kind: "text", turn: 2, text: "second answer" },
+        { kind: "end", turn: 2 },
+      ],
+    ],
+  });
+  const permissions = fakePermissions({ options: [{ value: "read-only" }], timeline });
+  const services = { permissionPresets: permissions, sessions: { get: (id) => ({ id }) } };
+  const methods = build(controller, {}, services);
+  const firstPromise = methods.ask({ text: "first", project: "sticky-wait-true" });
+  firstPromise.catch(() => {});
+  let secondPromise;
+  try {
+    await waitFor(() => controller.prompts.length === 1, "the first prompt is active before starting the second ask");
+    const hostSession = (await controller.list({}, new AbortController().signal)).items[0];
+    assert.equal(hostSession.blank, false, "the Host reports the reserved session as nonblank");
+    assert.equal(hostSession.running, true, "the first turn is still active in the Host");
+
+    secondPromise = methods.ask({
+      text: "second",
+      project: "sticky-wait-true",
+      model: "beta/shared",
+      reasoningEffort: "low",
+      permissionPreset: "read-only",
+    });
+    secondPromise.catch(() => {});
+    await waitFor(async () => (await methods.ping()).activeRuns.length === 2, "the second ask is waiting on the active session");
+    assert.equal(controller.created.length, 1, "the active sticky reservation is reused");
+    assert.equal(controller.prompts.length, 1, "the second prompt waits for the first turn");
+    assert.equal(controller.selections.length, 0, "the queued model change waits for the prompt slot");
+    assert.equal(permissions.applied.length, 0, "the queued permission change waits for the prompt slot");
+    assert.deepEqual(timeline.map((item) => item.kind), ["prompt"]);
+  } finally {
+    firstTurnEnd.resolve();
+  }
+  const [first, second] = await Promise.all([firstPromise, secondPromise]);
+  assert.equal(first.sessionId, second.sessionId);
+  assert.equal(first.created, true);
+  assert.equal(second.created, false);
+  assert.equal(second.reused, true);
+  assert.equal(first.text, "first answer");
+  assert.equal(second.text, "second answer");
+  assert.deepEqual(second.selected, { provider: "beta", model: "shared", reasoningEffort: "low" });
+  assert.equal(second.permissionPreset, "read-only");
+  assert.deepEqual(timeline.map((item) => item.kind), ["prompt", "model", "permission", "prompt"]);
+  assert.deepEqual(controller.prompts.map((prompt) => prompt.sessionId), [first.sessionId, first.sessionId]);
+  assert.equal(controller.created.length, 1);
+  assert.equal((await lookupEntry(registryKey({ project: "sticky-wait-true" }))).asks, 2);
+});
+
+test("a sticky queued ask does not change options when the previous ask times out with its Host turn still running", async () => {
+  const firstTurnEnd = deferred();
+  const timeline = [];
+  const controller = fakeController({
+    distinctSessions: true,
+    timeline,
+    models: twoProviderModels,
+    scripts: [
+      [
+        { kind: "start", turn: 1 },
+        { kind: "text", turn: 1, text: "first answer" },
+        { kind: "end", turn: 1, gate: firstTurnEnd.promise },
+      ],
+      [
+        { kind: "start", turn: 2 },
+        { kind: "text", turn: 2, text: "second answer" },
+        { kind: "end", turn: 2 },
+      ],
+    ],
+  });
+  const permissions = fakePermissions({ options: [{ value: "read-only" }], timeline });
+  const methods = build(controller, {}, {
+    permissionPresets: permissions,
+    sessions: { get: (id) => ({ id }) },
+  });
+  const firstPromise = methods.ask({ text: "first", project: "sticky-host-still-running", timeoutMs: 1000 });
+  firstPromise.catch(() => {});
+  let secondPromise;
+  try {
+    await waitFor(
+      () => controller.events.some((event) => event.type === "assistant/message"),
+      "the first Host turn is waiting at its end gate",
+    );
+    secondPromise = methods.ask({
+      text: "second",
+      project: "sticky-host-still-running",
+      model: "beta/shared",
+      reasoningEffort: "low",
+      permissionPreset: "read-only",
+      timeoutMs: 5000,
+    });
+    secondPromise.catch(() => {});
+    await waitFor(
+      async () => (await methods.ping()).activeRuns.some((run) => run.state === "queued"),
+      "the second ask is queued before the first bridge run times out",
+    );
+
+    const first = await firstPromise;
+    assert.equal(first.status, "timeout");
+    assert.equal((await controller.list({}, new AbortController().signal)).items[0].running, true);
+    assert.equal(controller.events.some((event) => event.type === "turn/end"), false);
+    await assert.rejects(secondPromise, (error) => {
+      assert.equal(error.code, -32004);
+      assert.equal(error.data.sessionId, first.sessionId);
+      assert.equal(error.data.turn, 1);
+      return true;
+    });
+    assert.equal(controller.created.length, 1);
+    assert.equal(controller.prompts.length, 1, "the second prompt must not reach the still-running Host");
+    assert.deepEqual(controller.selections, [], "the old Host turn must keep its model and effort");
+    assert.deepEqual(permissions.applied, [], "the old Host turn must keep its permission preset");
+    assert.deepEqual(timeline.map((item) => item.kind), ["prompt"]);
+    assert.deepEqual((await methods.ping()).activeRuns, []);
+  } finally {
+    firstTurnEnd.resolve();
+    await Promise.allSettled([firstPromise, ...(secondPromise ? [secondPromise] : [])]);
+  }
 });
 
 test("reuse: never always starts a fresh session", async () => {

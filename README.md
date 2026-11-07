@@ -71,7 +71,7 @@ http://127.0.0.1:<port>/dsh-rpc   ->   DSH agent
 - **无人值守也不卡死**：`approvals.mode` 三档，`delegate` 把升权决定交给派发方。
 - **调用方断开就停手，但不杀你的工作**：abort ≠ cancel，那一轮还在 GUI 里跑。
 - **端口随启动器走**：`endpoint.json` + `health --wait`，客户端不用写死地址。
-- **每条对外承诺都有用例守着**：183 例单元 + 变异验证 + 真宿主集成测试。
+- **关键行为有回归用例守着**：217 例测试 + catalog smoke + 真实 WebServer 集成测试。
 
 ## 安装与更新
 
@@ -462,7 +462,11 @@ approvals.mode=deny refused a sandbox escalation to "danger-full-access" for too
 
 决策包字段：`approvalId`（随机 UUID，不可枚举）、`sessionId`、`toolName`、`callId`、`escalation`、`argv`（命令或路径的摘要）、`args`（**整包参数**的脱敏 JSON，凭证形状的值被打码，上限 4000 字）、`argsTruncated`、`cwd`、`preset`（会话**当前**的预设，读不到为 null）、`reason`（子代理自述，截断到 500 字）、`untrusted: true`、`createdAt`、`expiresAt`。
 
-**重启之后**：每会话已用的升权次数、本桥拥有的会话、以及"这次放宽还没还回去"的欠账都写在 `$DSH_HOME/dsh-rpc/approvals.json`（0600、`.tmp` 后 rename 的原子替换）。重启不会把额度清零，也不会让闸门对旧会话失声；进程被杀、放宽没来得及收回时，下一次启动会读这份台账把 preset 还回去（还失败只记 warn）。`approvals.mode=off` 时不写这个文件。
+**重启之后**：每会话已用的升权次数、本桥拥有的会话、以及"这次放宽还没还回去"的欠账都写在 `$DSH_HOME/dsh-rpc/approvals.json`（0600、唯一临时文件后 rename 的原子替换）。重启保留额度与所有权；启动恢复失败的预设欠账继续保留，对应会话的调用暂停至恢复成功。`approvals.mode=off` 时不写这个文件。
+
+台账 v2 使用跨进程文件锁，事务内重新读取磁盘并分配单调票据；已结算票据仅留下累计次数，待结算票据和预设欠账保留至处理完成。升级前停止所有共用台账的旧版进程并备份台账，首次写入自动迁移 v1；回退旧版时使用升级前备份，避免旧版覆盖 v2 计数。损坏或未知格式保留原件并报告错误。
+
+若进程恰在持锁事务中异常退出，可能留下同目录的 `approvals.json.lock`。锁等待 10 秒后报错，不按年龄自动抢占。恢复时先停止所有共用台账的写入进程，核对锁内 `owner.json`，备份台账，再仅移除该遗留锁目录并重启；保留台账中的待结算记录和预设欠账。
 
 > [!NOTE]
 > **为什么不用 `ctx.on("approval/request")`**：审批服务经 `scopeTarget(req.agent, req.agent)` 派发，只会走到"该 agent 自己组合里"的应答者。实测在插件上下文和 root 上下文上各注册一次，真实升权时监听器**一次都没被调用**（GUI 面板还在等），而 `tools/pre-execute` 是全局 waterfall，所有 agent 都覆盖得到。
@@ -628,31 +632,32 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 一次跑完十段，共 183 例；不需要 Harness，也不需要 npm install
-node test/host.test.mjs        # 1 例：真宿主集成（需先 npm ci）
+npm test                       # 11 个测试文件，共 217 例，另有 catalog smoke；无需运行中的 Harness
+node test/host.test.mjs        # 1 例：真实 WebServer 集成（需先 npm ci）
 node test/e2e.mjs --cwd .      # 14 例：端到端，打真实 Harness
 node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harness
 ```
 
 <details>
-<summary>十个套件各自钉住什么</summary>
+<summary>十一个测试文件各自覆盖什么</summary>
 
-| 套件 | 例 | 钉住 |
+| 套件 | 例 | 覆盖 |
 | --- | --- | --- |
-| `methods` | 76 | 轮次归属、steer、超时、abort 原因、history、cancel、参数契约 |
-| `mcp-format` | 19 | 结果渲染：`note:` / `next:` / 截断 / 去重 / 待批 |
-| `registry` | 8 | 粘性会话表读写、损坏降级、轮换 |
+| `methods` | 81 | 轮次归属、sticky 并发与配置顺序、超时、history、参数契约 |
+| `mcp-format` | 20 | 完整正文、结果渲染、去重、待批 |
+| `registry` | 10 | 粘性会话表读写、并发更新、键隔离、轮换 |
 | `pending` | 36 | 待批存储、长轮询、取消收回、额度预占、事务边界 |
-| `approvals` | 11 | 配置校验、gate 的 deny/delegate 分支、所有权、白名单 |
-| `approval-state` | 8 | 台账跨重启、按字段合并、TTL、孤儿收回 |
+| `approvals` | 15 | 配置校验、gate 分支、所有权、waterfall、关闭竞态 |
+| `approval-state` | 20 | 台账重启、迁移、票据重放、跨进程配额、TTL、恢复 |
 | `wait` | 6 | 分片等待（真 HTTP 桩） |
 | `abort` | 7 | 中止链路（真 socket / 进程内登记表） |
-| `client` | 6 | 客户端重试与报错 |
+| `client` | 8 | 客户端重试、超时与响应校验 |
+| `cli-mcp-regressions` | 8 | CLI 参数、环境变量输出与 MCP 错误路径 |
 | `status` | 6 | `/status` 载荷与路由挂载契约 |
 
 </details>
 
-`npm test` 按固定顺序跑这十段；`npm run test:host` 跑真宿主集成；`npm run test:e2e` / `npm run test:edge` 要活的 Harness。
+`npm test` 按固定顺序跑这十一个测试文件和 catalog smoke；`npm run test:host` 跑真实 WebServer 集成；`npm run test:e2e` / `npm run test:edge` 要活的 Harness。
 
 > [!TIP]
 > **别用 `node --test`**：它会为每个文件 fork 子进程，在 DSH 沙箱里被 `spawn EPERM` 挡住。
@@ -664,7 +669,7 @@ node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harnes
 - **边界**检查协议层：batch、通知、id 形态、鉴权头、超大 body（应得真正的 413 而不是断连）、参数注入防护、超时钳制、并发 ask、`limit` 语义。
 - **端口漂移**（手工）：把 `endpoint.json` 的 url 改成死端口再跑 `dsh-rpc ping`，应得退出码 3 与含 `nothing is listening`、`pid`、`health --wait` 的可读报错。
 
-上次实跑：单元 183/183（CI）、宿主 1/1（2026-11-06）；本机同一提交 182 通过 + 1 例因沙箱禁止子进程（`spawn EPERM`）失败；端到端 14/14、边界 24/24（2026-11-05）。
+本次本地验证（2026-11-07）：217/217 测试、catalog smoke、真实 WebServer 集成 1/1 均通过，另通过版本、打包与 36 个 JavaScript 文件的语法检查。历史端到端 14/14、边界 24/24（2026-11-05）；本次未重跑这两项真实 Harness 检查。
 
 ## 许可证
 

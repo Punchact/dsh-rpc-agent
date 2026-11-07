@@ -200,6 +200,53 @@ test("dispose cancels pending approvals and prevents late widening", async () =>
   assert.equal((await gate.pre(allow("session-close"), async () => ({ kind: "allow" }))).kind, "deny");
 });
 
+test("dispose waits for an approved downstream continuation and denies it after closing", async () => {
+  let answer;
+  let continueDownstream;
+  let continuationStarted = false;
+  let preset = "workspace-write";
+  const appliedPresets = [];
+  const store = {
+    open() {
+      const promise = new Promise((resolve) => { answer = resolve; });
+      return { approvalId: "pending-downstream", promise };
+    },
+  };
+  const gate = createApprovalGate({
+    mode: "delegate",
+    isOwned: () => true,
+    store,
+    currentPreset: () => preset,
+    applyPreset: async (_id, value) => {
+      preset = value;
+      appliedPresets.push(value);
+    },
+  });
+  const downstream = new Promise((resolve) => { continueDownstream = resolve; });
+  const pending = gate.pre(
+    exec("session-dispose-downstream", { sandbox_permissions: "danger-full-access" }),
+    () => {
+      continuationStarted = true;
+      return downstream;
+    },
+  );
+  while (!answer) await new Promise((resolve) => setImmediate(resolve));
+  answer({ decision: "allow-once" });
+  while (!continuationStarted) await new Promise((resolve) => setImmediate(resolve));
+
+  let disposed = false;
+  const disposing = gate.dispose().then(() => { disposed = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  const disposedBeforeContinuationResolved = disposed;
+  continueDownstream({ kind: "allow" });
+  const [decision] = await Promise.all([pending, disposing]);
+
+  assert.equal(disposedBeforeContinuationResolved, false, "dispose must wait for the in-flight waterfall continuation");
+  assert.equal(decision.kind, "deny", "a closed gate must not return the downstream allow decision");
+  assert.equal(preset, "workspace-write");
+  assert.deepEqual(appliedPresets, ["danger-full-access", "workspace-write"]);
+});
+
 test("dispose waits for an in-flight preset change and restores it before returning", async () => {
   let releasePreset;
   let preset = "workspace-write";
