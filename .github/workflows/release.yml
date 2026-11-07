@@ -122,21 +122,30 @@ jobs:
             echo "no OIDC endpoint in this job — id-token: write did not reach it"
             exit 0
           fi
-          TOKEN_JSON=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org")
-          ID_TOKEN=$(node -p "JSON.parse(process.argv[1]).value" "$TOKEN_JSON")
-          if [ -z "$ID_TOKEN" ]; then
-            echo "could not obtain an ID token: $TOKEN_JSON"
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+            echo "ID token request status: 000; request credentials unavailable (response body omitted)"
             exit 0
           fi
-          echo "payload claims of the ID token:"
-          node -p "JSON.stringify(JSON.parse(Buffer.from(process.argv[1].split('.')[1],'base64url').toString()).slice, null, 0)" "$ID_TOKEN" 2>/dev/null || true
-          node -e 'const p=JSON.parse(Buffer.from(process.argv[1].split(".")[1],"base64url").toString());for(const k of ["repository","repository_owner","repository_id","workflow_ref","job_workflow_ref","ref","event_name","environment"]) { if (p[k] !== undefined) console.log("  "+k+" = "+JSON.stringify(p[k])); }' "$ID_TOKEN"
-          CODE=$(curl -sS -o /tmp/exchange.json -w '%{http_code}' -X POST \
+          TOKEN_BODY=$(mktemp)
+          EXCHANGE_BODY=$(mktemp)
+          trap 'rm -f "$TOKEN_BODY" "$EXCHANGE_BODY"' EXIT
+          TOKEN_CODE=$(curl -sS -o "$TOKEN_BODY" -w '%{http_code}' \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" 2>/dev/null) || true
+          TOKEN_CODE=${TOKEN_CODE:-000}
+          ID_TOKEN=$(node -e 'try { const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if (typeof r.value === "string") process.stdout.write(r.value); } catch {}' "$TOKEN_BODY")
+          if [ -z "$ID_TOKEN" ]; then
+            echo "ID token request status: ${TOKEN_CODE}; token unavailable (response body omitted)"
+            exit 0
+          fi
+          echo "ID token request status: ${TOKEN_CODE}"
+          # Only these fixed, non-secret claims are emitted; token and response bodies stay private.
+          printf '%s' "$ID_TOKEN" | node -e 'try { const p=JSON.parse(Buffer.from(require("fs").readFileSync(0,"utf8").split(".")[1],"base64url").toString()); for(const k of ["repository","repository_owner","repository_id","workflow_ref","job_workflow_ref","ref","event_name","environment"]) { if (typeof p[k] === "string" || typeof p[k] === "number") console.log("  "+k+" = "+JSON.stringify(p[k])); } } catch { console.log("  claims unavailable"); }'
+          CODE=$(curl -sS -o "$EXCHANGE_BODY" -w '%{http_code}' -X POST \
             -H "Authorization: Bearer ${ID_TOKEN}" \
-            "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/@punchact%2Fdsh-rpc-agent")
-          echo "exchange status: ${CODE}"
-          echo "exchange body: $(cat /tmp/exchange.json)"
+            "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/@punchact%2Fdsh-rpc-agent" 2>/dev/null) || true
+          CODE=${CODE:-000}
+          echo "exchange status: ${CODE} (response body omitted)"
       # No --provenance flag: npm generates provenance by itself for OIDC publishes from a public
       # repository, and refuses the flag outright for a private one.
       - name: publish

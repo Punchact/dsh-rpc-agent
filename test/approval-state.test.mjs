@@ -27,6 +27,7 @@ test("allowances, ownership and the widen journal survive a restart", () => {
   assert.equal(second.owned.has("session-a"), true, "ownership outlives the process");
   assert.equal(second.widened.get("session-b"), "read-only");
   assert.deepEqual(second.pendingWidens(), [{ sessionId: "session-b", previous: "read-only" }]);
+  assert.deepEqual([...second.widened], [["session-b", "read-only"]]);
 });
 
 test("a corrupt file degrades to empty instead of throwing", () => {
@@ -179,7 +180,68 @@ test("recover puts back what an unclean stop left wide", async () => {
   assert.equal(createApprovalState({ file, log: quiet }).widened.has("session-b"), false, "the debt is settled once");
 });
 
-test("a restore the Host refuses is dropped, not retried forever", async () => {
+test("persistent allowance reservations refund after rejection and reload", async () => {
+  const { file } = scratch();
+  const state = createApprovalState({ file, log: quiet });
+  const store = createPendingStore({ deadlineMs: 5_000, log: quiet });
+  const gate = createApprovalGate({
+    mode: "delegate", isOwned: () => true, currentPreset: () => "workspace-write",
+    applyPreset: async () => {}, store, state, log: quiet,
+  });
+  for (let i = 0; i < 3; i += 1) {
+    const pending = gate.pre({ agent: { session: { id: "session-refund" } }, name: "bash", callId: `reject-${i}`, arguments: { sandbox_permissions: "danger-full-access" } }, async () => ({ kind: "allow" }));
+    for (let j = 0; j < 50 && store.list().length === 0; j += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    store.resolve(store.list()[0].approvalId, "reject");
+    assert.equal((await pending).kind, "deny");
+    assert.equal(createApprovalState({ file, log: quiet }).allowances.get("session-refund"), undefined);
+  }
+});
+
+test("reservations merge by identity and retain spent concurrent approvals", () => {
+  const { file } = scratch();
+  const first = createApprovalState({ file, log: quiet });
+  const second = createApprovalState({ file, log: quiet });
+  first.reserveAllowance("session-race", "first");
+  second.reserveAllowance("session-race", "second");
+  first.settleAllowance("session-race", "first", "refunded");
+  second.owned.set("session-race", 1);
+  const merged = createApprovalState({ file, log: quiet });
+  assert.equal(merged.allowances.get("session-race"), 1);
+  assert.equal(JSON.parse(readFileSync(file, "utf8")).sessions["session-race"].reservations.first, "refunded");
+  assert.equal(JSON.parse(readFileSync(file, "utf8")).sessions["session-race"].reservations.second, "pending");
+});
+
+test("a failed startup restore retains its debt and blocks ordinary calls", async () => {
+  const { file } = scratch();
+  const state = createApprovalState({ file, log: quiet });
+  state.widened.set("session-debt", "workspace-write");
+  const gate = createApprovalGate({ mode: "deny", isOwned: () => true, applyPreset: async () => { throw new Error("temporary failure"); }, state, log: quiet });
+  assert.deepEqual(await gate.recover(), { restored: 0, failed: 1 });
+  assert.equal(state.widened.get("session-debt"), "workspace-write");
+  assert.equal((await gate.pre({ agent: { session: { id: "session-debt" } }, arguments: {} }, async () => ({ kind: "allow" }))).kind, "deny");
+});
+
+test("persistent widened facade can be iterated during dispose", async () => {
+  const { file } = scratch();
+  const state = createApprovalState({ file, log: quiet });
+  state.widened.set("session-dispose", "workspace-write");
+  const restored = [];
+  const gate = createApprovalGate({ mode: "deny", isOwned: () => true, applyPreset: async (...args) => restored.push(args), state, log: quiet });
+  await gate.dispose();
+  assert.deepEqual(restored, [["session-dispose", "workspace-write"]]);
+});
+
+test("capacity trimming retains all outstanding widen obligations", () => {
+  const { file } = scratch();
+  const sessions = {};
+  sessions["session-obligation"] = { used: 0, owned: true, widenedTo: "read-only", updatedAt: 1, rev: 1 };
+  for (let i = 0; i < 2_000; i += 1) sessions[`session-${i}`] = { used: 0, owned: true, widenedTo: null, updatedAt: 100 + i, rev: 1 };
+  writeFileSync(file, JSON.stringify({ version: 1, sessions }), "utf8");
+  const state = createApprovalState({ file, log: quiet });
+  assert.deepEqual(state.pendingWidens(), [{ sessionId: "session-obligation", previous: "read-only" }]);
+});
+
+test("a failed restore remains journaled for a later recovery", async () => {
   const { file } = scratch();
   const state = createApprovalState({ file, log: quiet });
   state.widened.set("session-gone", "workspace-write");
@@ -195,5 +257,5 @@ test("a restore the Host refuses is dropped, not retried forever", async () => {
   });
   const result = await gate.recover();
   assert.equal(result.failed, 1);
-  assert.equal(state.widened.has("session-gone"), false);
+  assert.equal(state.widened.get("session-gone"), "workspace-write");
 });

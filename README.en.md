@@ -294,7 +294,7 @@ Semantics that are easy to trip over:
 | `-32005` | Wait timed out |
 | `-32006` | Call cancelled |
 
-**At the MCP layer**: a tool result is an error **only when the call itself failed** (error code plus a `next:` hint). A turn's `status` always goes into the body as an `outcome:` line; every reason other than `completed` also gets a `note:` (plain-language explanation) and `next:` (what to do). Meeting a `kind` this plugin does not know is not an exception — the host's `TurnEndReasonMap` is merge-extensible, so such outcomes are downgraded to "unverified, check `dsh_sessions()` first" and never dressed up as `completed`.
+**At the MCP layer**: a tool result is an error **only when the call itself failed** (error code plus a `next:` hint). A turn's `status` always goes into the body as an `outcome:` line; every reason other than `completed` also gets a `note:` (plain-language explanation) and `next:` (what to do). Meeting a `kind` this plugin does not know is not an exception — the host's `TurnEndReasonMap` is merge-extensible, so such outcomes are downgraded to "unverified, check `dsh_sessions()` first" and never dressed up as `completed`. `dsh_ask` and `dsh_wait` return the complete turn text; for long answers, pass the `since` cursor to a later `dsh_wait` call to collect only newly added text.
 
 ### Streaming endpoint
 

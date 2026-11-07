@@ -132,6 +132,21 @@ function numberOf(flags, key) {
   return Math.floor(value);
 }
 
+function cursorOf(flags, key) {
+  if (flags[key] === undefined) return undefined;
+  const value = Number(flags[key]);
+  if (!Number.isFinite(value) || value < 0) throw new UsageError(`--${key} must be a non-negative number`);
+  return Math.floor(value);
+}
+
+function shellDoubleQuote(value) {
+  return `"${String(value).replace(/[\\"$`]/g, "\\$&")}"`;
+}
+
+function shellSingleQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
 async function readPrompt(positional) {
   if (positional.length === 0) throw new UsageError("missing prompt text");
   if (positional.length === 1 && positional[0] === "-") {
@@ -454,6 +469,9 @@ async function main(argv) {
       if (!flags.session) throw new UsageError("prompt needs --session <id>");
       const text = await readPrompt(rest);
       const params = { sessionId: flags.session, text };
+      if (flags.model) params.model = flags.model;
+      if (flags.effort) params.reasoningEffort = flags.effort;
+      if (flags.permission) params.permissionPreset = flags.permission;
       if (flags.mode) params.mode = flags.mode;
       const result = await rpcCall("dsh.sessions.prompt", params, options);
       print(flags.json ? JSON.stringify(result, null, 2) : result.requestId);
@@ -464,7 +482,7 @@ async function main(argv) {
       const timeout = numberOf(flags, "timeout");
       const result = await waitForTurn(flags.session, {
         timeoutMs: timeout ?? DEFAULT_TURN_TIMEOUT_MS,
-        since: numberOf(flags, "since"),
+        since: cursorOf(flags, "since"),
         ...options,
       });
       emitResult(result, flags);
@@ -510,8 +528,9 @@ async function main(argv) {
       // here, and a wait goes through the sliced loop like every other wait.
       const timeout = numberOf(flags, "timeout");
       if (method === "dsh.sessions.wait" && typeof params?.sessionId === "string") {
+        const jsonTimeout = Number.isInteger(params.timeoutMs) && params.timeoutMs > 0 ? params.timeoutMs : undefined;
         const result = await waitForTurn(params.sessionId, {
-          timeoutMs: timeout ?? DEFAULT_TURN_TIMEOUT_MS,
+          timeoutMs: timeout ?? jsonTimeout ?? DEFAULT_TURN_TIMEOUT_MS,
           since: Number.isInteger(params.since) ? params.since : undefined,
           ...connectionOptions(flags),
         });
@@ -525,9 +544,11 @@ async function main(argv) {
     case "env": {
       const endpoint = readEndpoint();
       const url = flags.url ?? process.env.DSH_RPC_URL ?? endpoint?.url;
-      if (url) print(`export DSH_RPC_URL='${url}'`);
-      else print("# no endpoint published yet — start the Harness once with the plugin enabled");
-      print(`export DSH_RPC_TOKEN='$(cat "${tokenPath().replace(/\\/g, "/")}")'`);
+      if (url && !process.env.DSH_RPC_URL) print(`export DSH_RPC_URL=${shellDoubleQuote(url)}`);
+      else if (!url) print("# no endpoint published yet — start the Harness once with the plugin enabled");
+      if (!process.env.DSH_RPC_TOKEN && !flags.token) {
+        print(`export DSH_RPC_TOKEN="$(cat ${shellSingleQuote(tokenPath().replace(/\\/g, "/"))})"`);
+      }
       return 0;
     }
     default:

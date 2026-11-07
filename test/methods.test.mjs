@@ -1161,6 +1161,61 @@ test("a project's second ask reuses the session the first one created", async ()
   assert.equal(second.sessionId, first.sessionId);
 });
 
+test("an implicit sticky reuse applies options and increments its ask counter", async () => {
+  const { lookupEntry, registryKey } = await import("../lib/registry.mjs");
+  const controller = fakeController({ models: twoProviderModels, script: happyScript });
+  const permissions = fakePermissions({
+    options: [{ value: "workspace-write" }, { value: "read-only" }],
+    defaultPreset: "workspace-write",
+  });
+  const sessions = new Map([["session-test", { id: "session-test" }]]);
+  const methods = build(controller, {}, { permissionPresets: permissions, sessions });
+  const first = await methods.ask({ text: "first", project: "sticky-options", wait: false, model: "alpha/one" });
+  const second = await methods.ask({
+    text: "second",
+    project: "sticky-options",
+    wait: false,
+    model: "beta/shared",
+    reasoningEffort: "low",
+    permissionPreset: "read-only",
+  });
+
+  assert.equal(second.sessionId, first.sessionId);
+  assert.equal(second.reused, true);
+  assert.deepEqual(controller.selections.at(-1), {
+    sessionId: first.sessionId,
+    provider: "beta",
+    model: "shared",
+    reasoningEffort: "low",
+  });
+  assert.deepEqual(permissions.applied.at(-1), { sessionId: first.sessionId, name: "read-only" });
+  assert.deepEqual(second.selected, { provider: "beta", model: "shared", reasoningEffort: "low" });
+  assert.equal(second.permissionPreset, "read-only");
+  assert.equal((await lookupEntry(registryKey({ project: "sticky-options" }))).asks, 2);
+});
+
+test("concurrent first asks for one sticky key create one session", async () => {
+  const controller = fakeController({ script: happyScript });
+  const list = controller.list.bind(controller);
+  controller.list = async (...args) => {
+    const result = await list(...args);
+    return { ...result, items: result.items.map((item) => ({ ...item, blank: true })) };
+  };
+  const methods = build(controller);
+  const [first, second] = await Promise.all([
+    methods.ask({ text: "first", project: "sticky-single-flight", wait: false }),
+    methods.ask({ text: "second", project: "sticky-single-flight", wait: false }),
+  ]);
+
+  assert.equal(controller.created.length, 1, "the in-flight sticky key must be shared");
+  assert.equal(first.sessionId, second.sessionId);
+  assert.equal([first.created, second.created].filter(Boolean).length, 1);
+  assert.equal([first.reused, second.reused].filter(Boolean).length, 1);
+  assert.equal(controller.prompts.length, 2, "both prompts are still delivered to the shared session");
+  const { lookupEntry, registryKey } = await import("../lib/registry.mjs");
+  assert.equal((await lookupEntry(registryKey({ project: "sticky-single-flight" }))).asks, 2);
+});
+
 test("reuse: never always starts a fresh session", async () => {
   const methods = build(fakeController({ script: happyScript }));
   const first = await methods.ask({ text: "甲", project: "sticky-b", reuse: "never" });
@@ -1447,6 +1502,22 @@ test("with approvals on, a preset change cannot skip the gate to full access", a
   // Nothing wider than the current preset is an escalation, so it still works.
   await methods.configure({ sessionId: created.sessionId, permissionPreset: "workspace-write" });
   assert.equal(permissions.applied.at(-1).name, "workspace-write");
+});
+
+test("a prompt that never settles reports a timeout and releases its run slot", async () => {
+  const controller = fakeController({ script: happyScript });
+  controller.prompt = () => new Promise(() => {});
+  const methods = build(controller);
+  const keepAlive = setInterval(() => {}, 1_000);
+  try {
+    const started = Date.now();
+    const result = await methods.ask({ sessionId: "session-test", text: "stuck", timeoutMs: 150 });
+    assert.equal(result.status, "timeout");
+    assert.ok(Date.now() - started < 5_000, "the deadline ends the unanswered Host prompt");
+    assert.deepEqual((await methods.ping()).activeRuns, []);
+  } finally {
+    clearInterval(keepAlive);
+  }
 });
 
 test("a snapshot read that never answers reports a timeout instead of hanging", async () => {

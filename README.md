@@ -294,7 +294,7 @@ console.log(answer.text, answer.usage);
 | `-32005` | 等待超时 |
 | `-32006` | 调用被取消 |
 
-**MCP 层**：工具结果**只在调用本身失败时**才是错误（错误码 + `next:` 提示）。轮次的 `status` 一律写进正文 `outcome:` 行；除 `completed` 外每种结束原因都额外给 `note:`（人话解释）与 `next:`（下一步）。遇到本插件不认识的 `kind` 不是异常——宿主的 `TurnEndReasonMap` 可合并扩展，这类结局一律降级为"unverified，先查 `dsh_sessions()`"，绝不冒充 `completed`。
+**MCP 层**：工具结果**只在调用本身失败时**才是错误（错误码 + `next:` 提示）。轮次的 `status` 一律写进正文 `outcome:` 行；除 `completed` 外每种结束原因都额外给 `note:`（人话解释）与 `next:`（下一步）。`dsh_ask` 和 `dsh_wait` 返回完整轮次正文；长答案可用 `since` 游标从后续 `dsh_wait` 调用中只取新增正文。遇到本插件不认识的 `kind` 不是异常——宿主的 `TurnEndReasonMap` 可合并扩展，这类结局一律降级为"unverified，先查 `dsh_sessions()`"，绝不冒充 `completed`。
 
 ### 流式端点
 

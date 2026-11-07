@@ -1,5 +1,15 @@
 # 变更记录
 
+## [Unreleased]
+
+### 修复
+
+- 审批 waterfall 不再因下游 listener 抛错而重调已消费的 continuation；权限恢复失败保留可恢复台账，并在 gate 关闭/恢复未完成时阻止新的放宽。
+- 持久审批额度回滚、恢复欠账容量保留及 dispose 生命周期按真实持久状态后端处理。
+- 粘性会话复用应用请求的会话选项；同项目并发首次 ask 共享会话创建；注册表并发更新使用串行写入和唯一临时文件。
+- 客户端合并取消与超时预算、检查 HTTP/JSON-RPC 错误响应；MCP 完整返回轮次正文，支持通过 `since` 游标续读；CLI/MCP 参数及错误路径对齐契约。
+- 发布诊断仅记录 HTTP 状态和白名单声明，不输出 OIDC token 或响应正文。
+
 本文件记录每个对外版本改了什么。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
