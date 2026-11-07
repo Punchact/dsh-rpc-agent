@@ -10,6 +10,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
+import { Context } from "@deepseek-ai/cordis";
 
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), "dsh-rpc-approvals-"));
 
@@ -156,6 +157,126 @@ test("an unreadable call is delegated instead of guessed at", async () => {
     kind: "allow",
   });
   assert.equal(next.calls(), 1);
+});
+
+test("real Cordis waterfall does not retry or skip a throwing downstream listener", async () => {
+  const ctx = new Context();
+  const state = new Map();
+  let preset = "workspace-write";
+  let answerId;
+  const store = {
+    open() {
+      answerId = "approval";
+      let settle;
+      const promise = new Promise((resolve) => { settle = resolve; });
+      store.resolve = settle;
+      return { approvalId: answerId, promise };
+    },
+  };
+  const gate = createApprovalGate({ mode: "delegate", isOwned: () => true, store, state, currentPreset: () => preset, applyPreset: async (_id, value) => { preset = value; } });
+  const trace = [];
+  ctx.on("probe", gate.pre, { prepend: true });
+  ctx.on("probe", async (_exec, next) => { trace.push("throw"); throw new Error("downstream failure"); });
+  ctx.on("probe", async (_exec, next) => { trace.push("allow"); return next(); });
+  const run = ctx.waterfall(ctx, "probe", exec("session-cordis", { sandbox_permissions: "danger-full-access" }), async () => { trace.push("inner"); return { kind: "allow" }; });
+  while (!store.resolve) await new Promise((resolve) => setTimeout(resolve, 0));
+  store.resolve({ decision: "allow-once" });
+  await assert.rejects(run, /downstream failure/);
+  assert.deepEqual(trace, ["throw"]);
+  assert.equal(preset, "workspace-write");
+});
+
+test("dispose cancels pending approvals and prevents late widening", async () => {
+  let settle;
+  let preset = "workspace-write";
+  const store = { open() { const promise = new Promise((resolve) => { settle = resolve; }); return { approvalId: "pending", promise }; }, cancelAll() { settle?.({ decision: "cancelled" }); } };
+  const gate = createApprovalGate({ mode: "delegate", isOwned: () => true, store, currentPreset: () => preset, applyPreset: async (_id, value) => { preset = value; } });
+  const pending = gate.pre(exec("session-close", { sandbox_permissions: "danger-full-access" }), async () => ({ kind: "allow" }));
+  while (!settle) await new Promise((resolve) => setTimeout(resolve, 0));
+  await gate.dispose();
+  settle({ decision: "allow-once" });
+  assert.equal((await pending).kind, "deny");
+  assert.equal(preset, "workspace-write");
+  assert.equal((await gate.pre(allow("session-close"), async () => ({ kind: "allow" }))).kind, "deny");
+});
+
+test("dispose waits for an approved downstream continuation and denies it after closing", async () => {
+  let answer;
+  let continueDownstream;
+  let continuationStarted = false;
+  let preset = "workspace-write";
+  const appliedPresets = [];
+  const store = {
+    open() {
+      const promise = new Promise((resolve) => { answer = resolve; });
+      return { approvalId: "pending-downstream", promise };
+    },
+  };
+  const gate = createApprovalGate({
+    mode: "delegate",
+    isOwned: () => true,
+    store,
+    currentPreset: () => preset,
+    applyPreset: async (_id, value) => {
+      preset = value;
+      appliedPresets.push(value);
+    },
+  });
+  const downstream = new Promise((resolve) => { continueDownstream = resolve; });
+  const pending = gate.pre(
+    exec("session-dispose-downstream", { sandbox_permissions: "danger-full-access" }),
+    () => {
+      continuationStarted = true;
+      return downstream;
+    },
+  );
+  while (!answer) await new Promise((resolve) => setImmediate(resolve));
+  answer({ decision: "allow-once" });
+  while (!continuationStarted) await new Promise((resolve) => setImmediate(resolve));
+
+  let disposed = false;
+  const disposing = gate.dispose().then(() => { disposed = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  const disposedBeforeContinuationResolved = disposed;
+  continueDownstream({ kind: "allow" });
+  const [decision] = await Promise.all([pending, disposing]);
+
+  assert.equal(disposedBeforeContinuationResolved, false, "dispose must wait for the in-flight waterfall continuation");
+  assert.equal(decision.kind, "deny", "a closed gate must not return the downstream allow decision");
+  assert.equal(preset, "workspace-write");
+  assert.deepEqual(appliedPresets, ["danger-full-access", "workspace-write"]);
+});
+
+test("dispose waits for an in-flight preset change and restores it before returning", async () => {
+  let releasePreset;
+  let preset = "workspace-write";
+  const store = {
+    open() {
+      let resolve;
+      const promise = new Promise((done) => { resolve = done; });
+      store.answer = resolve;
+      return { approvalId: "in-flight", promise };
+    },
+  };
+  const gate = createApprovalGate({
+    mode: "delegate",
+    isOwned: () => true,
+    store,
+    currentPreset: () => preset,
+    applyPreset: async (_id, value) => {
+      if (value === "danger-full-access") await new Promise((resolve) => { releasePreset = resolve; });
+      preset = value;
+    },
+  });
+  const pending = gate.pre(exec("session-dispose-race", { sandbox_permissions: "danger-full-access" }), async () => ({ kind: "allow" }));
+  while (!store.answer) await new Promise((resolve) => setTimeout(resolve, 0));
+  store.answer({ decision: "allow-once" });
+  while (!releasePreset) await new Promise((resolve) => setTimeout(resolve, 0));
+  const disposed = gate.dispose();
+  releasePreset();
+  await disposed;
+  assert.equal((await pending).kind, "deny");
+  assert.equal(preset, "workspace-write");
 });
 
 test("accounting cannot change the answer", async () => {

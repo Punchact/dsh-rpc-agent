@@ -71,7 +71,7 @@ Repository and package name are both `dsh-rpc-agent`; the commands (`dsh-rpc`, `
 - **Unattended sessions cannot hang forever**: three `approvals.mode` settings; `delegate` hands the escalation decision to the caller.
 - **A caller that hangs up stops the call, not your work**: abort ≠ cancel; the turn keeps running in the GUI.
 - **The port follows the launcher**: `endpoint.json` plus `health --wait`, so no client hard-codes an address.
-- **Every promise is guarded by a test**: 183 unit cases, mutation checks, and a real-host integration test.
+- **Regression tests guard key behaviour**: 217 test cases, catalog smoke, and a real WebServer integration test.
 
 ## Install and update
 
@@ -294,7 +294,7 @@ Semantics that are easy to trip over:
 | `-32005` | Wait timed out |
 | `-32006` | Call cancelled |
 
-**At the MCP layer**: a tool result is an error **only when the call itself failed** (error code plus a `next:` hint). A turn's `status` always goes into the body as an `outcome:` line; every reason other than `completed` also gets a `note:` (plain-language explanation) and `next:` (what to do). Meeting a `kind` this plugin does not know is not an exception — the host's `TurnEndReasonMap` is merge-extensible, so such outcomes are downgraded to "unverified, check `dsh_sessions()` first" and never dressed up as `completed`.
+**At the MCP layer**: a tool result is an error **only when the call itself failed** (error code plus a `next:` hint). A turn's `status` always goes into the body as an `outcome:` line; every reason other than `completed` also gets a `note:` (plain-language explanation) and `next:` (what to do). Meeting a `kind` this plugin does not know is not an exception — the host's `TurnEndReasonMap` is merge-extensible, so such outcomes are downgraded to "unverified, check `dsh_sessions()` first" and never dressed up as `completed`. `dsh_ask` and `dsh_wait` return the complete turn text; for long answers, pass the `since` cursor to a later `dsh_wait` call to collect only newly added text.
 
 ### Streaming endpoint
 
@@ -462,7 +462,11 @@ Points that matter:
 
 Decision packet fields: `approvalId` (a random UUID, not enumerable), `sessionId`, `toolName`, `callId`, `escalation`, `argv` (a digest of the command or path), `args` (the **whole argument object** as redacted JSON, credential-shaped values masked, capped at 4000 characters), `argsTruncated`, `cwd`, `preset` (the session's **current** preset, null when unreadable), `reason` (the sub-agent's own words, truncated to 500 characters), `untrusted: true`, `createdAt`, `expiresAt`.
 
-**After a restart**: escalations used per session, the sessions this bridge owns, and any debt of "this widening was not returned" all live in `$DSH_HOME/dsh-rpc/approvals.json` (0600, written via `.tmp` then rename). A restart neither resets the allowance nor silences the gate for old sessions; if the process is killed before a widening is returned, the next start reads that ledger and puts the preset back (a failure is only logged as a warning). The file is not written while `approvals.mode=off`.
+**After a restart**: escalations used per session, bridge ownership and outstanding preset restores live in `$DSH_HOME/dsh-rpc/approvals.json` (0600, atomically replaced through a unique temporary file). Failed startup restores remain journaled and calls for that session are held until recovery succeeds. The file is not written while `approvals.mode=off`.
+
+Journal v2 allocates monotonic tickets in a cross-process file transaction that reloads authoritative disk state. Settled tickets fold into cumulative counts; pending tickets and preset obligations survive pruning. Before upgrading, stop every older process sharing the journal and back it up; the first write migrates v1. To roll back to an older binary, restore the pre-upgrade backup so that it does not overwrite v2 accounting. Corrupt or unknown formats are preserved and reported as errors.
+
+A process killed during a transaction may leave `approvals.json.lock` beside the journal. Lock acquisition reports an error after ten seconds and never steals a lock based on age. To recover, stop all processes writing that journal, inspect the lock's `owner.json`, back up the journal, remove only the orphaned lock directory and restart. Preserve pending tickets and preset-restore obligations in the journal.
 
 > [!NOTE]
 > **Why not `ctx.on("approval/request")`**: the approval service dispatches through `scopeTarget(req.agent, req.agent)`, which only reaches answerers "inside that agent's own composition". Measured by registering once in the plugin context and once in the root context: on a real escalation the listener **was never called** (the GUI panel kept waiting), whereas `tools/pre-execute` is a global waterfall that covers every agent.
@@ -628,31 +632,32 @@ Everything the page shows comes from that read-only endpoint; it writes nothing.
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # ten suites at once, 183 cases; needs no Harness and no npm install
-node test/host.test.mjs        # 1 case: real-host integration (needs npm ci first)
+npm test                       # 217 cases in 11 test files plus catalog smoke; needs no running Harness
+node test/host.test.mjs        # 1 case: real WebServer integration (needs npm ci first)
 node test/e2e.mjs --cwd .      # 14 cases: end to end against a real Harness
 node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a real Harness
 ```
 
 <details>
-<summary>What each of the ten suites guards</summary>
+<summary>What each of the eleven test files covers</summary>
 
-| Suite | Cases | Guards |
+| Suite | Cases | Covers |
 | --- | --- | --- |
-| `methods` | 76 | Turn ownership, steer, timeouts, abort reasons, history, cancel, parameter contracts |
-| `mcp-format` | 19 | Result rendering: `note:` / `next:` / truncation / de-duplication / pending approvals |
-| `registry` | 8 | Sticky-session table I/O, corruption fallback, rotation |
+| `methods` | 81 | Turn ownership, sticky concurrency and option ordering, timeouts, history, parameter contracts |
+| `mcp-format` | 20 | Complete text, result rendering, de-duplication, pending approvals |
+| `registry` | 10 | Sticky-session I/O, concurrent updates, key isolation, rotation |
 | `pending` | 36 | Pending store, long polling, cancellation withdrawal, allowance pre-claim, transaction boundary |
-| `approvals` | 11 | Config validation, the gate's deny/delegate branches, ownership, allow-list |
-| `approval-state` | 8 | Ledger across restarts, field-wise merge, TTL, orphan recovery |
+| `approvals` | 15 | Config validation, gate branches, ownership, waterfall, disposal races |
+| `approval-state` | 20 | Restarts, migration, ticket replay, cross-process quotas, TTL, recovery |
 | `wait` | 6 | Sliced waiting (real HTTP stub) |
 | `abort` | 7 | The abort chain (real socket / in-process registry) |
-| `client` | 6 | Client retries and error reporting |
+| `client` | 8 | Client retries, timeouts and response validation |
+| `cli-mcp-regressions` | 8 | CLI arguments, environment output and MCP error paths |
 | `status` | 6 | `/status` payload and route-mounting contract |
 
 </details>
 
-`npm test` runs those ten suites in a fixed order; `npm run test:host` runs the real-host integration; `npm run test:e2e` / `npm run test:edge` need a live Harness.
+`npm test` runs those eleven test files and catalog smoke in a fixed order; `npm run test:host` runs real WebServer integration; `npm run test:e2e` / `npm run test:edge` need a live Harness.
 
 > [!TIP]
 > **Do not use `node --test`**: it forks a child process per file, which DSH's sandbox blocks with `spawn EPERM`.
@@ -664,7 +669,7 @@ A few worth calling out:
 - **Edge** probes the protocol layer: batches, notifications, id shapes, auth headers, oversized bodies (a genuine 413, not a dropped connection), parameter-injection defences, timeout clamping, concurrent asks, `limit` semantics.
 - **Port drift** (manual): point `endpoint.json` at a dead port and run `dsh-rpc ping`; expect exit code 3 and a readable error mentioning `nothing is listening`, `pid` and `health --wait`.
 
-Last actual run: unit 183/183 (CI), host 1/1 (2026-11-06); locally the same commit gives 182 passes plus one case that the sandbox blocks (`spawn EPERM`); end-to-end 14/14, edge 24/24 (2026-11-05).
+Local verification on 2026-11-07: 217/217 tests, catalog smoke and real WebServer integration 1/1 passed, together with version, package and syntax checks for 36 JavaScript files. Historical end-to-end 14/14 and edge 24/24 results date from 2026-11-05; those live Harness checks were not rerun for this change.
 
 ## License
 
