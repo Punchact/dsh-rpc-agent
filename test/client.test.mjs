@@ -203,6 +203,57 @@ test("a second failure that is not a refused handshake keeps its own meaning", a
   }
 });
 
+test("a caller signal does not disable the request timeout", async () => {
+  const { server, url } = await listen((_request, response) => {
+    setTimeout(() => response.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} })), 250);
+  });
+  publishEndpoint(url);
+  const controller = new AbortController();
+
+  try {
+    const started = Date.now();
+    await assert.rejects(
+      () => rpcCall("dsh.ping", {}, { timeoutMs: 40, signal: controller.signal }),
+      (error) => error.name === "TimeoutError" || error.name === "AbortError",
+    );
+    assert.ok(Date.now() - started < 220, "timeout must win before the server responds");
+  } finally {
+    controller.abort();
+    await close(server);
+  }
+});
+
+test("non-success HTTP and malformed success envelopes are errors", async () => {
+  const cases = [
+    [503, { message: "fixture unavailable" }, -32000],
+    [200, { jsonrpc: "2.0", id: 1, result: { ok: true } }, null],
+    [200, { jsonrpc: "2.0", id: 2, result: { ok: true } }, -32000],
+    [200, { jsonrpc: "2.0", id: 1 }, -32000],
+    [200, { jsonrpc: "2.0", id: 1, result: {}, error: { code: -1, message: "bad" } }, -32000],
+    [200, { jsonrpc: "2.0", id: 1, error: { message: "missing code" } }, -32000],
+  ];
+  for (const [status, payload, expectedCode] of cases) {
+    const { server, url } = await listen((_request, response) => {
+      response.statusCode = status;
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(payload));
+    });
+    publishEndpoint(url);
+    try {
+      if (expectedCode === null) {
+        assert.deepEqual(await rpcCall("dsh.ping", {}), { ok: true });
+      } else {
+        await assert.rejects(
+          () => rpcCall("dsh.ping", {}),
+          (error) => error.code === expectedCode && error.status === status,
+        );
+      }
+    } finally {
+      await close(server);
+    }
+  }
+});
+
 test("an unchanged dead endpoint explains the restart and names the pid", async () => {
   const dead = await deadPort();
   publishEndpoint(`http://127.0.0.1:${dead}/dsh-rpc`, {

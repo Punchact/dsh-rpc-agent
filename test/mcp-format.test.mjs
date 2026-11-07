@@ -261,6 +261,14 @@ test("an error does not dump data the message already carries", () => {
   assert.match(textOf(untabled), /"next":\{"tool":"dsh_cancel"/);
 });
 
+test("long answers preserve their full body for MCP callers", () => {
+  const tail = "TAIL_CANARY_45b70";
+  const body = `x`.repeat(2500) + tail;
+  const text = textOf(formatToolResult({ sessionId: "s", status: "completed", text: body }));
+  assert.ok(text.includes(tail), "the answer tail must be available in the tool result");
+  assert.ok(text.includes(body), "the formatter must not silently discard the rest of the answer");
+});
+
 test("the wait hint quotes the bridge's configured budget, not a literal", () => {
   const result = { sessionId: "session-a", status: "timeout", timedOut: true, cursor: 5, turn: 1 };
   assert.match(textOf(formatToolResult(result)), /timeout_ms: 600000/);
@@ -278,10 +286,11 @@ test("a field the message already states is not reprinted as data", () => {
   assert.doesNotMatch(text, /data: /, "the message already said both values");
 });
 
-test("a runaway tool result is capped, and says by how much", () => {
-  const text = textOf(formatToolResult({ sessionId: "session-a", status: "completed", text: "x".repeat(5000) }));
-  assert.ok(text.length < 2600, "one huge result must not crowd out the meta and next lines");
-  assert.match(text, /truncated 3000 of 5000 chars/);
+test("a large tool result preserves its body and trailing metadata", () => {
+  const body = "x".repeat(5000);
+  const text = textOf(formatToolResult({ sessionId: "session-a", status: "completed", text: body }));
+  assert.ok(text.includes(body), "the complete answer must remain available");
+  assert.match(text, /outcome: completed/);
 });
 
 

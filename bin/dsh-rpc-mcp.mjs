@@ -557,9 +557,9 @@ async function callTool(name, args, signal = undefined) {
       }
       case "dsh_approvals_resolve": {
         const approvalId = typeof args.approval_id === "string" ? args.approval_id.trim() : "";
-        if (!approvalId) return toolError("`approval_id` is required");
+        if (!approvalId) return formatToolError("`approval_id` is required", undefined, -32602);
         if (args.decision !== "allow-once" && args.decision !== "reject") {
-          return toolError('`decision` must be "allow-once" or "reject"');
+          return formatToolError('`decision` must be "allow-once" or "reject"', undefined, -32602);
         }
         const resolved = await call("dsh.approvals.resolve", {
           approvalId,

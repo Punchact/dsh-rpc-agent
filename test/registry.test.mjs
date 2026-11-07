@@ -32,6 +32,14 @@ test("the key separates clients and prefers a project over a directory", () => {
   assert.equal(registryKey({ project: "p" }), "mcp::p");
 });
 
+test("delimiter-bearing namespace and scope pairs cannot alias", () => {
+  const first = registryKey({ namespace: "a", project: "b::c" });
+  const second = registryKey({ namespace: "a::b", project: "c" });
+  assert.notEqual(first, second);
+  assert.match(first, /^v2:/);
+  assert.match(second, /^v2:/);
+});
+
 test("a missing registry reads as empty instead of throwing", async () => {
   const empty = await readRegistry(join(process.env.DSH_HOME, "dsh-rpc", "never-written.json"));
   assert.deepEqual(empty, { version: REGISTRY_VERSION, sessions: {} });
@@ -64,6 +72,23 @@ test("an entry round-trips, and each remember bumps that session's counter", asy
   const rotated = await rememberEntry(key, { sessionId: "session-b" }, file);
   assert.equal(rotated.asks, 1);
   assert.equal((await lookupEntry(key, file)).sessionId, "session-b");
+});
+
+test("concurrent updates to different keys are serialized in this process", async () => {
+  const file = join(process.env.DSH_HOME, "concurrent.json");
+  const results = await Promise.all(
+    Array.from({ length: 24 }, (_, index) =>
+      rememberEntry(`mcp::parallel-${index}`, { sessionId: `session-${index}` }, file),
+    ),
+  );
+  assert.equal(results.length, 24);
+  const registry = await readRegistry(file);
+  assert.equal(Object.keys(registry.sessions).length, 24);
+  for (let index = 0; index < 24; index += 1) {
+    assert.equal(registry.sessions[`mcp::parallel-${index}`].sessionId, `session-${index}`);
+  }
+  const { readdirSync } = await import("node:fs");
+  assert.deepEqual(readdirSync(process.env.DSH_HOME).filter((name) => name.includes(".tmp")), []);
 });
 
 test("different keys do not collide, and forget removes exactly one", async () => {
