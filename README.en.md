@@ -91,7 +91,7 @@ Or say it inside DSH:
 plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent" })
 ```
 
-For a non-default profile add `--profile <name>`; pin a version by writing `@punchact/dsh-rpc-agent@0.7.8` (omitting it means `latest`). The latest on npm is [`0.7.8`](https://www.npmjs.com/package/@punchact/dsh-rpc-agent); this file describes **the code in the repository**, and differences are listed at the top of the [CHANGELOG](./CHANGELOG.md).
+For a non-default profile add `--profile <name>`; pin a version by writing `@punchact/dsh-rpc-agent@0.8.1` (omitting it means `latest`). The latest on npm is [`0.8.1`](https://www.npmjs.com/package/@punchact/dsh-rpc-agent); this file describes **the code in the repository**, and differences are listed at the top of the [CHANGELOG](./CHANGELOG.md).
 
 Three things that bite on the npm route:
 
@@ -100,7 +100,7 @@ Three things that bite on the npm route:
 
    ```yaml
    minimumReleaseAgeExclude:
-     - '@punchact/dsh-rpc-agent@0.4.1 || 0.4.4 || 0.5.3 || 0.7.6 || 0.7.7 || 0.7.8'
+     - '@punchact/dsh-rpc-agent@0.4.3 || 0.4.4 || 0.5.3 || 0.7.6 || 0.7.7 || 0.7.8 || 0.8.1'
    ```
 
 3. **To confirm which copy is installed**: use `cordis_inspect_query` (`Config.listConfigs`, `input: {"entry":"include:dsh-rpc-bridge"}`) and look at `packageDir` — pointing at `<profile>\node_modules\@punchact\dsh-rpc-agent` means the npm route, pointing at your checkout means the link route. **The version number is not evidence**; it is read from the `package.json` inside the package.
@@ -582,7 +582,7 @@ DSH's web port is decided by the launcher, and the desktop app lets the OS pick 
   "url": "http://127.0.0.1:3820/dsh-rpc",
   "origin": "http://127.0.0.1:3820",
   "path": "/dsh-rpc",
-  "version": "0.7.8",                        // the version the running copy reports
+  "version": "0.8.1",                        // the version the running copy reports
   "plugin": "dsh-rpc-agent",
   "pid": 12345,                              // the Host process that wrote this file
   "startedAt": "2026-11-05T01:05:58.000Z",   // when that process started
