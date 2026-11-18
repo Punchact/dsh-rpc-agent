@@ -527,4 +527,14 @@ compression: gzip
 4. **为什么 `structuredContent` 始终附带**：与 `dsh_ask` / `dsh_wait` 在长答案之外按 `trace: "full"` 才附带结构化工具列表不同，`dsh_history` 本身就是结构化事件检查工具——调用它的目的往往就是精确比对 `seq`、`cursor`、`hasMore`、`truncated` 或工具调用的原始参数/结果。保持文本投影受 `maxLines` / `maxChars` 行字双预算约束以保护上下文窗口，同时在 `structuredContent` 中始终透传完整的 `{ sessionId, cursor, turn, running, hasMore, messageCount, records, truncated? }`（不受渲染预算裁切，仅受 RPC `max_chars` 约束），让机器消费与人眼阅读各自拿到最合适的形态。
 5. **为什么它要自己检测"插件没听我的"**：桥与插件是两个可独立升级的包——MCP 侧的 0.8.1 完全可以连着一个 0.7.x 插件（本机正是如此）。老插件的 `dsh.sessions.history` 忽略 `since`/`kinds`/`maxChars`，但返回结构一模一样、也没有版本字段可读。若照常打印 `filtered: …`，调用方会以为拿到的是增量，实际拿到的是整段窗口——这是把所有调试建立在错误前提上的那类错误。因此格式化器在数据里自证过滤是否生效：出现 `seq <= since` 的记录即说明 `since` 没生效，出现 `kinds` 之外的记录即说明 `kinds` 没生效，未带 `truncated` 且记录序列化长度已超过请求的 `max_chars` 即说明上限没生效；三者任一成立就**撤掉过滤行、改印 `note:`**，并把这些记录照常显示（掩盖它们只是在另一个方向上撒谎）。`structuredContent.note` 同步给出同一句话，供机器消费方判断。
 
+## 26. 决策 0.8.1-h：超时契约的对外诚实与结果体积护栏
+
+> 2026-11-18 S4 实现决定（`lib/advice.mjs`、`lib/config.mjs`、`lib/mcp-format.mjs`、`bin/dsh-rpc-mcp.mjs`）。
+
+1. **为什么 schema 的 `timeout_ms` 上限仍保持 `3600000`**：`3600000`（1 小时）是本桥自己允许的最长等待预算（由 CLI、HTTP 端与分片等待共同支持）；把它砍小会破坏本来能跨多片等完的 CLI / 直连客户端，而且无论改成 900000 还是 300000，都依然无法准确描述每个外层 MCP 客户端各自的调用上限（Codex 默认 `tool_timeout_sec = 900` 秒，其它宿主可能更短或可配），只会制造新的错觉。
+2. **为什么诚实的做法是 schema 描述加“每会话一次性运行时提示行”**：外层客户端的调用上限由外层控制，桥既改不了也探测不到；因此先在 `dsh_ask.timeout_ms` 与 `dsh_wait.timeout_ms` 的 schema 描述中直接写明外层上限通常低于桥上限、长任务应走 `wait:false` + `dsh_wait({ session_id, since })`，再在运行时仅当阻塞等待（`dsh_ask(wait:true)` 或 `dsh_wait`）实际超时且请求预算 `>= 600000` ms 时，通过独立模块 `lib/advice.mjs` 在结果末尾追加一条 `advice:` 块；并用有界（200 项）的每会话 `Set` 去重——连续轮询时每次都重复同一句劝告只是噪音，可用 `config.timeoutAdvice: false` 全局关闭。
+3. **为什么 `maxResultChars` 只截断轮次回答正文（`content[1]`）**：必须直说——实测遇到的 413 属于多轮调用累积造成的上下文增长，而非单次回答过大；因此 `maxResultChars` 只是防止病态超长输出一次打爆客户端的护栏，**不是**解决累积上下文 413 的方案。正因如此，截断只作用于正文块（保证 `session`、`— meta`、`trace:`、`note:`、`reason:`、`next:`、`advice:` 块绝不被砍掉，否则丢失会话 id 或下一步提示会诱发重试），截断时在 `\r\n` 与空白边界对齐，并保留明确提示说明如何通过配置放宽。
+4. **为什么默认上限取 `20000` 字符**：正常一轮回答的正文通常只有几 KB；`20000` 字符足以完整容纳长分析报告而不误伤常规输出，同时又把单条 tool result 的正文体量远远压在各类客户端的单次响应上限之下，并允许通过 `config.maxResultChars`（范围 `0..200000`，`0` 为关闭）按需调整。
+
+
 

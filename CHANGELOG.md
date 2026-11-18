@@ -15,8 +15,8 @@
   - 混版诚实性：当桥连着的插件早于 0.8.1（不认 `since`/`kinds`/`max_chars`）时，回答不再打印 `filtered:` 行，而是改印 `note:` 说明"这些记录是未过滤、未截断的整段窗口，请升级插件或自行过滤"，并在 `structuredContent.note` 中同步同一句话。
 - C `structuredContent`：- TODO(S2..S6)
 - D `dsh_capabilities`：- TODO(S2..S6)
-- E 超时契约：- TODO(S2..S6)
-- F 结果护栏：- TODO(S2..S6)
+- E 超时契约：`dsh_ask.timeout_ms` 与 `dsh_wait.timeout_ms` 保持 `3600000` 上限，但在 schema 描述中明确外层 MCP 客户端单次调用超时（如 Codex 默认 `tool_timeout_sec = 900` s）先于桥上限生效、长任务应走 `wait:false` + `dsh_wait({ session_id, since })`；新增纯模块 `lib/advice.mjs`，当 `dsh_ask(wait:true)` 或 `dsh_wait` 在 `>= 600000` ms 预算上超时时每会话一次性追加 `advice:` 提示块（有界去重 200 个会话，可通过 `config.timeoutAdvice: false` 关闭；`dsh_ask(wait:false)` 永不追加）。
+- F 结果护栏：新增 `config.maxResultChars`（默认 `20000`，允许 `0..200000`，`0` 表示不截断）与 `lib/mcp-format.mjs` 的 `capText`；仅对 `formatToolResult` 的轮次正文块（`content[1]`）做边界对齐截断并附截断说明，`session`、`— meta`、`trace:`、`note:`、`reason:`、`advice:` 与 `next:` 块均原样保留。
 
 ### 修复
 

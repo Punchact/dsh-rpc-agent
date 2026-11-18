@@ -394,6 +394,8 @@ console.log(answer.text, answer.usage);
 - **"还没好"不是失败**：`status:"timeout"` 只说明这一片到期，轮次仍在 Harness 里跑。重投等于重新提问，会多开会话、重复副作用。要进度用 `wait` / `history`。
 - **轮次归属**：投递 prompt 后，本插件从事件流里找自己那条 `user/message`（`source.rpcId` 等于本次 `requestId`），以它落在哪一轮为准。因此**同一会话里有别人插话时，不会把别人的回答当成你的**——那一轮的 `turn/end` 会被跳过，继续等自己那一轮。
 
+外层 MCP 客户端通常会对单次工具调用设比本桥 `timeout_ms` 上限（`3600000`）更短的超时（例如 Codex 默认 `tool_timeout_sec` 为 `900` s），本桥无法抬高外层上限；长任务应默认使用 `dsh_ask({ wait: false })` 取回句柄，再用 `dsh_wait({ session_id, since })` 分段轮询。可在配置中通过 `timeoutAdvice`（默认 `true`，控制长等待超时后的每会话一次性提示）和 `maxResultChars`（默认 `20000`，上限 `200000`，`0` 为关闭；仅截断单轮正文以防病态超长输出）微调这一层的行为。
+
 ## 工作区、模型、推理等级
 
 这三个都是 DSH 自己的概念，桥只做转发，不新造开关。
@@ -504,7 +506,7 @@ approvals.mode=deny refused a sandbox escalation to "danger-full-access" for too
           deadlineMs: 60000    # delegate：等调用方回答的时长，超时视为拒绝
 ```
 
-其余键：`enabled`、`tokenFile`（自定义 token 路径）、`path`（默认 `/dsh-rpc`）、`logRequests`。环境变量 `DSH_RPC_TOKEN` 可覆盖 token（优先级高于文件），适合 CI 或不想落盘的场景。
+其余键：`enabled`、`tokenFile`（自定义 token 路径）、`path`（默认 `/dsh-rpc`）、`logRequests`、`traceDefault`（默认 `"errors"`）、`maxResultChars`（默认 `20000`，`0` 表示不截断）、`timeoutAdvice`（默认 `true`）。环境变量 `DSH_RPC_TOKEN` 可覆盖 token（优先级高于文件），适合 CI 或不想落盘的场景。
 
 ## 安全模型
 

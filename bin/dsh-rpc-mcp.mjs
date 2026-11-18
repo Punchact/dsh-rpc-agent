@@ -16,6 +16,7 @@ import { formatToolResult, formatToolError } from "../lib/mcp-format.mjs";
 import { createInflight } from "../lib/inflight.mjs";
 import { normalizeTraceLevel } from "../lib/trace-format.mjs";
 import { DEFAULT_HISTORY_KINDS, formatHistory } from "../lib/history-format.mjs";
+import { TIMEOUT_ADVICE, shouldAdviseTimeout } from "../lib/advice.mjs";
 
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_INFO = { name: "dsh-rpc", version: PLUGIN_VERSION, title: "DeepSeek Harness bridge" };
@@ -112,7 +113,10 @@ const TOOLS = [
           type: "integer",
           minimum: 1000,
           maximum: 3600000,
-          description: "How long to wait for the turn to finish. Defaults to the bridge's configured value (600000).",
+          description:
+            "How long to wait for the turn to finish. Defaults to the bridge's configured value (600000)." +
+            " Outer MCP clients usually cap a single tool call below this maximum (Codex: tool_timeout_sec, 900 s by default);" +
+            " the bridge cannot raise that cap, so for long work pass wait:false and poll with dsh_wait.",
         },
         trace: {
           type: "string",
@@ -250,7 +254,14 @@ const TOOLS = [
           description:
             "Return only what happened after this cursor (the `cursor` value from a previous result). Omit for the whole turn.",
         },
-        timeout_ms: { type: "integer", minimum: 1000, maximum: 3600000 },
+        timeout_ms: {
+          type: "integer",
+          minimum: 1000,
+          maximum: 3600000,
+          description:
+            "How long to wait for the turn to finish (milliseconds). Defaults to the bridge's configured value (600000)." +
+            " An outer client cap (Codex tool_timeout_sec) applies before the bridge budget; keep slices short and poll again with since.",
+        },
         trace: {
           type: "string",
           enum: ["none", "errors", "summary", "full"],
@@ -435,6 +446,36 @@ async function handleLine(line) {
 // ------------------------------------------------------------------- tools --
 
 const DEFAULT_TURN_TIMEOUT_MS = 600000;
+const DEFAULT_MAX_RESULT_CHARS = 20000;
+const MAX_ADVISED_SESSIONS = 200;
+
+// One-shot timeout advice per session id, bounded so long-lived MCP processes
+// do not grow without limit.
+const advisedTimeoutSessions = new Set();
+
+function maybeTimeoutAdvice(result, requestedMs, enabled) {
+  const sessionId = typeof result?.sessionId === "string" && result.sessionId.length > 0 ? result.sessionId : null;
+  const alreadyShown = sessionId !== null && advisedTimeoutSessions.has(sessionId);
+  if (
+    !shouldAdviseTimeout({
+      status: result?.status,
+      timedOut: result?.timedOut,
+      requestedMs,
+      enabled,
+      alreadyShown,
+    })
+  ) {
+    return null;
+  }
+  if (sessionId !== null) {
+    if (advisedTimeoutSessions.size >= MAX_ADVISED_SESSIONS) {
+      const oldest = advisedTimeoutSessions.values().next().value;
+      if (oldest !== undefined) advisedTimeoutSessions.delete(oldest);
+    }
+    advisedTimeoutSessions.add(sessionId);
+  }
+  return TIMEOUT_ADVICE;
+}
 
 /** Out-wait the server's turn budget so the bridge never aborts a live turn. */
 function turnBudget(timeoutMs) {
@@ -469,7 +510,12 @@ async function callTool(name, args, signal = undefined) {
     const defaults = await bridgeSettings();
     const turnDefault = Number.isInteger(defaults.defaultTimeoutMs) ? defaults.defaultTimeoutMs : DEFAULT_TURN_TIMEOUT_MS;
     const traceDefault = normalizeTraceLevel(defaults.traceDefault, "errors");
-    const hintOptions = { defaultTimeoutMs: turnDefault };
+    const maxResultChars =
+      Number.isInteger(defaults.maxResultChars) && defaults.maxResultChars >= 0
+        ? defaults.maxResultChars
+        : DEFAULT_MAX_RESULT_CHARS;
+    const adviceEnabled = typeof defaults.timeoutAdvice === "boolean" ? defaults.timeoutAdvice : true;
+    const hintOptions = { defaultTimeoutMs: turnDefault, maxResultChars, adviceEnabled };
     switch (name) {
       case "dsh_ask": {
         const prompt = typeof args.prompt === "string" ? args.prompt : "";
@@ -531,16 +577,23 @@ async function callTool(name, args, signal = undefined) {
           const left = timeoutMs - (first.durationMs ?? slice);
           if (left > 1_000) {
             const waited = await waitTurn(first.sessionId, { timeoutMs: left });
-            return formatToolResult({
+            const merged = {
               ...first,
               ...waited,
               text: waited.text || first.text,
               tools: waited.tools?.length > 0 ? waited.tools : first.tools,
               durationMs: (first.durationMs ?? 0) + (waited.waitedMs ?? 0),
-            }, askFormatOptions);
+            };
+            return formatToolResult(merged, {
+              ...askFormatOptions,
+              advice: maybeTimeoutAdvice(merged, timeoutMs, adviceEnabled),
+            });
           }
         }
-        return formatToolResult(first, askFormatOptions);
+        return formatToolResult(first, {
+          ...askFormatOptions,
+          advice: maybeTimeoutAdvice(first, timeoutMs, adviceEnabled),
+        });
       }
 
       case "dsh_workspaces": {
@@ -697,16 +750,18 @@ async function callTool(name, args, signal = undefined) {
         const sessionId = typeof args.session_id === "string" ? args.session_id.trim() : "";
         if (!sessionId) return formatToolError("`session_id` is required", undefined, "call dsh_sessions() to find the session id");
         const since = Number.isInteger(args.since) ? args.since : null;
+        const requestedMs = Number.isInteger(args.timeout_ms) ? args.timeout_ms : turnDefault;
         // Sliced on purpose: see waitTurn(). One long request cannot survive
         // the transport's 300 s ceiling, and the answer would be lost with it.
         const result = await waitTurn(sessionId, {
-          timeoutMs: Number.isInteger(args.timeout_ms) ? args.timeout_ms : turnDefault,
+          timeoutMs: requestedMs,
           since: since ?? undefined,
         });
         return formatToolResult(result, {
           ...hintOptions,
           trace: normalizeTraceLevel(args.trace, traceDefault),
           since,
+          advice: maybeTimeoutAdvice(result, requestedMs, adviceEnabled),
         });
       }
 

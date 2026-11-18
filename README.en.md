@@ -394,6 +394,8 @@ Without it you get the whole turn; with it you get only events whose `seq > sinc
 - **"Not done yet" is not failure**: `status:"timeout"` only says this slice expired; the turn keeps running in the Harness. Resending means asking again — extra sessions and repeated side effects. Use `wait` / `history` for progress.
 - **Turn ownership**: after delivering a prompt, the plugin looks for its own `user/message` in the event stream (`source.rpcId` equals this call's `requestId`) and anchors on the turn it lands in. So **when someone else speaks in that session, their answer is never taken for yours** — that turn's `turn/end` is skipped and waiting continues for your own turn.
 
+Outer MCP clients usually enforce a shorter single-call ceiling than this bridge's `3600000` ms `timeout_ms` maximum (for instance, Codex defaults `tool_timeout_sec` to `900` s), and the bridge cannot raise that outer cap. For long work, pass `wait: false` to `dsh_ask` and poll with `dsh_wait({ session_id, since })`. You can tune this layer with `timeoutAdvice` (default `true`, one-shot per-session advice on long-budget timeouts) and `maxResultChars` (default `20000`, `0..200000`, `0` disables capping; guards only the turn prose block against pathological outputs).
+
 ## Workspaces, models, reasoning effort
 
 These are DSH's own concepts; the bridge only forwards them and invents no new switches.
@@ -504,7 +506,7 @@ Configured through the `config` of `cordis.patch.yml`; every key has a default:
           deadlineMs: 60000    # delegate: how long to wait for the caller's answer; expiry counts as a refusal
 ```
 
-Other keys: `enabled`, `tokenFile` (custom token path), `path` (default `/dsh-rpc`), `logRequests`. The `DSH_RPC_TOKEN` environment variable overrides the token (higher priority than the file), which suits CI or setups that cannot persist a file.
+Other keys: `enabled`, `tokenFile` (custom token path), `path` (default `/dsh-rpc`), `logRequests`, `traceDefault` (default `"errors"`), `maxResultChars` (default `20000`, `0` = uncapped), `timeoutAdvice` (default `true`). The `DSH_RPC_TOKEN` environment variable overrides the token (higher priority than the file), which suits CI or setups that cannot persist a file.
 
 ## Security model
 
