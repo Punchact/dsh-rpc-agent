@@ -186,7 +186,7 @@ Host 抛 `RemoteError(code, message, details)`（`isDSHRemoteError === true`）�
 
 以上数字均为 2026-11-05 在本机实跑，命令见 README §10。
 
-> **现行口径（2026-11-19，0.9.0）**：本表是 2026-11-05 的历史快照，不改写。当前的数量以 README「开发与验证」为准——`npm test` 固定顺序跑 36 个 `*.test.mjs` 共 345 例，外加 `catalog.smoke.mjs`（29 个 RPC 方法）。表中三行随版本长大：`methods` 41 → 85 例，`client` 6 → 8 例；`edge` 仍是 24 项，但**本机 23/24**——第 21 项「create without a cwd reports the directory the Host attached」要求宿主替无 `cwd` 的请求补上工作目录，本机 0.8.1 宿主返回 `null`，属既有环境差异——该项依赖宿主替无 `cwd` 的请求补目录，本机 0.8.1 宿主不补；**CI 不跑 `test:edge`（`.github/workflows/test.yml` 只有 `npm test` / `test:host` / `check:package`），故“CI 下通过”没有证据**，这一项目前只有本机 23/24 的实测。
+> **现行口径（2026-11-19，0.9.0）**：本表是 2026-11-05 的历史快照，不改写。当前的数量以 README「开发与验证」为准——`npm test` 固定顺序跑 36 个 `*.test.mjs` 共 345 例，外加 `catalog.smoke.mjs`（29 个 RPC 方法）。表中三行随版本长大：`methods` 41 → 85 例，`client` 6 → 8 例；`edge` 仍是 24 项，但**本机 23/24**——第 21 项「create without a cwd reports the directory the Host attached」要求宿主替无 `cwd` 的请求补上工作目录，本机 0.8.1 宿主返回 `null`，属既有环境差异；**CI 不跑 `test:edge`（`.github/workflows/test.yml` 只有 `npm test` / `test:host` / `check:package`），故“CI 下通过”没有证据**，这一项目前只有本机 23/24 的实测。
 
 ## 8. 后续可做
 
@@ -615,6 +615,9 @@ compression: gzip
 - **已知残留（如实记）**：Antigravity 的 `runtimeLocator` 与 `probe()` 会带本机 `httpPort` 与 hub 版本 —— 这是本地运行标识，不含 CSRF token，但确实暴露端口与主机元数据；「取消成功」必须看状态机证据（`RUNNING → CANCELING → IDLE` + `EXECUTOR_TERMINATION_REASON_USER_CANCELED`），HTTP 200 不算。
 
 ## 37. 决策 0.9.0-j：净化与入口校验的第三轮收紧（安全复评 t3c）
+
+**残留与边界的准确说法**：会脱敏的是适配器失败文本、调试日志与 worker 上报的自由文本（`report` 的 `message`/`summary`/`reason`/`reviewPrompt`、attention 的 `prompt`/`summary`）；`attempts.result_json` 与 evidence 原样落账。Cookie 头按"逐对遮盖、保留同行其余内容"处理——整行遮盖会连一个紧跟其后的 URL 一起吞掉，而那是别人的证据。
+
 
 - **凭据形态按"实际出现过的形状"列**，不靠运气：除 `Bearer` / `ghp_` / `sk-` / csrf 外，补 `Authorization: Basic`、`Cookie` / `Set-Cookie`（止于分号）、URL 里的 `user:pass@`、`github_pat_`、`AKIA`。Cookie 那条第一版写成"到行尾"，把整行其余内容一起吃进 `[redacted]`，连带把后面的 URL 也藏了——正则的边界就是它的语义，写宽了同样是谎。
 - **只对字符串做凭据替换，并放过计数器**：`maxTokens` / `tokenCount` / `totalTokens` 这类键名含 `token`、值是数字。把数字改成 `[redacted]` 既没意义又毁掉成本可见性。规则改为「键名像凭据 **且** 值是字符串 **且** 不在计数白名单」；深度截断也改成 `[truncated: depth]`，让读者知道是递归上限而不是空值。

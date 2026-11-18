@@ -718,7 +718,7 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 - **不复制审批策略**：Harness 侧仍按自己的审批与沙箱策略执行；需要人工批准的工具可能让该轮长时间挂起。`permissionPreset` 下发的是该会话默认预设，不是放行。
 - **位置只在创建时决定**：`workspaceId` / `cwd` 对已有会话无效，桥直接拒绝而不是默默忽略。换位置 = 新建会话。
 - **换模型会改 profile 默认**：`selectModel` 是 Host 的模型切换入口，它会把选择存成 profile 默认。
-- **账本存的是结果本身，不做静默改写**：任务结果（DSH 轮次正文、适配器上报的 evidence）按产出原样落进 `storages/task-center/tasks.db`，只有**适配器失败文本与调试日志**会过脱敏。理由：结果是交付物，改写它等于篡改；如果结果里本来就含凭据，那是上游把凭据打进了输出。要限制这一点就限制输出侧，别指望账本替你兜。
+- **账本存的是结果本身，不做静默改写**：`attempts.result_json` 与证据按产出原样落进 `storages/task-center/tasks.db`，**不经脱敏**；过脱敏的只有适配器失败文本、调试日志，以及 worker 上报的自由文本字段（`report` 的 `message` / `summary` / `reason` / `reviewPrompt` 与 attention 的 `prompt` / `summary`）。理由：结果是交付物，改写它等于篡改；结果里若本来就含凭据，那是上游把凭据打进了输出——要限制就限制输出侧，别指望账本替你兜。
 - **权限预设依赖可选服务**：本部署若没有 `permissionPresets` 服务，传 `permissionPreset` 会得到 `-32000` 并说明原因。
 - **工作区只增不删**：桥只暴露 `workspaces.list` / `workspaces.create`；删除与改名请用 GUI。
 - **只转发 Host 允许的会话**：`sessions.list` 与 `history` 经 Host 的 `remoteAccess` 过滤。
