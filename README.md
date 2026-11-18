@@ -87,7 +87,7 @@ dsh plugin add @punchact/dsh-rpc-agent
 plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent" })
 ```
 
-非默认 profile 加 `--profile <name>`；钉版本写全 `@punchact/dsh-rpc-agent@0.7.7`，不写则取 `latest`。npm 上最新是 [`0.7.7`](https://www.npmjs.com/package/@punchact/dsh-rpc-agent)，本文件描述的是**仓库当前代码**，两者差异见 [CHANGELOG](./CHANGELOG.md) 顶部。
+非默认 profile 加 `--profile <name>`；钉版本写全 `@punchact/dsh-rpc-agent@0.7.8`，不写则取 `latest`。npm 上最新是 [`0.7.8`](https://www.npmjs.com/package/@punchact/dsh-rpc-agent)，本文件描述的是**仓库当前代码**，两者差异见 [CHANGELOG](./CHANGELOG.md) 顶部。
 
 三件在 npm 路线上容易踩的事：
 
@@ -96,7 +96,7 @@ plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent" })
 
    ```yaml
    minimumReleaseAgeExclude:
-     - '@punchact/dsh-rpc-agent@0.4.1 || 0.4.4 || 0.5.3 || 0.7.6 || 0.7.7'
+     - '@punchact/dsh-rpc-agent@0.4.1 || 0.4.4 || 0.5.3 || 0.7.6 || 0.7.7 || 0.7.8'
    ```
 
 3. **想确认装的是哪一份**：用 `cordis_inspect_query`（`Config.listConfigs`，`input: {"entry":"include:dsh-rpc-bridge"}`）看返回的 `packageDir`——指向 `<profile>\node_modules\@punchact\dsh-rpc-agent` 是 npm 路线，指向你的工作区是链接路线。**版本号本身不能当证据**，它读的是包里那个 `package.json`。
@@ -530,7 +530,7 @@ DSH 的 Web 服务端口由启动器决定，桌面端交给系统分配，所�
   "url": "http://127.0.0.1:3820/dsh-rpc",
   "origin": "http://127.0.0.1:3820",
   "path": "/dsh-rpc",
-  "version": "0.7.7",                        // 正在运行的那份插件自报的版本
+  "version": "0.7.8",                        // 正在运行的那份插件自报的版本
   "plugin": "dsh-rpc-agent",
   "pid": 12345,                              // 写这个文件的 Host 进程
   "startedAt": "2026-11-05T01:05:58.000Z",   // 该进程的启动时刻
