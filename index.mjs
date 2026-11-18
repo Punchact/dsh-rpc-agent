@@ -13,12 +13,13 @@ import { join } from "node:path";
 
 import { createAntigravityAdapter } from "./lib/adapters/antigravity.mjs";
 import { createCodexAdapter } from "./lib/adapters/codex.mjs";
+import { createDshAdapter } from "./lib/adapters/dsh.mjs";
 import { dshHome, endpointPath, loadOrCreateToken, tokenPath, writeEndpoint } from "./lib/auth.mjs";
 import { createApprovalState } from "./lib/approval-state.mjs";
 import { createApprovalGate } from "./lib/approvals.mjs";
 import { MAX_WAIT_SLICE_MS, MIN_WAIT_SLICE_MS, resolveConfig } from "./lib/config.mjs";
 import { buildDispatcher, registerRoutes } from "./lib/http.mjs";
-import { createMethods } from "./lib/methods.mjs";
+import { createDshAdapterOps, createMethods } from "./lib/methods.mjs";
 import { isOwnedSession, useOwnedState } from "./lib/owned.mjs";
 import { createPendingStore } from "./lib/pending.mjs";
 import { createStats } from "./lib/stats.mjs";
@@ -113,6 +114,17 @@ export function apply(ctx, input = {}) {
           log.warn?.(`[dsh-rpc] failed to initialize ${extKind} adapter: ${err?.message ?? String(err)}`);
           adapters = {};
         }
+      }
+
+      if (!adapters.dsh) {
+        adapters.dsh = createDshAdapter({
+          ops: createDshAdapterOps({
+            sessionController: ctx.sessionController,
+            config,
+            ctx,
+            approvals,
+          }),
+        });
       }
 
       taskEngine = createTaskEngine(taskStore);

@@ -70,6 +70,7 @@ const expected = [
   "dsh.sessions.prompt",
   "dsh.sessions.wait",
   "dsh.tasks.cancel",
+  "dsh.tasks.decideApproval",
   "dsh.tasks.dispatch",
   "dsh.tasks.get",
   "dsh.tasks.list",
@@ -119,6 +120,7 @@ const handlers = [
   "probeAgent",
   "dispatchTask",
   "pumpTask",
+  "decideApprovalTask",
 ];
 for (const name of handlers) {
   check(typeof methods[name] === "function", `handler missing: ${name}`);

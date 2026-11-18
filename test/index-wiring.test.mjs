@@ -139,7 +139,7 @@ test("index.mjs opens tasks.db, seeds baseline entities, wires dispatcher, and h
           approval: { support: "optional", evidence: "approval" },
           events: { support: "required", evidence: "stdio" },
         },
-        limitations: [],
+        limitations: ["no native approval path on this host"],
       },
     });
     assert.equal(reg.status, 200);

@@ -37,7 +37,7 @@ COMMANDS
   wait --session ID         wait for the turn already running on a session
   cancel --session ID       cancel the in-flight turn
   history --session ID      show the recent event window
-  tasks <subcommand>        manage task-center tasks (preview|submit|list|get|cancel|dispatch|pump|reconcile)
+  tasks <subcommand>        manage task-center tasks (preview|submit|list|get|cancel|dispatch|pump|reconcile|approve)
   agents <subcommand>       manage agent capability cards (register|list|probe)
   call <method> [json]      raw JSON-RPC call (json params optional)
   env                       print the endpoint and token as shell exports
@@ -114,6 +114,9 @@ const VALUE_FLAGS = new Set([
   "controls",
   "project",
   "title",
+  "attempt",
+  "approval",
+  "decision",
 ]);
 
 function parseArgv(argv) {
@@ -816,6 +819,27 @@ async function runTasksCommand(flags, rest, options) {
         flags.json
           ? JSON.stringify(result, null, 2)
           : `task ${result.taskId} · ${result.from} -> ${result.status} · closed=${result.attemptsClosed}`,
+      );
+      return 0;
+    }
+    case "approve": {
+      if (!firstId) throw new UsageError("tasks approve needs <taskId> or --task <id>");
+      const attemptId = flags.attempt;
+      if (!attemptId) throw new UsageError("tasks approve needs --attempt <attemptId>");
+      const approvalId = flags.approval;
+      if (!approvalId) throw new UsageError("tasks approve needs --approval <approvalId>");
+      const decision = flags.decision;
+      if (decision !== "allow" && decision !== "deny") {
+        throw new UsageError("tasks approve needs --decision allow|deny");
+      }
+      const params = { taskId: firstId, attemptId, approvalId, decision };
+      if (flags.reason) params.reason = flags.reason;
+      if (flags["idempotency-key"]) params.idempotencyKey = flags["idempotency-key"];
+      const result = await rpcCall("dsh.tasks.decideApproval", params, options);
+      print(
+        flags.json
+          ? JSON.stringify(result, null, 2)
+          : `task ${result.taskId} · approval ${result.approvalId} -> ${result.decision} · ${result.status} · v${result.stateVersion}`,
       );
       return 0;
     }

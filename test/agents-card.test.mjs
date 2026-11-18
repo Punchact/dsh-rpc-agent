@@ -33,9 +33,15 @@ test("normalizeCard returns canonical card with declared=true and verified=false
   assert.equal(card.verified, false);
   assert.deepEqual(Object.keys(card.controls), [...CONTROL_NAMES]);
 
-  // Empty limitations array is allowed as long as the key is present
-  const emptyLim = normalizeCard(validCard({ limitations: [] }));
-  assert.deepEqual(emptyLim.limitations, []);
+  // A17: a card must name at least one known weakness; advertising only is not a declaration
+  assert.throws(
+    () => normalizeCard(validCard({ limitations: [] })),
+    (err) => err?.data?.kind === "INVALID_CARD" && err?.data?.path === "limitations",
+  );
+  assert.throws(
+    () => normalizeCard(validCard({ limitations: ["   "] })),
+    (err) => err?.data?.kind === "INVALID_CARD",
+  );
 });
 
 test("normalizeCard rejects every invalid shape with INVALID_CARD", () => {
