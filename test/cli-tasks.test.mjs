@@ -129,3 +129,46 @@ test("mixedVersionHint explains a pre-0.9.0 plugin instead of leaking the RPC er
   assert.match(NEXT_HINT, /predates the task centre/);
   assert.match(NEXT_HINT, /next:/);
 });
+
+test("CLI rejects out-of-range numeric flags, unsafe integers, and malformed JSON before invoking RPC", async () => {
+  await withMockCliRpc(
+    (req) => {
+      if (req.method === "dsh.tasks.dispatch") {
+        return {
+          result: {
+            taskId: "t_fail",
+            status: "needs_reconcile",
+            stateVersion: 2,
+            dispatchFailed: true,
+            error: "raw http://127.0.0.1:4035 secret_token",
+          },
+        };
+      }
+      return { result: {} };
+    },
+    async ({ calls, getStdout }) => {
+      for (const badArgs of [
+        ["tasks", "pump", "t1", "--max-steps", "0"],
+        ["tasks", "pump", "t1", "--max-steps", "1001"],
+        ["tasks", "pump", "t1", "--max-steps", "1.5"],
+        ["tasks", "pump", "t1", "--max-steps", "abc"],
+        ["tasks", "list", "--limit", "0"],
+        ["tasks", "list", "--limit", "201"],
+        ["tasks", "list", "--limit", "2.5"],
+        ["tasks", "pump", "t1", "--after-seq", "-1"],
+        ["tasks", "pump", "t1", "--after-seq", "9007199254740993"],
+        ["tasks", "pump", "t1", "--cursor", "-2"],
+        ["tasks", "submit", "--input", "{bad-json"],
+        ["call", "dsh.ping", "{bad-json"],
+      ]) {
+        await assert.rejects(() => main(badArgs), UsageError, `expected UsageError for ${badArgs.join(" ")}`);
+      }
+      assert.equal(calls.length, 0);
+
+      // Even if a server returns an unsanitized dispatchFailed string, CLI output sanitizes it
+      const code = await main(["tasks", "dispatch", "t_fail"]);
+      assert.equal(code, 1);
+      assert.doesNotMatch(getStdout(), /4035|secret_token/);
+    },
+  );
+});

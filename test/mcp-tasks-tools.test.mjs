@@ -131,3 +131,66 @@ test("MCP falls back to probing dsh.tasks.list when dsh.discover omits tasksEnab
     },
   );
 });
+
+test("MCP validates task/session inputs upfront and sanitizes adapter errors", async () => {
+  resetBridgeDefaults();
+  await withMockRpc(
+    (req) => {
+      if (req.method === "dsh.discover") {
+        return {
+          result: { config: { tasksEnabled: true }, methods: [{ name: "dsh.tasks.list" }] },
+        };
+      }
+      if (req.method === "dsh.agents.probe") {
+        return {
+          error: {
+            code: -32000,
+            message: "raw http://127.0.0.1:4035 csrf=secret_leak_xyz",
+            data: { kind: "ADAPTER_UNAVAILABLE" },
+          },
+        };
+      }
+      return { result: {} };
+    },
+    async (calls) => {
+      const beforeCount = calls.length;
+      const badArrayInput = await callTool("dsh_tasks_submit", {
+        workspace_id: "local",
+        agent_id: "ag-1",
+        capability_revision_id: "cap-1",
+        input: ["not", "an", "object"],
+      });
+      assert.equal(badArrayInput.isError, true);
+
+      const badNullInput = await callTool("dsh_tasks_submit", {
+        workspace_id: "local",
+        agent_id: "ag-1",
+        capability_revision_id: "cap-1",
+        input: null,
+      });
+      assert.equal(badNullInput.isError, true);
+
+      const badLimitLow = await callTool("dsh_tasks_list", { limit: 0 });
+      assert.equal(badLimitLow.isError, true);
+      const badLimitHigh = await callTool("dsh_tasks_list", { limit: 201 });
+      assert.equal(badLimitHigh.isError, true);
+
+      const badTaskId = await callTool("dsh_tasks_get", { task_id: "   " });
+      assert.equal(badTaskId.isError, true);
+
+      const badSessionId = await callTool("dsh_ask", { prompt: "hi", session_id: "  " });
+      assert.equal(badSessionId.isError, true);
+
+      // None of the invalid inputs above may hit the task/ask RPC endpoints
+      assert.equal(
+        calls.slice(beforeCount).some((c) => c.method !== "dsh.discover"),
+        false,
+      );
+
+      // ADAPTER_UNAVAILABLE RPC error must be sanitized before reaching MCP client
+      const probeErr = await callTool("dsh_agents_probe", { agent_id: "ag-ag" });
+      assert.equal(probeErr.isError, true);
+      assert.doesNotMatch(probeErr.content[0].text, /4035|secret_leak_xyz/);
+    },
+  );
+});

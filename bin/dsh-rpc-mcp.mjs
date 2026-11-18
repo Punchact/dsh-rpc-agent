@@ -19,6 +19,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { rpcCall, waitForTurn, WAIT_SLICE_MS } from "../lib/client.mjs";
+import { sanitizeAdapterFailure } from "../lib/adapters/base.mjs";
 import { PLUGIN_VERSION } from "../lib/version.mjs";
 import { capText, formatToolResult, formatToolError } from "../lib/mcp-format.mjs";
 import { createInflight } from "../lib/inflight.mjs";
@@ -748,8 +749,12 @@ async function callTool(name, args, signal = undefined) {
           return formatToolError("`prompt` is required", undefined, "pass the task as a self-contained prompt string");
         }
         const params = { text: prompt };
-        const sessionId = typeof args.session_id === "string" ? args.session_id.trim() : "";
-        if (sessionId) params.sessionId = sessionId;
+        if (args.session_id !== undefined) {
+          if (typeof args.session_id !== "string" || !args.session_id.trim()) {
+            return formatToolError("`session_id` must be a non-empty string", undefined, -32602);
+          }
+          params.sessionId = args.session_id.trim();
+        }
         // Location and preset are creation-only. They are forwarded even when a
         // session was named so the bridge can refuse the contradiction — dropping
         // them here would look like they had been honoured.
@@ -841,7 +846,12 @@ async function callTool(name, args, signal = undefined) {
 
       case "dsh_approvals_pending": {
         const params = {};
-        if (typeof args.session_id === "string" && args.session_id.trim()) params.sessionId = args.session_id.trim();
+        if (args.session_id !== undefined) {
+          if (typeof args.session_id !== "string" || !args.session_id.trim()) {
+            return formatToolError("`session_id` must be a non-empty string", undefined, -32602);
+          }
+          params.sessionId = args.session_id.trim();
+        }
         if (Number.isInteger(args.wait_ms)) params.waitMs = args.wait_ms;
         const result = await call("dsh.approvals.pending", params);
         const pending = Array.isArray(result.pending) ? result.pending : [];
@@ -1012,7 +1022,10 @@ async function callTool(name, args, signal = undefined) {
         const params = {};
         if (args.sections !== undefined) params.sections = args.sections;
         if (args.max_chars !== undefined) params.max_chars = args.max_chars;
-        if (typeof args.session_id === "string" && args.session_id.trim()) {
+        if (args.session_id !== undefined) {
+          if (typeof args.session_id !== "string" || !args.session_id.trim()) {
+            return formatToolError("`session_id` must be a non-empty string", undefined, -32602);
+          }
           params.session_id = args.session_id.trim();
         }
         // A newer CLI/MCP bridge can be paired with an older plugin inside the
@@ -1052,6 +1065,14 @@ async function callTool(name, args, signal = undefined) {
       }
 
       case "dsh_tasks_submit": {
+        if (args.input !== undefined) {
+          if (args.input === null || typeof args.input !== "object" || Array.isArray(args.input)) {
+            return formatToolError("`input` must be a plain JSON object", undefined, -32602);
+          }
+        }
+        if (args.preview_id !== undefined && (typeof args.preview_id !== "string" || !args.preview_id.trim())) {
+          return formatToolError("`preview_id` must be a non-empty string", undefined, -32602);
+        }
         const params = {
           idempotencyKey:
             typeof args.idempotency_key === "string" && args.idempotency_key.trim()
@@ -1065,7 +1086,7 @@ async function callTool(name, args, signal = undefined) {
         if (typeof args.capability_revision_id === "string" && args.capability_revision_id.trim()) {
           params.capabilityRevisionId = args.capability_revision_id.trim();
         }
-        if (args.input && typeof args.input === "object") params.input = args.input;
+        if (args.input !== undefined) params.input = args.input;
         else if (typeof args.prompt === "string" && args.prompt.trim()) params.input = { prompt: args.prompt.trim() };
         const result = await call("dsh.tasks.submit", params);
         return formatTaskSummary(result, maxResultChars);
@@ -1077,7 +1098,12 @@ async function callTool(name, args, signal = undefined) {
         if (typeof args.workspace_id === "string" && args.workspace_id.trim()) params.workspaceId = args.workspace_id.trim();
         if (typeof args.principal_id === "string" && args.principal_id.trim()) params.principalId = args.principal_id.trim();
         if (typeof args.cursor === "string" && args.cursor.trim()) params.cursor = args.cursor.trim();
-        if (Number.isInteger(args.limit)) params.limit = args.limit;
+        if (args.limit !== undefined) {
+          if (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 200) {
+            return formatToolError("`limit` must be an integer between 1 and 200", undefined, -32602);
+          }
+          params.limit = args.limit;
+        }
         const result = await call("dsh.tasks.list", params);
         const items = Array.isArray(result?.items) ? result.items : [];
         const lines = items.map(
@@ -1156,7 +1182,12 @@ async function callTool(name, args, signal = undefined) {
         const agentId = typeof args.agent_id === "string" ? args.agent_id.trim() : "";
         if (!agentId) return formatToolError("`agent_id` is required", undefined, -32602);
         const params = { agentId };
-        if (Array.isArray(args.controls)) params.controls = args.controls;
+        if (args.controls !== undefined) {
+          if (!Array.isArray(args.controls) || args.controls.some((c) => typeof c !== "string" || !c.trim())) {
+            return formatToolError("`controls` must be an array of non-empty strings", undefined, -32602);
+          }
+          params.controls = args.controls.map((c) => c.trim());
+        }
         const result = await call("dsh.agents.probe", params);
         const header = `agent ${result.agentId} · ${result.probeStatus ?? "unknown"}`;
         const body = `verified: ${(result.verifiedControls ?? Object.keys(result.verified ?? {})).join(", ") || "(none)"}\nunknown: ${(result.unknown ?? []).map((u) => `${u.control}(${u.reason})`).join(", ") || "(none)"}`;
@@ -1181,6 +1212,23 @@ async function callTool(name, args, signal = undefined) {
   } catch (error) {
     // `code` is the JSON-RPC code the bridge answered with; toolError turns it
     // into the concrete next step instead of leaving the caller to guess.
+    // Never surface raw adapter/transport/internal exception text to MCP callers.
+    const isAdapterOrInternal =
+      error?.data?.kind === "ADAPTER_UNAVAILABLE" ||
+      error?.taskCode === "ADAPTER_UNAVAILABLE" ||
+      !Number.isInteger(error?.code) ||
+      error.code === -32000 ||
+      error.code === -32603;
+    if (TASK_TOOL_NAMES.has(name) && isAdapterOrInternal) {
+      const safe = sanitizeAdapterFailure(error);
+      return formatToolError(
+        safe.message,
+        safe.code || safe.kind || safe.httpStatus
+          ? { code: safe.code, kind: safe.kind, httpStatus: safe.httpStatus }
+          : undefined,
+        error?.code,
+      );
+    }
     return formatToolError(error instanceof Error ? error.message : String(error), error?.data, error?.code);
   }
 }

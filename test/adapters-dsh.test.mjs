@@ -80,7 +80,8 @@ test("dsh adapter probe is read-only (never calls createSession or askSession) a
   });
   const failRes = await failAdapter.probe();
   assert.equal(failRes.ok, false);
-  assert.equal(failRes.reason, "controller_offline");
+  assert.equal(failRes.reason, "the execution backend is unavailable");
+  assert.equal(failRes.reason.includes("controller_offline"), false);
 });
 
 test("dsh adapter start creates session, triggers ask, and returns secret-free locator", async () => {

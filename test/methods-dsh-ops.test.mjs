@@ -268,6 +268,27 @@ test("createMethods auto-wires dsh adapter when tasksEnabled=true and validates 
     });
     assert.equal(denied.decision, "reject");
     assert.ok(denied.operationId);
+
+    // SEC-1.2: registerAgent rejects executable selection fields in adapterConfigRef
+    for (const badRef of [
+      JSON.stringify({ binary: "C:\\evil\\cmd.exe" }),
+      JSON.stringify({ nested: { executable: "/tmp/pwn" } }),
+      JSON.stringify({ command: "powershell" }),
+      JSON.stringify({ argv: ["--bad"] }),
+      { binary: "C:\\evil.exe" },
+    ]) {
+      await assert.rejects(
+        () =>
+          methods.registerAgent({
+            adapterKind: "codex",
+            card: validCard("ag_codex_bad", "codex"),
+            adapterConfigRef: badRef,
+          }),
+        (err) =>
+          isTaskError(err, TASK_ERROR.VALIDATION_FAILED) &&
+          /tasksAdapters\.<kind>\.binary/.test(err.message),
+      );
+    }
   } finally {
     store.close();
   }

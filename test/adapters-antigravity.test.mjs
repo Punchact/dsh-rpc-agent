@@ -155,3 +155,62 @@ test("antigravity adapter fails with ADAPTER_UNAVAILABLE when no alive hub descr
     rmSync(emptyDir, { recursive: true, force: true });
   }
 });
+
+test("antigravity adapter enforces redirect:error, timeout signal, response size cap, and sanitized messages", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ag-sec-"));
+  writeFileSync(
+    join(dir, "hub_4035.json"),
+    JSON.stringify({ pid: process.pid, httpPort: 4035, lsVersion: "2.32.2", csrfToken: "csrf-secret" }),
+  );
+  try {
+    let seenInit = null;
+    const hugeAdapter = createAntigravityAdapter({
+      daemonDir: dir,
+      isPidAlive: () => true,
+      maxResponseChars: 128,
+      timeoutMs: 2_000,
+      fetch: async (_url, init) => {
+        seenInit = init;
+        return {
+          ok: true,
+          status: 200,
+          async text() {
+            return "x".repeat(256);
+          },
+        };
+      },
+    });
+    await assert.rejects(
+      () => hugeAdapter.start({ task: { requestSummary: { prompt: "hi" } } }),
+      (err) =>
+        isTaskError(err, TASK_ERROR.ADAPTER_UNAVAILABLE) &&
+        err.data?.reason === "response_too_large" &&
+        !err.message.includes("4035") &&
+        !err.message.includes("csrf-secret"),
+    );
+    assert.equal(seenInit.redirect, "error");
+    assert.ok(seenInit.signal);
+
+    const bodyErrAdapter = createAntigravityAdapter({
+      daemonDir: dir,
+      isPidAlive: () => true,
+      fetch: async () => ({
+        ok: true,
+        status: 200,
+        async text() {
+          throw new Error("stream broken at http://127.0.0.1:4035/leak");
+        },
+      }),
+    });
+    await assert.rejects(
+      () => bodyErrAdapter.start({ task: { requestSummary: { prompt: "hi" } } }),
+      (err) =>
+        isTaskError(err, TASK_ERROR.ADAPTER_UNAVAILABLE) &&
+        err.data?.reason === "body_read_error" &&
+        !err.message.includes("4035") &&
+        !err.message.includes("leak"),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

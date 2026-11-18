@@ -394,3 +394,86 @@ test("startTask enforces the maxConcurrent gate without leaving tasks in dispatc
     s1.store.close();
   }
 });
+
+test("dispatch, pump, and drainEffects sanitize raw adapter exceptions out of ledger/results while logging to debug", async () => {
+  const secretRaw = "connect ECONNREFUSED http://127.0.0.1:4035 token=csrf_top_secret_99 C:\\Users\\Andy\\priv.key";
+  const debugLogs = [];
+  const logger = { debug: (msg, meta) => debugLogs.push({ msg, meta }) };
+
+  const failStartAdapter = makeFakeAdapter({
+    onStart() {
+      const err = new Error(secretRaw);
+      err.code = "ECONNREFUSED";
+      throw err;
+    },
+  });
+  const s1 = await setupWithAdapter(failStartAdapter);
+  try {
+    const disp = createDispatcher({
+      store: s1.store,
+      engine: s1.engine,
+      adapters: { fake: failStartAdapter },
+      logger,
+    });
+    const t = await s1.engine.submit({
+      idempotencyKey: "sec2-start",
+      capabilityRevisionId: "cap-1",
+      workspaceId: "ws-1",
+      agentId: "ag-1",
+    });
+    const res = await disp.startTask({ taskId: t.taskId });
+    assert.equal(res.dispatchFailed, true);
+    assert.equal(res.error, "the execution backend is unavailable");
+    assert.doesNotMatch(JSON.stringify(res), /4035|csrf_top_secret_99|priv\.key|ECONNREFUSED/);
+
+    const detail = await s1.engine.get({ taskId: t.taskId });
+    const evts = await s1.engine.events({ taskId: t.taskId, afterSeq: 0 });
+    assert.doesNotMatch(JSON.stringify(detail), /4035|csrf_top_secret_99|priv\.key/);
+    assert.doesNotMatch(JSON.stringify(evts), /4035|csrf_top_secret_99|priv\.key/);
+    assert.ok(debugLogs.some((d) => String(d.meta?.message).includes("csrf_top_secret_99")));
+  } finally {
+    s1.store.close();
+  }
+
+  const failPumpCancelAdapter = makeFakeAdapter({
+    onEvents() {
+      throw new Error(secretRaw);
+    },
+    onCancel() {
+      throw new Error(secretRaw);
+    },
+  });
+  const s2 = await setupWithAdapter(failPumpCancelAdapter);
+  try {
+    const disp = createDispatcher({
+      store: s2.store,
+      engine: s2.engine,
+      adapters: { fake: failPumpCancelAdapter },
+      logger,
+    });
+    const t = await s2.engine.submit({
+      idempotencyKey: "sec2-pump-cancel",
+      capabilityRevisionId: "cap-1",
+      workspaceId: "ws-1",
+      agentId: "ag-1",
+    });
+    const started = await disp.startTask({ taskId: t.taskId });
+    await assert.rejects(
+      () => disp.pump({ taskId: t.taskId }),
+      (err) => !err.message.includes("4035") && !err.message.includes("csrf_top_secret_99"),
+    );
+
+    await s2.engine.cancel({
+      taskId: t.taskId,
+      expectedStateVersion: started.stateVersion,
+      idempotencyKey: "sec2-cancel-idem",
+    });
+    const d = await disp.drainEffects({ limit: 10 });
+    assert.equal(d.failed, 1);
+
+    const effRows = s2.store.read((db) => db.prepare("SELECT * FROM effects WHERE task_id = ?").all(t.taskId));
+    assert.doesNotMatch(JSON.stringify(effRows), /4035|csrf_top_secret_99|priv\.key/);
+  } finally {
+    s2.store.close();
+  }
+});

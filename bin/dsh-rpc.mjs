@@ -14,6 +14,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { rpcCall, rpcStream, waitForTurn, WAIT_SLICE_MS } from "../lib/client.mjs";
+import { ADAPTER_FAILURE_MESSAGES, sanitizeAdapterFailure } from "../lib/adapters/base.mjs";
 import { endpointPath, readEndpoint, stateDir, tokenPath } from "../lib/auth.mjs";
 import { describeTrace, isTraceLevel, normalizeTraceLevel } from "../lib/trace-format.mjs";
 
@@ -117,6 +118,7 @@ const VALUE_FLAGS = new Set([
   "attempt",
   "approval",
   "decision",
+  "after-seq",
 ]);
 
 function parseArgv(argv) {
@@ -163,18 +165,21 @@ function connectionOptions(flags) {
   return { url: flags.url, token: flags.token };
 }
 
-function numberOf(flags, key) {
+function numberOf(flags, key, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
   if (flags[key] === undefined) return undefined;
-  const value = Number(flags[key]);
-  if (!Number.isFinite(value) || value <= 0) throw new UsageError(`--${key} must be a positive number`);
-  return Math.floor(value);
+  const raw = typeof flags[key] === "string" ? flags[key].trim() : "";
+  if (!/^-?\d+$/.test(raw)) {
+    throw new UsageError(`--${key} must be a safe integer between ${min} and ${max}`);
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new UsageError(`--${key} must be a safe integer between ${min} and ${max}`);
+  }
+  return value;
 }
 
 function cursorOf(flags, key) {
-  if (flags[key] === undefined) return undefined;
-  const value = Number(flags[key]);
-  if (!Number.isFinite(value) || value < 0) throw new UsageError(`--${key} must be a non-negative number`);
-  return Math.floor(value);
+  return numberOf(flags, key, { min: 0, max: Number.MAX_SAFE_INTEGER });
 }
 
 function shellDoubleQuote(value) {
@@ -681,6 +686,9 @@ async function runTasksCommand(flags, rest, options) {
   const [sub, ...args] = rest;
   if (!sub) throw new UsageError("tasks needs a subcommand: preview|submit|list|get|cancel|dispatch|pump|reconcile");
   const firstId = flags.task ?? args[0];
+  if (flags["after-seq"] !== undefined) {
+    cursorOf(flags, "after-seq");
+  }
 
   switch (sub) {
     case "preview": {
@@ -693,7 +701,7 @@ async function runTasksCommand(flags, rest, options) {
       if (!params.capabilityRevisionId) throw new UsageError("tasks preview needs --capability <revisionId>");
       if (!params.agentId) throw new UsageError("tasks preview needs --agent <agentId>");
       if (flags.digest) params.requestDigest = flags.digest;
-      if (flags.ttl !== undefined) params.ttlMs = numberOf(flags, "ttl");
+      if (flags.ttl !== undefined) params.ttlMs = numberOf(flags, "ttl", { min: 1000, max: 3_600_000 });
       if (flags.input !== undefined) params.input = parseJsonFlag(flags.input, "input");
       const result = await rpcCall("dsh.tasks.preview", params, options);
       print(
@@ -728,7 +736,7 @@ async function runTasksCommand(flags, rest, options) {
       if (flags.workspace) params.workspaceId = flags.workspace;
       if (flags.principal) params.principalId = flags.principal;
       if (flags.cursor) params.cursor = flags.cursor;
-      const limit = numberOf(flags, "limit");
+      const limit = numberOf(flags, "limit", { min: 1, max: 200 });
       if (limit) params.limit = limit;
       const result = await rpcCall("dsh.tasks.list", params, options);
       if (flags.json) {
@@ -782,23 +790,36 @@ async function runTasksCommand(flags, rest, options) {
       if (flags.project) params.projectId = flags.project;
       if (flags.title) params.title = flags.title;
       const result = await rpcCall("dsh.tasks.dispatch", params, options);
+      const knownSafeMessages = new Set(Object.values(ADAPTER_FAILURE_MESSAGES));
+      const safeError =
+        result.dispatchFailed && result.error
+          ? knownSafeMessages.has(result.error)
+            ? result.error
+            : sanitizeAdapterFailure({ message: result.error }).message
+          : result.error;
+      const safeResult = result.dispatchFailed ? { ...result, error: safeError } : result;
       print(
         flags.json
-          ? JSON.stringify(result, null, 2)
-          : `task ${result.taskId} · ${result.status} · v${result.stateVersion}${result.dispatchFailed ? ` (failed: ${result.error})` : ""}`,
+          ? JSON.stringify(safeResult, null, 2)
+          : `task ${safeResult.taskId} · ${safeResult.status} · v${safeResult.stateVersion}${safeResult.dispatchFailed ? ` (failed: ${safeResult.error})` : ""}`,
       );
-      return result.dispatchFailed ? 1 : 0;
+      return safeResult.dispatchFailed ? 1 : 0;
     }
     case "pump": {
       if (!firstId) throw new UsageError("tasks pump needs <taskId> or --task <id>");
       const params = { taskId: firstId };
-      const maxSteps = numberOf(flags, "max-steps");
+      const maxSteps = numberOf(flags, "max-steps", { min: 1, max: 1000 });
       if (maxSteps) params.maxSteps = maxSteps;
-      const timeout = numberOf(flags, "timeout");
+      const timeout = numberOf(flags, "timeout", { min: 1, max: 3_600_000 });
       if (timeout) params.deadlineMs = timeout;
       if (flags.cursor !== undefined) {
-        const cur = Number(flags.cursor);
-        params.cursor = Number.isFinite(cur) ? cur : flags.cursor;
+        const rawCur = String(flags.cursor).trim();
+        if (!rawCur) throw new UsageError("--cursor must be non-empty");
+        if (/^-?[\d.eE+-]+$/.test(rawCur)) {
+          params.cursor = cursorOf(flags, "cursor");
+        } else {
+          params.cursor = rawCur;
+        }
       }
       const result = await rpcCall("dsh.tasks.pump", params, options);
       print(

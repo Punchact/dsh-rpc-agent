@@ -133,6 +133,7 @@ export function apply(ctx, input = {}) {
         engine: taskEngine,
         adapters,
         maxConcurrent: config.tasksMaxConcurrent,
+        logger: log,
       });
 
       const drainTimer = setInterval(() => {
