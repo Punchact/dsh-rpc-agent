@@ -199,6 +199,110 @@ test("drainEffects executes cancel effect exactly once and ignores replay", asyn
   }
 });
 
+test("drainEffects reclaims an in-flight effect whose lease expired", async () => {
+  const adapter = makeFakeAdapter();
+  const { store, engine, dispatcher } = await setupWithAdapter(adapter);
+  try {
+    const t = await engine.submit({
+      idempotencyKey: "lease-1",
+      capabilityRevisionId: "cap-1",
+      workspaceId: "ws-1",
+      agentId: "ag-1",
+    });
+    const started = await dispatcher.startTask({ taskId: t.taskId });
+    await engine.cancel({
+      taskId: t.taskId,
+      expectedStateVersion: started.stateVersion,
+      idempotencyKey: "cancel-lease-1",
+    });
+
+    // Simulate a drain that died after claiming: in_flight with an expired lease.
+    const expired = new Date(Date.now() - 60_000).toISOString();
+    store.withWriteTx((db) => {
+      db.prepare(
+        "UPDATE effects SET status = 'in_flight', lease_expires_at = ?, updated_at = ? WHERE task_id = ?",
+      ).run(expired, expired, t.taskId);
+    });
+
+    const d = await dispatcher.drainEffects({ limit: 10 });
+    assert.equal(d.processed, 1);
+    assert.equal(d.completed, 1);
+    assert.equal(adapter.calls.cancel, 1);
+  } finally {
+    store.close();
+  }
+});
+
+test("a cancel the runtime refuses becomes needs_reconcile instead of a silent hang", async () => {
+  const adapter = makeFakeAdapter({
+    onCancel() {
+      throw new Error("runtime refused to stop");
+    },
+  });
+  const { store, engine, dispatcher } = await setupWithAdapter(adapter);
+  try {
+    const t = await engine.submit({
+      idempotencyKey: "cancel-fail-1",
+      capabilityRevisionId: "cap-1",
+      workspaceId: "ws-1",
+      agentId: "ag-1",
+    });
+    const started = await dispatcher.startTask({ taskId: t.taskId });
+    await engine.cancel({
+      taskId: t.taskId,
+      expectedStateVersion: started.stateVersion,
+      idempotencyKey: "cancel-fail-1-cancel",
+    });
+
+    const d = await dispatcher.drainEffects({ limit: 10 });
+    assert.equal(d.failed, 1);
+
+    const got = await engine.get({ taskId: t.taskId });
+    assert.equal(got.status, "needs_reconcile");
+    const evts = await engine.events({ taskId: t.taskId, afterSeq: 0 });
+    assert.ok(evts.events.some((e) => e.type === "cancel.failed"));
+  } finally {
+    store.close();
+  }
+});
+
+test("startTask keeps the runtime locator when the ledger refuses the attempt", async () => {
+  const adapter = makeFakeAdapter();
+  const { store, engine, dispatcher } = await setupWithAdapter(adapter);
+  try {
+    const t = await engine.submit({
+      idempotencyKey: "orphan-1",
+      capabilityRevisionId: "cap-1",
+      workspaceId: "ws-1",
+      agentId: "ag-1",
+    });
+    // A cancel lands while the adapter is starting: the attempt can no longer be
+    // recorded, but the run exists and its locator must survive.
+    adapter.start = async () => {
+      const row = store.read((db) => db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(t.taskId));
+      await engine.cancel({
+        taskId: t.taskId,
+        expectedStateVersion: row.state_version,
+        idempotencyKey: "orphan-1-cancel",
+        reason: "cancelled mid-dispatch",
+      });
+      return { accepted: true, locator: { kind: "fake", remoteId: "rem-orphan" } };
+    };
+
+    const res = await dispatcher.startTask({ taskId: t.taskId });
+    assert.equal(res.orphan, true);
+    assert.deepEqual(res.locator, { kind: "fake", remoteId: "rem-orphan" });
+    assert.equal(res.status, "needs_reconcile");
+
+    const evts = await engine.events({ taskId: t.taskId, afterSeq: 0 });
+    const orphan = evts.events.find((e) => e.type === "dispatch.orphaned");
+    assert.ok(orphan);
+    assert.deepEqual(orphan.evidence?.runtimeLocator, { kind: "fake", remoteId: "rem-orphan" });
+  } finally {
+    store.close();
+  }
+});
+
 test("RPC wiring exposes dsh.tasks.dispatch/pump and config validates tasksAdapters and tasksDispatchMaxSteps", async () => {
   const cfg = resolveConfig({
     tasksAdapters: { antigravity: { enabled: true, projectId: "p1" } },
