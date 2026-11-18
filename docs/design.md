@@ -584,7 +584,13 @@ compression: gzip
 - **为什么**：`0.9.0` 的消费者既有直接做会话问答的既有客户端，也有渐进接入任务中心的操作者。如果一升级就自动创建 SQLite 库、起 5 秒后台定时器、挂载 6 个新 MCP 工具或默认把并发放宽到多路外部进程，就会改变老用户的磁盘、端口、工具列表预算并放大外部进程失控半径。默认全关确保 0.8.x 用户的升级回归面为零，打开后也先被并发=1 与未知即转核对两条安全带兜住。
 - **反例或代价**：新装 `0.9.0` 的用户不能"开箱直接调用 `dsh_tasks_submit`"，必须按手册修改 `cordis.patch.yml` 并重启一次宿主，多出一步显式激活动作。
 
+## 34. 决策 0.9.0-g：取消确认、幂等载荷与租约围栏
 
+合并前的外部代码评审（t1）指出四处会真实伤到调用方的缝隙，本版按「宁可报冲突，不要静默撒谎」收口：
 
+1. **取消的确认必须来自执行方，且要当场收口**。适配器的 `cancel` 回报 `confirmedStopped`：DSH 适配器取 `res.stopped === true`，Antigravity 适配器取 `stoppedConversationIds.includes(cascadeId)`（`ForceStopCascadeTree` 的回显），Codex 适配器恒为 `false`（`turn/interrupt` 只是受理，`turn/completed.status: "interrupted"` 才是结果）。确认成立时，同一次 `drainEffects` 内把 `cancel_requested` 推进到 `cancelled` 并写 `cancel.confirmed`；否则任务会等一个已停会话永远发不出的事件。
+2. **幂等键识别的是「同一个请求」，不是「同一个键」**。`cancel` / `resolve` 的重放会比较请求意图（`reason`；`disposition` + `evidenceRef`），不一致抛 `STATE_CONFLICT`。`expectedStateVersion` 刻意不参与比较：它是并发护栏，正常重试时必然变化，把它算进意图会让诚实重试失败。
+3. **`recordAttemptStart(markRunning: false)` 也是状态变更**。绑定活动尝试改为带 `state_version` 条件的更新并自增版本，避免陈旧调用方绕过乐观锁改绑。
+4. **出箱写入围栏**。完成/失败更新要求 `status = 'in_flight'`；租约过期被回收后迟到的回执只记 `skipped`，不覆盖接手者的结果。
 
-
+同时记录一处**刻意不对称**：`cancel_requested` 下收到 `ready` 报告仍可进 `review_pending`（方案 §5.2：先到可信完成证据就按结果走），而 `waiting` 报告会记 `report.disputed`。前者不是缺陷，是「取消与完成竞态时以证据为准」的落地；差别在于 ready 带结果、waiting 只带一句等待。

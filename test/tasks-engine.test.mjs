@@ -196,8 +196,20 @@ test("cancel on executor without cancel support enters needs_reconcile with canc
       taskId: t.taskId,
       expectedStateVersion: att.stateVersion,
       idempotencyKey: "cancel-unsup-1",
+      reason: "stop requested",
     });
     assert.equal(replay.deduplicated, true);
+    // Same key with a different request is a conflict, not a silent replay.
+    await assert.rejects(
+      () =>
+        engine.cancel({
+          taskId: t.taskId,
+          expectedStateVersion: att.stateVersion,
+          idempotencyKey: "cancel-unsup-1",
+          reason: "a different reason",
+        }),
+      /different cancel request/,
+    );
     assert.equal(replay.status, "needs_reconcile");
 
     const detail = await engine.get({ taskId: t.taskId });
@@ -467,6 +479,7 @@ test("withdrawing a queued task that was never dispatched is final immediately (
       taskId: task.taskId,
       expectedStateVersion: 2,
       idempotencyKey: "wd-cancel-1",
+      reason: "changed my mind",
     });
     assert.equal(replay.deduplicated, true);
     assert.equal(replay.status, "cancelled");

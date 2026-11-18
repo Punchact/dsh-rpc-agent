@@ -26,6 +26,10 @@
 
 - `scripts.test` 新增并接入 19 个任务中心与 CLI/适配器测试套件（全链 35 个测试文件、326 例，本机与 CI 均全绿），并更新 `catalog.smoke.mjs` 校验 29 个 RPC 方法。
 - `dispatch.mjs` 修复了租约到期回收与原子 `maxConcurrent` 门控竞态，防止同一写事务之外并发超发或将任务卡死在 `dispatching` / `in_flight`。
+- **取消确认后立刻收口**：适配器回报 `confirmedStopped: true`（DSH 会话真停了、Antigravity 回执里含该 cascadeId）时，同一次出箱排水内把任务从 `cancel_requested` 推进到 `cancelled` 并写 `cancel.confirmed`；此前只把 effect 标完成，任务会悬在 `cancel_requested` 等一个已停会话永远不会发出的事件。Codex 的 `turn/interrupt` 只算受理，故不设该标志。
+- **幂等键不再掩盖改过的请求**：`cancel` / `resolve` 的重放分支会比较请求意图（取消原因；处置结论 + 证据引用），同键异载荷抛 `STATE_CONFLICT`（`reason: "idempotency_payload_mismatch"`）。`expectedStateVersion` 属并发护栏、重试时本就会变，不参与比较。
+- **`recordAttemptStart` 的 `markRunning: false` 分支加了乐观锁**：绑定 `active_attempt_id` 改为带 `state_version` 条件的写并自增版本，陈旧调用方不再能静默改绑活动尝试。
+- **出箱写入加了租约围栏**：效果完成/失败更新要求行仍处于 `in_flight`，租约过期被回收后迟到的回执只记 `skipped`，不覆盖接手者的结果。
 
 ### 行为变化
 
