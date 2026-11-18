@@ -117,7 +117,7 @@ test("degradedFromCapabilities reads the capability-card shape that registerAgen
   assert.deepEqual(degradedFromCapabilities(JSON.stringify(healthy)), []);
 });
 
-test("a registered card keeps degraded[] visible end to end", async () => {
+test("a seeded capability card keeps degraded[] visible on the detail path", async () => {
   const store = openStore({ path: ":memory:" });
   try {
     await seedBaselineEntities(store, {

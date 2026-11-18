@@ -20,6 +20,51 @@ async function setup() {
   return { store, engine: createTaskEngine(store) };
 }
 
+test("preview carries degraded[] for a capability card that cannot cancel", async () => {
+  const store = openStore({ path: ":memory:" });
+  try {
+    await seedBaselineEntities(store, {
+      principal: { principalId: "p-owner" },
+      workspace: { workspaceId: "ws-card", rootPath: "C:\\ws-card" },
+      capabilityRevision: { revisionId: "cap-card", capability: "review.diff@1" },
+      agent: {
+        agentId: "ag-card",
+        adapterKind: "dsh",
+        capabilities: {
+          cardVersion: "capability-card@1",
+          controls: {
+            start: { support: "required" },
+            steer: { support: "unsupported" },
+            cancel: { support: "unsupported" },
+            inspect: { support: "optional" },
+            events: { support: "required" },
+            approval: { support: "optional" },
+          },
+        },
+      },
+    });
+
+    const preview = await createPreview(store, {
+      principalId: "p-owner",
+      requestDigest: "digest-card",
+      capabilityRevisionId: "cap-card",
+      workspaceId: "ws-card",
+      agentId: "ag-card",
+    });
+
+    // A preview that promised no degraded controls while the agent cannot stop a
+    // task would let a caller believe a cancel is possible; the row must be read
+    // with the card, not just the id.
+    assert.deepEqual(
+      preview.degraded.map((d) => d.control).sort(),
+      ["cancel", "steer"],
+    );
+    assert.match(preview.degraded.find((d) => d.control === "cancel").effect, /needs_reconcile/);
+  } finally {
+    store.close();
+  }
+});
+
 test("createPreview and consumePreview enforce one-time consumption, digest match, TTL, and ownership", async () => {
   const { store } = await setup();
   try {
