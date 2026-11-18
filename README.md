@@ -71,7 +71,11 @@ http://127.0.0.1:<port>/dsh-rpc   ->   DSH agent
 - **无人值守也不卡死**：`approvals.mode` 三档，`delegate` 把升权决定交给派发方。
 - **调用方断开就停手，但不杀你的工作**：abort ≠ cancel，那一轮还在 GUI 里跑。
 - **端口随启动器走**：`endpoint.json` + `health --wait`，客户端不用写死地址。
-- **关键行为有回归用例守着**：217 例测试 + catalog smoke + 真实 WebServer 集成测试。
+- **轨迹可读**：`trace` 四档（默认 `errors`）把这一轮调过哪些工具、哪条失败、各花多久渲染进结果；`trace: "full"` 另附 `structuredContent`。
+- **只读回看**：`dsh_history` 不激活会话就能拉最近的事件窗口（工具调用、结果、轮次结束、审批与沙箱变化），排障不用重派。
+- **会自述**：`dsh_capabilities` 给出八节能力快照（运行时、权限档位、可调工具、MCP 前缀、会话、工作区、插件），做计划前不必猜本机有什么。
+- **不假装知道**：外层客户端有更短的超时上限时，本桥只如实说明并建议分段轮询，不让长任务看起来像失败。
+- **关键行为有回归用例守着**：257 例测试 + catalog smoke + 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
 
 ## 安装与更新
 
@@ -279,7 +283,8 @@ console.log(answer.text, answer.usage);
 | `dsh.sessions.prompt` | `sessionId, text, mode?, model?, …` | `{accepted, sessionId, requestId, mode}`，立即返回 |
 | `dsh.sessions.wait` | `sessionId, timeoutMs?, since?` | 轮次结果 |
 | `dsh.sessions.cancel` | `sessionId` | `{accepted, sessionId}` |
-| `dsh.sessions.history` | `sessionId, limit?` | `{cursor, turn, running, messageCount, records[]}` |
+| `dsh.sessions.history` | `sessionId, limit?, since?, kinds?, maxChars?` | `{cursor, turn, running, messageCount, records[], truncated?}` |
+| `dsh.capabilities` | `sections?, maxChars?, sessionId?` | `{sections[], text, truncated, missing[]}`；八节能力快照，只读 |
 
 几处容易踩的语义：
 
@@ -335,7 +340,7 @@ console.log(answer.text, answer.usage);
   "reason": { "kind": "completed" },
   "text": "收到",                  // 该轮正文，多段以空行连接
   "reasoning": "…",               // 可选，思考内容
-  "tools": [],                    // [{callId, name, arguments, output?, isError?}]
+  "tools": [],                    // [{callId, name, arguments, output?, isError?, ok?, seq?, at?, endedAt?}]
   "usage": { "inputTokens": 134981, "outputTokens": 2, "totalTokens": 134983 },
   "durationMs": 5311,
   "timedOut": false,
@@ -385,6 +390,37 @@ console.log(answer.text, answer.usage);
 - `waiting-approval` 只在 `approvals.mode=delegate` 且这一轮正等你回答时出现，见[权限与升权](#权限与升权)。
 
 `tools` 的 `output` 单条截断 4000 字、整轮共享 20000 字预算，超出会写 `… (omitted, N chars: this turn's tool-output budget of 20000 is spent)`。
+
+### 工具调用轨迹（`trace`）
+
+`dsh_ask` / `dsh_wait` 与 CLI `ask` / `wait`（`--trace`）在正文之后会多出一块轨迹：这一轮调了哪些工具、哪条失败、各花了多久。四档由单次参数 `trace` 或配置 `traceDefault` 决定：
+
+| 档位 | 打印什么 | 预算 | `structuredContent` |
+| --- | --- | --- | --- |
+| `none` | 不打印，输出与 0.7.x 逐字节一致 | — | 无 |
+| `errors`（默认） | meta 行 `N tool calls (M errors)`；最多 3 条失败行；轮次未完时一行在途 | 4 行 / 600 字 | 无 |
+| `summary` | 每个工具一行 | 20 行 / 1200 字 | 无 |
+| `full` | 每工具一行摘要 + 明细块（参数与截断后的输出） | 40 行 / 8000 字 | 有 |
+
+`summary` 的样子：
+
+```text
+— outcome: completed · turn 1 · request rpc-… · 8.9s · 3 tool calls (1 errors) · cursor 32
+trace:
+  ✓ pwsh "node --version" 807ms
+  ✗ write_file "/tmp/report.md" — permission denied under workspace-write
+```
+
+在途调用标 `(running, 12s)`；轮次已结束却没有耗时事件的（0.8.1 之前的桥不写 `at` / `endedAt`）标 `(no timing)`，没有输出的标 `(unfinished)`——不会把收尾的调用报成正在运行。
+
+`full` 档在这些行下面追加以 `▸` 开头的明细块（参数首段与截断后的输出），并在 MCP 结果里附带 `structuredContent`：`{sessionId?, turn?, outcome, cursor?, sliceMs?, requestedMs?, tools[]}`，`tools[]` 每条含 `index` / `callId` / `name` / `ok` / `arguments` / `output` / `outputTruncated` / `isError` / `error` / `seq` / `at` / `endedAt` / `elapsedMs`。**只有 `full` 才给结构化数据**——它的体积是 `summary` 的数倍，默认不开。
+
+几条约定：
+
+- **只讲这一轮**：轨迹跟轮次走，不跟会话走；要看跨轮次的全窗口用 `dsh_history`。
+- **`since` 下的两个数字**：`since` 只裁剪渲染，`tools` 总数仍报整轮，并额外标 `+3 since cursor 4080`——不让增量看起来像「这一轮只调了三次」。
+- **超预算不静默**：被预算裁掉的调用在末尾写明 `… +N more (call dsh_history for the full window)`。
+- **关掉它**：`config.traceDefault: "none"`，或单次传 `trace: "none"`；要更多细节就传 `"full"`。
 
 ### `since` 只回增量
 
@@ -630,6 +666,10 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 - **审批闸门只拦一条路**：`deny` / `delegate` 拦的是**工具参数里的 `sandbox_permissions`**。通过 `configure` 改预设或新建会话时指定 `permissionPreset` 走的是另一条路——前者在 `approvals.mode` 非 `off` 时被禁止，但**新建**会话时由调用方自己选的预设不受闸门约束（那是派发方的决定，不是子代理的）。
 - **未声明 `Config` schema**：插件用手写校验读 row 的 `config`，而不是导出 `Config`（保持零依赖）。代价是 `cordis_inspect_query` 里这行显示 `status: absent`，也没有可视化表单；配置项见[配置](#配置)。
 
+- **轨迹有预算，结构化只在 `full`**：`errors` / `summary` / `full` 分别封顶 4 行 600 字、20 行 1200 字、40 行 8000 字；超出部分只留 `… +N more`，要逐条完整体验用 `trace: "full"` 或读 `dsh_history`。
+- **`dsh_history` 会当面揭穿旧插件**：桥连着 0.8.1 之前的插件时，`since` / `kinds` / `max_chars` 会被静默忽略；此时结果头部改用 `note:` 说明「这窗口没被过滤/截断」，而不是假装已经过滤。升级插件后即消失。
+- **`maxResultChars` 治不了外层的 413**：它只截单轮正文（默认 20000 字）。外层客户端（例如 Codex 的 `codex-auto-review` 旁路请求）被累计上下文撑爆时，靠截断单次结果救不回来——那要在调用方控制上下文。
+
 ## 排障
 
 | 现象 | 原因 / 处理 |
@@ -648,19 +688,24 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 11 个测试文件，共 217 例，另有 catalog smoke；无需运行中的 Harness
+npm test                       # 16 个测试文件，共 257 例，另有 catalog smoke；无需运行中的 Harness
 node test/host.test.mjs        # 1 例：真实 WebServer 集成（需先 npm ci）
 node test/e2e.mjs --cwd .      # 14 例：端到端，打真实 Harness
 node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harness
 ```
 
 <details>
-<summary>十一个测试文件各自覆盖什么</summary>
+<summary>十六个测试文件各自覆盖什么</summary>
 
 | 套件 | 例 | 覆盖 |
 | --- | --- | --- |
-| `methods` | 81 | 轮次归属、sticky 并发与配置顺序、超时、history、参数契约 |
-| `mcp-format` | 20 | 完整正文、结果渲染、去重、待批 |
+| `methods` | 85 | 轮次归属、sticky 并发与配置顺序、超时、history 过滤与截断、参数契约 |
+| `mcp-format` | 26 | 完整正文、结果渲染、去重、待批、结果上限与 advice |
+| `trace-format` | 8 | 四档预算、`since` 双计数、在途与无耗时判定、超预算尾行 |
+| `history-format` | 8 | 事件行渲染、`kinds`/`since` 过滤、`max_chars` 截断、旧插件忽略时的 `note` |
+| `advice` | 4 | 超时提示的触发条件与每会话去重 |
+| `host-facts` | 6 | 宿主服务白名单、缺失与抛错的降级、八节采集 |
+| `capabilities` | 4 | 分节选择、`max_chars` 裁剪、状态汇总 |
 | `registry` | 10 | 粘性会话表读写、并发更新、键隔离、轮换 |
 | `pending` | 36 | 待批存储、长轮询、取消收回、额度预占、事务边界 |
 | `approvals` | 15 | 配置校验、gate 分支、所有权、waterfall、关闭竞态 |
@@ -673,7 +718,7 @@ node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harnes
 
 </details>
 
-`npm test` 按固定顺序跑这十一个测试文件和 catalog smoke；`npm run test:host` 跑真实 WebServer 集成；`npm run test:e2e` / `npm run test:edge` 要活的 Harness。
+`npm test` 按固定顺序跑这十六个测试文件和 catalog smoke；`npm run test:host` 跑真实 WebServer 集成；`npm run test:e2e` / `npm run test:edge` 要活的 Harness。
 
 > [!TIP]
 > **别用 `node --test`**：它会为每个文件 fork 子进程，在 DSH 沙箱里被 `spawn EPERM` 挡住。
@@ -685,7 +730,7 @@ node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harnes
 - **边界**检查协议层：batch、通知、id 形态、鉴权头、超大 body（应得真正的 413 而不是断连）、参数注入防护、超时钳制、并发 ask、`limit` 语义。
 - **端口漂移**（手工）：把 `endpoint.json` 的 url 改成死端口再跑 `dsh-rpc ping`，应得退出码 3 与含 `nothing is listening`、`pid`、`health --wait` 的可读报错。
 
-本次本地验证（2026-11-07）：217/217 测试、catalog smoke、真实 WebServer 集成 1/1 均通过，另通过版本、打包与 36 个 JavaScript 文件的语法检查。历史端到端 14/14、边界 24/24（2026-11-05）；本次未重跑这两项真实 Harness 检查。
+本次本地验证（2026-11-18，0.8.1）：本机 248/257 通过，未通过的 9 例全部是「起真实子进程管道」的用例（`abort` 1 例、`cli-mcp-regressions` 8 例），被 DSH 沙箱的 `spawn EPERM` 挡住，不是回归——同样的链在 GitHub Actions 的 ubuntu runner 上全绿（run 44307387584）。另通过 catalog smoke、真实 WebServer 集成 1/1、端到端 14/14（对在跑的 0.7.7 插件验证向后兼容）、版本三处一致与打包清单检查。
 
 ## 许可证
 

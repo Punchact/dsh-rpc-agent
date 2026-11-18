@@ -71,7 +71,11 @@ Repository and package name are both `dsh-rpc-agent`; the commands (`dsh-rpc`, `
 - **Unattended sessions cannot hang forever**: three `approvals.mode` settings; `delegate` hands the escalation decision to the caller.
 - **A caller that hangs up stops the call, not your work**: abort ≠ cancel; the turn keeps running in the GUI.
 - **The port follows the launcher**: `endpoint.json` plus `health --wait`, so no client hard-codes an address.
-- **Regression tests guard key behaviour**: 217 test cases, catalog smoke, and a real WebServer integration test.
+- **Readable tool trace**: four `trace` levels (default `errors`) print which tools ran, which failed and how long each took; `trace: "full"` also returns `structuredContent`.
+- **Read-only hindsight**: `dsh_history` pulls the recent event window (tool calls, results, turn end, approval and sandbox changes) without waking the session agent.
+- **Self-describing**: `dsh_capabilities` returns an eight-section snapshot (runtime, permission presets, callable tools, MCP prefixes, sessions, workspaces, plugins), so a planner does not have to guess what this machine offers.
+- **No pretend knowledge**: when an outer client caps tool calls below the bridge budget, the bridge says so and recommends polling in slices instead of letting a long job look like a failure.
+- **Regression tests guard the sharp edges**: 257 cases + catalog smoke + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
 
 ## Install and update
 
@@ -279,7 +283,8 @@ Every method lives under the `dsh.` namespace; the CLI aliases `ping` / `discove
 | `dsh.sessions.prompt` | `sessionId, text, mode?, model?, …` | `{accepted, sessionId, requestId, mode}`, returned at once |
 | `dsh.sessions.wait` | `sessionId, timeoutMs?, since?` | A turn result |
 | `dsh.sessions.cancel` | `sessionId` | `{accepted, sessionId}` |
-| `dsh.sessions.history` | `sessionId, limit?` | `{cursor, turn, running, messageCount, records[]}` |
+| `dsh.sessions.history` | `sessionId, limit?, since?, kinds?, maxChars?` | `{cursor, turn, running, messageCount, records[], truncated?}` |
+| `dsh.capabilities` | `sections?, maxChars?, sessionId?` | `{sections[], text, truncated, missing[]}`, read-only eight-section snapshot |
 
 Semantics that are easy to trip over:
 
@@ -335,7 +340,7 @@ If the client disconnects, that wait is aborted (the turn inside the Harness is 
   "reason": { "kind": "completed" },
   "text": "received",             // the turn's body text; multiple parts joined with blank lines
   "reasoning": "…",               // optional thinking text
-  "tools": [],                    // [{callId, name, arguments, output?, isError?}]
+  "tools": [],                    // [{callId, name, arguments, output?, isError?, ok?, seq?, at?, endedAt?}]
   "usage": { "inputTokens": 134981, "outputTokens": 2, "totalTokens": 134983 },
   "durationMs": 5311,
   "timedOut": false,
@@ -385,6 +390,37 @@ Conventions for reading results:
 - `waiting-approval` appears only with `approvals.mode=delegate`, when the turn is waiting for your answer — see [Permissions and escalation](#permissions-and-escalation).
 
 `tools[].output` is truncated at 4000 characters per entry with a 20000-character budget per turn; overflow is written as `… (omitted, N chars: this turn's tool-output budget of 20000 is spent)`.
+
+### Tool-call trace (`trace`)
+
+`dsh_ask` / `dsh_wait` and the CLI `ask` / `wait` (`--trace`) append a trace block after the prose: which tools this turn ran, which failed, and how long each took. Four levels, chosen per call (`trace`) or by config (`traceDefault`):
+
+| Level | What is printed | Budget | `structuredContent` |
+| --- | --- | --- | --- |
+| `none` | Nothing; output is byte-identical to 0.7.x | — | no |
+| `errors` (default) | meta line `N tool calls (M errors)`; up to 3 failure lines; one in-flight line while the turn runs | 4 lines / 600 chars | no |
+| `summary` | One line per tool call | 20 lines / 1200 chars | no |
+| `full` | Per-tool summary plus detail blocks (arguments and truncated output) | 40 lines / 8000 chars | yes |
+
+How `summary` looks:
+
+```text
+— outcome: completed · turn 1 · request rpc-… · 8.9s · 3 tool calls (1 errors) · cursor 32
+trace:
+  ✓ pwsh "node --version" 807ms
+  ✗ write_file "/tmp/report.md" — permission denied under workspace-write
+```
+
+In-flight calls print `(running, 12s)`. A call from a turn that already ended but carries no timing (bridges before 0.8.1 never wrote `at` / `endedAt`) prints `(no timing)`, and one without output prints `(unfinished)` — a finished turn is never told it still has work running.
+
+At `full`, detail blocks prefixed `▸` follow (argument preview plus truncated output) and the MCP result carries `structuredContent`: `{sessionId?, turn?, outcome, cursor?, sliceMs?, requestedMs?, tools[]}`, where each tool carries `index` / `callId` / `name` / `ok` / `arguments` / `output` / `outputTruncated` / `isError` / `error` / `seq` / `at` / `endedAt` / `elapsedMs`. **Only `full` returns structured data** — it is several times the size of `summary`, so it is off by default.
+
+Rules worth knowing:
+
+- **This turn only**: the trace follows the turn, not the session. For a cross-turn window use `dsh_history`.
+- **Two numbers under `since`**: `since` narrows the rendering only; the total still covers the whole turn and is annotated `+3 since cursor 4080`, so a delta never looks like a turn that only made three calls.
+- **Budget is never silent**: dropped calls end with `… +N more (call dsh_history for the full window)`.
+- **Turn it off**: `config.traceDefault: "none"`, or pass `trace: "none"` once. Ask for `"full"` when you need the detail.
 
 ### `since` returns only the delta
 
@@ -630,6 +666,10 @@ Everything the page shows comes from that read-only endpoint; it writes nothing.
 - **The approval gate covers one road only**: `deny` / `delegate` intercept `sandbox_permissions` **in tool arguments**. Changing a preset through `configure`, or choosing `permissionPreset` when creating a session, is another road — the former is forbidden while `approvals.mode` is not `off`, but a preset chosen by the caller **when creating** a session is not constrained by the gate (that is the dispatcher's decision, not the sub-agent's).
 - **No declared `Config` schema**: the plugin validates the row's `config` by hand instead of exporting `Config` (to stay dependency-free). The cost is that `cordis_inspect_query` shows `status: absent` for that row and there is no visual form; see [Configuration](#configuration).
 
+- **The trace has a budget, and structure only at `full`**: `errors` / `summary` / `full` cap at 4 lines 600 chars, 20 lines 1200 chars and 40 lines 8000 chars; anything dropped leaves `… +N more`. Use `trace: "full"` or `dsh_history` for every record.
+- **`dsh_history` calls out an old plugin**: when the bridge talks to a plugin older than 0.8.1, `since` / `kinds` / `max_chars` are silently ignored; the header then switches to a `note:` saying the window was neither filtered nor capped instead of pretending otherwise. Upgrading the plugin removes it.
+- **`maxResultChars` cannot fix an outer 413**: it caps a single turn's prose (20000 chars by default). When the calling agent's own sidecar (for example Codex `codex-auto-review`) is blown up by accumulated context, capping one result will not save it — that has to be handled on the caller side.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
@@ -648,19 +688,24 @@ Everything the page shows comes from that read-only endpoint; it writes nothing.
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 217 cases in 11 test files plus catalog smoke; needs no running Harness
+npm test                       # 16 test files, 257 cases, plus a catalog smoke; no running Harness needed
 node test/host.test.mjs        # 1 case: real WebServer integration (needs npm ci first)
 node test/e2e.mjs --cwd .      # 14 cases: end to end against a real Harness
 node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a real Harness
 ```
 
 <details>
-<summary>What each of the eleven test files covers</summary>
+<summary>What each of the sixteen test files covers</summary>
 
 | Suite | Cases | Covers |
 | --- | --- | --- |
-| `methods` | 81 | Turn ownership, sticky concurrency and option ordering, timeouts, history, parameter contracts |
-| `mcp-format` | 20 | Complete text, result rendering, de-duplication, pending approvals |
+| `methods` | 85 | Turn attribution, sticky concurrency and config order, timeouts, history filters and capping, parameter contracts |
+| `mcp-format` | 26 | Full prose, result rendering, de-duplication, pending approval, result cap and advice |
+| `trace-format` | 8 | Level budgets, the two `since` counts, in-flight and missing-timing labels, budget trailer |
+| `history-format` | 8 | Event-line rendering, `kinds`/`since` filtering, `max_chars` capping, the `note` for an old plugin |
+| `advice` | 4 | When the timeout advice fires, and its per-session de-duplication |
+| `host-facts` | 6 | Host service allow-list, degradation on missing or throwing services, eight collectors |
+| `capabilities` | 4 | Section selection, `max_chars` trimming, status roll-up |
 | `registry` | 10 | Sticky-session I/O, concurrent updates, key isolation, rotation |
 | `pending` | 36 | Pending store, long polling, cancellation withdrawal, allowance pre-claim, transaction boundary |
 | `approvals` | 15 | Config validation, gate branches, ownership, waterfall, disposal races |
@@ -673,7 +718,7 @@ node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a 
 
 </details>
 
-`npm test` runs those eleven test files and catalog smoke in a fixed order; `npm run test:host` runs real WebServer integration; `npm run test:e2e` / `npm run test:edge` need a live Harness.
+`npm test` runs these sixteen test files plus the catalog smoke in a fixed order; `npm run test:host` runs the real-WebServer integration test; `npm run test:e2e` / `npm run test:edge` need a live Harness.
 
 > [!TIP]
 > **Do not use `node --test`**: it forks a child process per file, which DSH's sandbox blocks with `spawn EPERM`.
@@ -685,7 +730,7 @@ A few worth calling out:
 - **Edge** probes the protocol layer: batches, notifications, id shapes, auth headers, oversized bodies (a genuine 413, not a dropped connection), parameter-injection defences, timeout clamping, concurrent asks, `limit` semantics.
 - **Port drift** (manual): point `endpoint.json` at a dead port and run `dsh-rpc ping`; expect exit code 3 and a readable error mentioning `nothing is listening`, `pid` and `health --wait`.
 
-Local verification on 2026-11-07: 217/217 tests, catalog smoke and real WebServer integration 1/1 passed, together with version, package and syntax checks for 36 JavaScript files. Historical end-to-end 14/14 and edge 24/24 results date from 2026-11-05; those live Harness checks were not rerun for this change.
+Local verification (2026-11-18, 0.8.1): 248/257 pass on this machine. The nine failures are exactly the cases that spawn a real subprocess pipe (`abort` 1, `cli-mcp-regressions` 8), blocked by the DSH sandbox (`spawn EPERM`) rather than by a regression — the same chain is green on the GitHub Actions ubuntu runner (run 44307387584). Also green: catalog smoke, the real-WebServer integration test (1/1), end-to-end 14/14 (against the installed 0.7.7 plugin, proving client-side backward compatibility), version consistency across the three places, and the package manifest check.
 
 ## License
 
