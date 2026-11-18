@@ -194,3 +194,38 @@ test("MCP validates task/session inputs upfront and sanitizes adapter errors", a
     },
   );
 });
+
+test("MCP tells a 0.8.x plugin apart from a disabled 0.9.0 one instead of suggesting tasksEnabled", async () => {
+  resetBridgeDefaults();
+  await withMockRpc(
+    (req) => {
+      if (req.method === "dsh.discover") {
+        // 0.8.x: no config.tasksEnabled key at all, and no dsh.tasks.* in the catalog.
+        return { result: { config: { defaultTimeoutMs: 600000 }, methods: ["dsh.ping", "dsh.sessions.list"] } };
+      }
+      return { error: { code: -32601, message: "unknown method: " + req.method } };
+    },
+    async () => {
+      const tools = await listTools();
+      const names = tools.map((tool) => tool.name);
+      for (const taskTool of TASK_TOOLS) {
+        assert.equal(
+          names.includes(taskTool.name),
+          false,
+          taskTool.name + " must be hidden on a pre-0.9.0 plugin",
+        );
+      }
+
+      const res = await callTool("dsh_tasks_list", {});
+      assert.equal(res.isError, true);
+      const body = res.content.map((parts) => parts.text).join("\n");
+      assert.match(body, /does not implement the task centre/i);
+      assert.match(body, /upgrade the plugin inside the DSH profile to 0\.9\.0/i);
+      assert.doesNotMatch(
+        body,
+        /set config\.tasksEnabled=true/,
+        "a config hint cannot fix a plugin that predates the task centre",
+      );
+    },
+  );
+});

@@ -23,6 +23,8 @@ async function setup() {
 }
 
 test("degradedFromCapabilities maps unsupported controls to their semantic effect", () => {
+  // Hand-written/flat rows stay readable, but the authoritative shape is the card
+  // stored by dsh.agents.register (`controls.<name>.support`); see the next test.
   const degraded = degradedFromCapabilities(JSON.stringify({ cancel: "unsupported", inspect: false, steer: "supported" }));
   assert.deepEqual(
     degraded.map((d) => d.control).sort(),
@@ -67,6 +69,91 @@ test("task detail exposes degraded[] for an agent that cannot be cancelled", asy
     for (const row of listed.items) {
       assert.ok(Array.isArray(row.degraded), "list rows carry degraded[] too");
     }
+  } finally {
+    store.close();
+  }
+});
+
+test("degradedFromCapabilities reads the capability-card shape that registerAgent stores", () => {
+  // Exactly what lib/methods.mjs writes: the normalized card plus a legacy flat
+  // `cancel`. Reading only the flat field used to report 1 of 6 controls (t4 D2).
+  const card = {
+    cardVersion: "capability-card@1",
+    identity: { agentId: "ag-card", kind: "dsh", version: "1" },
+    capabilities: ["review.diff@1"],
+    limitations: ["no native approval path"],
+    controls: {
+      start: { support: "required", evidence: "probe" },
+      steer: { support: "unsupported", evidence: "probe" },
+      cancel: { support: "unsupported", evidence: "probe" },
+      inspect: { support: "optional", evidence: "probe" },
+      events: { support: "unsupported", evidence: "probe" },
+      approval: { support: "unsupported", evidence: "probe" },
+    },
+    cancel: "unsupported",
+  };
+  const degraded = degradedFromCapabilities(JSON.stringify(card));
+  assert.deepEqual(
+    degraded.map((d) => d.control).sort(),
+    ["approval", "cancel", "events", "steer"],
+    "every unsupported control in the card must surface, not just the flat cancel field",
+  );
+  for (const entry of degraded) {
+    assert.ok(entry.effect.length > 20, "each control keeps a readable consequence");
+  }
+
+  // A card declaring everything required/optional degrades nothing.
+  const healthy = {
+    cardVersion: "capability-card@1",
+    controls: {
+      start: { support: "required" },
+      steer: { support: "optional" },
+      cancel: { support: "required" },
+      inspect: { support: "optional" },
+      events: { support: "required" },
+      approval: { support: "optional" },
+    },
+  };
+  assert.deepEqual(degradedFromCapabilities(JSON.stringify(healthy)), []);
+});
+
+test("a registered card keeps degraded[] visible end to end", async () => {
+  const store = openStore({ path: ":memory:" });
+  try {
+    await seedBaselineEntities(store, {
+      principal: { principalId: "local-operator" },
+      workspace: { workspaceId: "ws-card", rootPath: "C:\\ws-card" },
+      capabilityRevision: { revisionId: "rev-card", capability: "review.diff@1" },
+      agent: {
+        agentId: "ag-card-e2e",
+        adapterKind: "dsh",
+        capabilities: {
+          cardVersion: "capability-card@1",
+          controls: {
+            start: { support: "required" },
+            steer: { support: "unsupported" },
+            cancel: { support: "unsupported" },
+            inspect: { support: "unsupported" },
+            events: { support: "unsupported" },
+            approval: { support: "unsupported" },
+          },
+          cancel: "unsupported",
+        },
+      },
+    });
+    const engine = createTaskEngine(store);
+    const task = await engine.submit({
+      idempotencyKey: "k-card-e2e",
+      capabilityRevisionId: "rev-card",
+      workspaceId: "ws-card",
+      agentId: "ag-card-e2e",
+      input: { base: "a", head: "b" },
+    });
+    const detail = await engine.get({ taskId: task.taskId });
+    assert.deepEqual(
+      detail.degraded.map((d) => d.control).sort(),
+      ["approval", "cancel", "events", "inspect", "steer"],
+    );
   } finally {
     store.close();
   }

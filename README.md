@@ -76,7 +76,7 @@ http://127.0.0.1:<port>/dsh-rpc   ->   DSH agent
 - **会自述**：`dsh_capabilities` 给出八节能力快照（运行时、权限档位、可调工具、MCP 前缀、会话、工作区、插件），做计划前不必猜本机有什么。
 - **不假装知道**：外层客户端有更短的超时上限时，本桥只如实说明并建议分段轮询，不让长任务看起来像失败。
 - **可托管外部 agent 任务（任务中心，`tasksEnabled` 默认关闭）**：内置 15 表 SQLite 账本、11 态状态机与能力卡/只读探测，统一调度 DSH 自身、Antigravity 与 Codex App Server，详情见 [任务中心手册](./docs/task-center.md)。
-- **关键行为有回归用例守着**：35 个测试文件共 334 例 + catalog smoke（本机实测 334/334 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
+- **关键行为有回归用例守着**：35 个测试文件共 337 例 + catalog smoke（本机实测 337/337 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
 
 ## 安装与更新
 
@@ -287,7 +287,7 @@ console.log(answer.text, answer.usage);
 | `dsh.sessions.history` | `sessionId, limit?, since?, kinds?, maxChars?` | `{cursor, turn, running, messageCount, records[], truncated?}` |
 | `dsh.capabilities` | `sections?, maxChars?, sessionId?` | `{sections[], text, truncated, missing[]}`；八节能力快照，只读 |
 | `dsh.tasks.preview` | `principalId, workspaceId?, agentId?, capabilityRevisionId?, input?, ttlMs?` | `{previewId, requestDigest, agentId, expiresAt, …}` |
-| `dsh.tasks.submit` | `previewId \| confirm, idempotencyKey, capabilityRevisionId, workspaceId, agentId?, input?` | `{taskId, status, phase, stateVersion, …}` |
+| `dsh.tasks.submit` | `idempotencyKey`（必填）、`previewId?`（给了就用它绑定的参数与主体）、`capabilityRevisionId?`、`workspaceId?`、`agentId?`、`input?` | `{taskId, status, phase, stateVersion, …}` |
 | `dsh.tasks.get` / `list` | `taskId` / `status?, workspaceId?, principalId?, limit?, cursor?` | 任务详情（含 `phase` 与未决 `attention`）或分页列表 |
 | `dsh.tasks.cancel` | `taskId, expectedStateVersion, idempotencyKey, reason?` | `{taskId, status, stateVersion, notice?}` |
 | `dsh.tasks.dispatch` / `pump` | `taskId, …` / `taskId, maxSteps?, deadlineMs?, cursor?` | 派发至适配器或推进有界事件/状态泵 |
@@ -409,7 +409,7 @@ console.log(answer.text, answer.usage);
 | 档位 | 打印什么 | 预算 | `structuredContent` |
 | --- | --- | --- | --- |
 | `none` | 不打印，输出与 0.7.x 逐字节一致 | — | 无 |
-| `errors`（默认） | meta 行 `N tool calls (M errors)`；最多 3 条失败行；轮次未完时一行在途 | 4 行 / 600 字 | 无 |
+| `errors`（默认） | meta 行 `N tool calls (M errors)`；有失败时再加一行 `errors: M of N tool calls`，最多 3 条失败行；轮次未完时一行在途 | 4 行 / 600 字 | 无 |
 | `summary` | 每个工具一行 | 20 行 / 1200 字 | 无 |
 | `full` | 每工具一行摘要 + 明细块（参数与截断后的输出） | 40 行 / 8000 字 | 有 |
 
@@ -447,6 +447,9 @@ trace:
 | `tasksExternalAdapter` | `"none"` | `"none" \| "antigravity" \| "codex"`；除内建 DSH 基准适配器外额外装配的外部执行方 |
 | `tasksPreviewTtlMs` | `300000` | 整数 `1000..3600000`；`dsh.tasks.preview` 预览凭证有效时长（毫秒） |
 | `tasksDbPath` | `null` | 字符串或 `null`；自定义 SQLite 路径，留空使用 `$DSH_HOME/storages/task-center/tasks.db` |
+| `tasksProbeTimeoutMs` | `5000` | 整数 `100..60000`；`dsh.agents.probe` 只读探测的单次超时 |
+| `tasksAdapters` | `{}` | 对象；按执行方种类给适配器的构造参数（如 `{ codex: { binary: "…" } }`）；**不允许**在注册 RPC 里指定可执行文件 |
+| `tasksDispatchMaxSteps` | `50` | 整数 `1..1000`；一次 `dsh.tasks.pump`/`dsh.tasks.dispatch` 内推进的最大步数 |
 
 **典型 CLI 流程**（可复制执行，前置已设 `tasksEnabled: true` 并重启宿主）：
 
@@ -476,7 +479,7 @@ node bin/dsh-rpc.mjs tasks get <taskId> --json
 2. `declared` 与 `verified` 冲突时**以 `verified` 为准**：声明永远不会覆盖实测探测结果，未全部通过只读探测的卡片状态为 `partial` 或 `unknown`。
 3. `cancel.confirmed` **必须有状态机证据，HTTP 200 不算**：Antigravity 只有观测到 `RUNNING → CANCELING → IDLE` 且带 `EXECUTOR_TERMINATION_REASON_USER_CANCELED` 才确认取消；Codex 只有观测到 `turn/completed.status="interrupted"` 才确认取消。
 
-**混版说明**：当 0.9.0 的 CLI/MCP 桥连着 0.8.x 的插件时，任务中心工具在 `tools/list` 下不会出现（若被直接调用会明确报错「插件未开启或不支持任务中心」），绝不会半成功；将插件升级到 0.9.0 并重启宿主即可。
+**混版说明**：当 0.9.0 的 CLI/MCP 桥连着 0.8.x 的插件时，任务中心工具在 `tools/list` 下不会出现；直接调用则如实失败、绝不半成功——CLI 报 `dsh-rpc: unknown method: dsh.tasks.list` 并附 `next: this Harness plugin predates the task centre (0.9.0)…`，MCP 报 `this Harness plugin does not implement the task centre (0.9.0)` 并附 `upgrade the plugin inside the DSH profile to 0.9.0`。此时改 `tasksEnabled` 无用——那个开关只对 0.9.0 的插件有意义；把 profile 里的插件升级到 0.9.0 并重启宿主即可。
 
 ### `since` 只回增量
 
@@ -744,7 +747,7 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 35 个测试文件，共 334 例，另有 catalog smoke；无需运行中的 Harness
+npm test                       # 35 个测试文件，共 337 例，另有 catalog smoke；无需运行中的 Harness
 node test/host.test.mjs        # 1 例：真实 WebServer 集成（需先 npm ci）
 node test/e2e.mjs --cwd .      # 14 例：端到端，打真实 Harness
 node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harness
@@ -765,7 +768,7 @@ node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harnes
 | `tasks-store` | 4 | SQLite 15 表、WAL、外键约束、并发写事务重试 |
 | `tasks-state` | 5 | 11 态允许迁移表、非法迁移拒斥、乐观锁、终态只追加事件 |
 | `tasks-engine` | 8 | 幂等键、取消与完成竞态、结果校验门、派生阶段优先序、重启不丢失 |
-| `tasks-degraded` | 2 | 降级许可：`cancel: "unsupported"` 等控制项映射为可读后果，任务详情与列表带 `degraded[]` |
+| `tasks-degraded` | 4 | 降级许可：能力卡里声明为 `unsupported` 的控制项（`start`/`steer`/`cancel`/`inspect`/`events`/`approval` 六项）映射为可读后果，任务详情与列表带 `degraded[]`；含「注册后走真实卡形状」的端到端用例 |
 | `agents-card` | 5 | `capability-card@1` 规范化、空 `limitations` 拒斥、`verified` 归并 |
 | `agents-probe` | 1 | 只读探测超时与抛错隔离、`unknown` 记录 |
 | `tasks-preview` | 2 | 一次性预览绑定、摘要校验、TTL 过期与主体隔离 |
@@ -805,7 +808,7 @@ node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harnes
 - **边界**检查协议层：batch、通知、id 形态、鉴权头、超大 body（应得真正的 413 而不是断连）、参数注入防护、超时钳制、并发 ask、`limit` 语义。
 - **端口漂移**（手工）：把 `endpoint.json` 的 url 改成死端口再跑 `dsh-rpc ping`，应得退出码 3 与含 `nothing is listening`、`pid`、`health --wait` 的可读报错。
 
-本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 35 个测试文件 **334/334** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.mjs` 输出 `methods: 29` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
+本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 35 个测试文件 **337/337** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.mjs` 输出 `methods: 29` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
 
 ## 许可证
 

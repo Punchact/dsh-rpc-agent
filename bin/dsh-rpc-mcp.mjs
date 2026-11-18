@@ -659,23 +659,36 @@ async function bridgeSettings() {
   return bridgeDefaults;
 }
 
-async function isTasksEnabled(callFn = (method, params, options) => rpcCall(method, params, options)) {
+// Three outcomes matter, not two (t4 finding D1): "disabled" means the 0.9.0
+// plugin is loaded with the switch off — a config change fixes it; "unsupported"
+// means the plugin predates the task centre, where telling the caller to set
+// `tasksEnabled` is advice that cannot work.
+const TASK_CENTRE_ENABLED = "enabled";
+const TASK_CENTRE_DISABLED = "disabled";
+const TASK_CENTRE_UNSUPPORTED = "unsupported";
+
+async function taskCentreState(callFn = (method, params, options) => rpcCall(method, params, options)) {
   const defaults = await bridgeSettings();
-  if (defaults.tasksEnabled === false) return false;
+  if (defaults.tasksEnabled === false) return TASK_CENTRE_DISABLED;
   if (defaults.tasksEnabled === true) {
     if (Array.isArray(bridgeMethods)) {
-      return bridgeMethods.includes("dsh.tasks.list");
+      return bridgeMethods.includes("dsh.tasks.list") ? TASK_CENTRE_ENABLED : TASK_CENTRE_UNSUPPORTED;
     }
-    return true;
+    return TASK_CENTRE_ENABLED;
   }
-  // Fallback first-call probe when discover failed or came from an 0.8.x plugin
-  // without `config.tasksEnabled`: try `dsh.tasks.list({ limit: 1 })`.
+  // 0.8.x plugins publish no `config.tasksEnabled`; a successful probe is the only proof.
   try {
     await callFn("dsh.tasks.list", { limit: 1 }, { timeoutMs: 3_000 });
-    return true;
+    return TASK_CENTRE_ENABLED;
   } catch {
-    return false;
+    return Array.isArray(bridgeMethods) && !bridgeMethods.includes("dsh.tasks.list")
+      ? TASK_CENTRE_UNSUPPORTED
+      : TASK_CENTRE_DISABLED;
   }
+}
+
+async function isTasksEnabled(callFn = (method, params, options) => rpcCall(method, params, options)) {
+  return (await taskCentreState(callFn)) === TASK_CENTRE_ENABLED;
 }
 
 async function listTools() {
@@ -732,12 +745,17 @@ async function callTool(name, args, signal = undefined) {
     const hintOptions = { defaultTimeoutMs: turnDefault, maxResultChars, adviceEnabled };
 
     if (TASK_TOOL_NAMES.has(name)) {
-      const tasksOn = await isTasksEnabled(call);
-      if (!tasksOn) {
+      const centre = await taskCentreState(call);
+      if (centre !== TASK_CENTRE_ENABLED) {
+        const unsupported = centre === TASK_CENTRE_UNSUPPORTED;
         return formatToolError(
-          "task centre is disabled: set config.tasksEnabled=true",
+          unsupported
+            ? "this Harness plugin does not implement the task centre (0.9.0)"
+            : "task centre is disabled: set config.tasksEnabled=true",
           { tool: name },
-          "enable config.tasksEnabled on the bridge before calling task tools",
+          unsupported
+            ? "upgrade the plugin inside the DSH profile to 0.9.0 — the MCP bridge and the plugin ship together"
+            : "enable config.tasksEnabled on the bridge before calling task tools",
         );
       }
     }
