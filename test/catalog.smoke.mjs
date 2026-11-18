@@ -66,6 +66,10 @@ const expected = [
   "dsh.sessions.list",
   "dsh.sessions.prompt",
   "dsh.sessions.wait",
+  "dsh.tasks.cancel",
+  "dsh.tasks.get",
+  "dsh.tasks.list",
+  "dsh.tasks.submit",
   "dsh.workspaces.create",
   "dsh.workspaces.list",
 ];
@@ -91,7 +95,17 @@ for (const want of ["workspaceId", "agentPreset", "model", "reasoningEffort", "p
 // pass a field that is guaranteed to be rejected.
 check(!createParams.includes("sessionId"), "dsh.sessions.create must not advertise sessionId");
 
-const handlers = ["listWorkspaces", "createWorkspace", "permissionCatalog", "configure", "capabilities"];
+const handlers = [
+  "listWorkspaces",
+  "createWorkspace",
+  "permissionCatalog",
+  "configure",
+  "capabilities",
+  "submitTask",
+  "getTask",
+  "listTasks",
+  "cancelTask",
+];
 for (const name of handlers) {
   check(typeof methods[name] === "function", `handler missing: ${name}`);
 }
