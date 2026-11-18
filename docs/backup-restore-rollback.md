@@ -78,3 +78,9 @@ node bin/dsh-rpc.mjs tasks list --json
 1. **旧 RPC / 会话链路可用**：`node bin/dsh-rpc.mjs ping --json` 返回 `0.8.1`，`dsh.sessions.list` 与基础 `dsh_ask` 正常应答。
 2. **任务中心工具消失**：`dsh-rpc discover --json` 方法数回到 `17`，MCP `tools/list` 不再出现 `dsh_tasks_*` 或 `dsh_agents_*`。
 3. **账本文件仍在**：`$DSH_HOME/storages/task-center/tasks.db` 字节大小与修改时间保持回滚前原样，未被清理或改写。
+
+**实测补充（2026-11-19，未做真回滚，只做混版验证）**：本机宿主当时装的就是 0.8.1，用仓库里的 0.9.0 CLI 打它是同一组信号——
+`node bin/dsh-rpc.mjs ping` → `plugin: dsh-rpc-agent 0.8.1 (protocol 2026-11-04)`；
+`node bin/dsh-rpc.mjs tasks list` → `unknown method: dsh.tasks.list`，`available` 列出 **17** 个方法（`dsh.approvals.*` … `dsh.workspaces.list`），并附 `next: this Harness plugin predates the task centre (0.9.0)`，退出码 1；
+MCP 侧 `tools/list` 只 11 个工具，没有 `dsh_tasks_*` / `dsh_agents_*`（见 §A18 用例与 t7 的实机取证）。
+未验证的是第 3 条（账本文件在真回滚后的字节与 mtime）与"回滚后重启宿主"这一段——真回滚需要装包并重启宿主，属发版/运维动作，本次未执行。
