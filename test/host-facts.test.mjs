@@ -6,6 +6,7 @@ import { formatCapabilities, SECTION_IDS } from "../lib/capabilities.mjs";
 import { buildDispatcher } from "../lib/http.mjs";
 import { createMethods } from "../lib/methods.mjs";
 import { resolveConfig } from "../lib/config.mjs";
+import { PLUGIN_VERSION } from "../lib/version.mjs";
 
 function fullServices() {
   return {
@@ -217,7 +218,10 @@ test("methods.capabilities works with no live session and does not touch session
     result.sections.map((s) => s.id),
     ["identity", "mcp"],
   );
-  assert.match(result.text, /^capabilities: dsh-rpc-agent 0\.8\.1/);
+  // Assert against the single source of truth: a hardcoded version string here would
+  // silently rot the moment PLUGIN_VERSION is bumped (it did, at 0.9.0).
+  const versionPattern = new RegExp(`^capabilities: dsh-rpc-agent ${PLUGIN_VERSION.replace(/\./g, "\\.")} `);
+  assert.match(result.text, versionPattern);
 
   await assert.rejects(
     () => methods.capabilities({ max_chars: 50000 }),

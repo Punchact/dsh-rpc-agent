@@ -75,7 +75,8 @@ Repository and package name are both `dsh-rpc-agent`; the commands (`dsh-rpc`, `
 - **Read-only hindsight**: `dsh_history` pulls the recent event window (tool calls, results, turn end, approval and sandbox changes) without waking the session agent.
 - **Self-describing**: `dsh_capabilities` returns an eight-section snapshot (runtime, permission presets, callable tools, MCP prefixes, sessions, workspaces, plugins), so a planner does not have to guess what this machine offers.
 - **No pretend knowledge**: when an outer client caps tool calls below the bridge budget, the bridge says so and recommends polling in slices instead of letting a long job look like a failure.
-- **Regression tests guard the sharp edges**: 257 cases + catalog smoke + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
+- **Managed external agent tasks (Task centre, `tasksEnabled: false` by default)**: a 15-table SQLite ledger, 11-state machine, and capability cards/read-only probes driving DSH itself, Antigravity, and Codex App Server; see [docs/task-center.md](./docs/task-center.md).
+- **Regression tests guard the sharp edges**: 35 test files (326 cases) + catalog smoke (326/326 pass locally, including the 15 `approvals` cases) + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
 
 ## Install and update
 
@@ -91,7 +92,7 @@ Or say it inside DSH:
 plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent" })
 ```
 
-For a non-default profile add `--profile <name>`; pin a version by writing `@punchact/dsh-rpc-agent@0.8.1` (omitting it means `latest`). The latest on npm is [`0.8.1`](https://www.npmjs.com/package/@punchact/dsh-rpc-agent); this file describes **the code in the repository**, and differences are listed at the top of the [CHANGELOG](./CHANGELOG.md).
+For a non-default profile add `--profile <name>`; pin a version by writing `@punchact/dsh-rpc-agent@0.9.0` (omitting it means `latest`). The latest published release on npm is [`0.8.1`](https://www.npmjs.com/package/@punchact/dsh-rpc-agent); this file describes **the code in the repository (`0.9.0`)**, and differences are listed at the top of the [CHANGELOG](./CHANGELOG.md).
 
 Three things that bite on the npm route:
 
@@ -100,7 +101,7 @@ Three things that bite on the npm route:
 
    ```yaml
    minimumReleaseAgeExclude:
-     - '@punchact/dsh-rpc-agent@0.4.3 || 0.4.4 || 0.5.3 || 0.7.6 || 0.7.7 || 0.7.8 || 0.8.1'
+     - '@punchact/dsh-rpc-agent@0.4.3 || 0.4.4 || 0.5.3 || 0.7.6 || 0.7.7 || 0.7.8 || 0.8.1 || 0.9.0'
    ```
 
 3. **To confirm which copy is installed**: use `cordis_inspect_query` (`Config.listConfigs`, `input: {"entry":"include:dsh-rpc-bridge"}`) and look at `packageDir` — pointing at `<profile>\node_modules\@punchact\dsh-rpc-agent` means the npm route, pointing at your checkout means the link route. **The version number is not evidence**; it is read from the `package.json` inside the package.
@@ -155,7 +156,7 @@ Cursor / Codex use the equivalent config form (backslashes in JSON must be escap
 
 On the local-checkout route, replace the path with `<path-to-your-clone>\bin\dsh-rpc-mcp.mjs`. The rest of this document writes `node bin/...`, which means "run from inside the package".
 
-**Eleven tools** are exposed:
+**Eleven tools** are exposed by default (**6** additional task-centre tools — `dsh_tasks_{submit,list,get,cancel}` and `dsh_agents_{list,probe}` — are mounted when `tasksEnabled: true`, **17** total):
 
 | Tool | Purpose |
 | --- | --- |
@@ -285,6 +286,16 @@ Every method lives under the `dsh.` namespace; the CLI aliases `ping` / `discove
 | `dsh.sessions.cancel` | `sessionId` | `{accepted, sessionId}` |
 | `dsh.sessions.history` | `sessionId, limit?, since?, kinds?, maxChars?` | `{cursor, turn, running, messageCount, records[], truncated?}` |
 | `dsh.capabilities` | `sections?, maxChars?, sessionId?` | `{sections[], text, truncated, missing[]}`, read-only eight-section snapshot |
+| `dsh.tasks.preview` | `principalId, workspaceId?, agentId?, capabilityRevisionId?, input?, ttlMs?` | `{previewId, requestDigest, agentId, expiresAt, …}` |
+| `dsh.tasks.submit` | `previewId \| confirm, idempotencyKey, capabilityRevisionId, workspaceId, agentId?, input?` | `{taskId, status, phase, stateVersion, …}` |
+| `dsh.tasks.get` / `list` | `taskId` / `status?, workspaceId?, principalId?, limit?, cursor?` | Task details (with `phase` and open `attention`) or paginated list |
+| `dsh.tasks.cancel` | `taskId, expectedStateVersion, idempotencyKey, reason?` | `{taskId, status, stateVersion, notice?}` |
+| `dsh.tasks.dispatch` / `pump` | `taskId, …` / `taskId, maxSteps?, deadlineMs?, cursor?` | Dispatches to an adapter or drives bounded events/inspect pumping |
+| `dsh.tasks.reconcile` | `taskId, evidence: { observedState, note?, result? }` | Settles `needs_reconcile`/`cancel_requested` and closes active attempts |
+| `dsh.tasks.decideApproval` | `taskId, attemptId, approvalId, decision: "allow"\|"deny", reason?` | `{approvalId, decision, status, stateVersion, operationId}` |
+| `dsh.agents.register` / `list` / `probe` | `card` / filters / `agentId, controls?` | Capability-card registration, listing, and read-only control probing |
+
+(**29** JSON-RPC methods total; run `dsh.discover` or `dsh-rpc discover` for full parameter schemas.)
 
 Semantics that are easy to trip over:
 
@@ -421,6 +432,51 @@ Rules worth knowing:
 - **Two numbers under `since`**: `since` narrows the rendering only; the total still covers the whole turn and is annotated `+3 since cursor 4080`, so a delta never looks like a turn that only made three calls.
 - **Budget is never silent**: dropped calls end with `… +N more (call dsh_history for the full window)`.
 - **Turn it off**: `config.traceDefault: "none"`, or pass `trace: "none"` once. Ask for `"full"` when you need the detail.
+
+### Task centre
+
+Asynchronous work delegated to external agents (DSH itself, Antigravity, or Codex App Server) no longer relies on human relay or chat memory: the durable task ledger lives in a local SQLite database (`$DSH_HOME/storages/task-center/tasks.db`), and every executor's controls and weaknesses are inspectable through a **capability card (`capability-card@1`)** and read-only probes rather than treated as a black box. Disabled by default; enabling it exposes CLI, JSON-RPC, and 6 gated MCP tools (operations manual: [docs/task-center.md](./docs/task-center.md); backup and rollback: [docs/backup-restore-rollback.md](./docs/backup-restore-rollback.md)).
+
+**Circuit-breaker & configuration switches** (set under `config` in `cordis.patch.yml`):
+
+| Switch | Default | Range & meaning |
+| --- | --- | --- |
+| `tasksEnabled` | `false` | Boolean master switch; when `false`, no DB is opened, no timer starts, and MCP hides task tools |
+| `tasksMaxConcurrent` | `1` | Integer `1..32`; global active-task concurrency cap enforced atomically at `dispatch` (`STATE_CONFLICT`) |
+| `tasksRequireReconcileOnUnknown` | `true` | Boolean; unrecognized statuses or `blocked` reports without `attention` transition to `needs_reconcile` |
+| `tasksExternalAdapter` | `"none"` | `"none" \| "antigravity" \| "codex"`; external adapter wired alongside the built-in DSH baseline adapter |
+| `tasksPreviewTtlMs` | `300000` | Integer `1000..3600000`; lifetime of one-shot `dsh.tasks.preview` tokens in ms |
+| `tasksDbPath` | `null` | String or `null`; custom SQLite file path (defaults to `$DSH_HOME/storages/task-center/tasks.db`) |
+
+**Typical CLI workflow** (copyable sequence after enabling `tasksEnabled: true` and restarting the host):
+
+```powershell
+node bin/dsh-rpc.mjs agents register --file ./card.json --json
+node bin/dsh-rpc.mjs agents probe --agent ag-dsh --json
+node bin/dsh-rpc.mjs tasks preview --principal local-operator --workspace local --agent ag-dsh --capability cap_1 --input '{"prompt":"inspect repo"}' --json
+node bin/dsh-rpc.mjs tasks submit --preview <previewId> --principal local-operator --capability cap_1 --workspace local --agent ag-dsh --idempotency-key run-001 --json
+node bin/dsh-rpc.mjs tasks dispatch <taskId> --json
+node bin/dsh-rpc.mjs tasks pump <taskId> --max-steps 20 --json
+node bin/dsh-rpc.mjs tasks get <taskId> --json
+# When approval is pending: node bin/dsh-rpc.mjs tasks approve --task <taskId> --attempt <attemptId> --approval <approvalId> --decision allow --reason "approved" --json
+# When manual settlement is needed (needs_reconcile): node bin/dsh-rpc.mjs tasks reconcile <taskId> --observed cancelled --note "confirmed stopped" --json
+```
+
+**Reading derived `phase` and `attention`**:
+
+`phase` is computed on demand on every read and never persisted:
+- Waiting on a person: `person/delivery` (undelivered input retrying) → `person/approval` (pending approval) → `person/answer` (pending decision/input question) → `person/reconcile` (`needs_reconcile` after lease expiry or unsupported cancel) → `person/review` (awaiting acceptance or schema-invalid output).
+- Waiting on a machine: `machine/queued` (`queued`/`dispatching`) → `machine/working` (active execution).
+- Finished: `done` (`succeeded`/`failed`/`cancelled`).
+- When there are no open `attention` rows, `phase` never claims it is waiting on you.
+
+**Three honesty rules**:
+
+1. Capability card `limitations` is required and **an empty list is rejected at registration** (`normalizeCard` throws `INVALID_CARD`).
+2. Whenever `declared` and `verified` disagree, **`verified` wins** (partially probed cards report `probeStatus: "partial"` or `"unknown"`).
+3. `cancel.confirmed` **requires state-machine evidence, never HTTP 200**: Antigravity requires `RUNNING → CANCELING → IDLE` with `EXECUTOR_TERMINATION_REASON_USER_CANCELED`, and Codex requires `turn/completed.status="interrupted"`.
+
+**Version-skew behaviour**: If a `0.9.0` CLI/MCP bridge talks to a `0.8.x` plugin, task tools stay hidden from `tools/list` (or fail explicitly stating the plugin does not support the task centre) — never a half-applied state. Upgrade the plugin to `0.9.0` and restart the host.
 
 ### `since` returns only the delta
 
@@ -582,7 +638,7 @@ DSH's web port is decided by the launcher, and the desktop app lets the OS pick 
   "url": "http://127.0.0.1:3820/dsh-rpc",
   "origin": "http://127.0.0.1:3820",
   "path": "/dsh-rpc",
-  "version": "0.8.1",                        // the version the running copy reports
+  "version": "0.9.0",                        // the version the running copy reports
   "plugin": "dsh-rpc-agent",
   "pid": 12345,                              // the Host process that wrote this file
   "startedAt": "2026-11-05T01:05:58.000Z",   // when that process started
@@ -688,14 +744,14 @@ Everything the page shows comes from that read-only endpoint; it writes nothing.
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 16 test files, 257 cases, plus a catalog smoke; no running Harness needed
+npm test                       # 35 test files, 326 cases, plus catalog smoke; no running Harness needed
 node test/host.test.mjs        # 1 case: real WebServer integration (needs npm ci first)
 node test/e2e.mjs --cwd .      # 14 cases: end to end against a real Harness
 node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a real Harness
 ```
 
 <details>
-<summary>What each of the sixteen test files covers</summary>
+<summary>What each of the thirty-five test files covers</summary>
 
 | Suite | Cases | Covers |
 | --- | --- | --- |
@@ -706,9 +762,28 @@ node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a 
 | `advice` | 4 | When the timeout advice fires, and its per-session de-duplication |
 | `host-facts` | 6 | Host service allow-list, degradation on missing or throwing services, eight collectors |
 | `capabilities` | 4 | Section selection, `max_chars` trimming, status roll-up |
+| `tasks-store` | 4 | SQLite 15 tables, WAL, foreign keys, concurrent write-transaction retries |
+| `tasks-state` | 5 | 11-state transition table, illegal transitions, optimistic locks, terminal append-only events |
+| `tasks-engine` | 8 | Idempotency keys, cancel/complete races, schema-validation gate, derived phase precedence, restart durability |
+| `tasks-degraded` | 2 | Degraded permission: unsupported controls map to a readable consequence; task detail/list carry `degraded[]` |
+| `agents-card` | 5 | `capability-card@1` normalization, empty `limitations` rejection, `verified` merging |
+| `agents-probe` | 1 | Read-only probe timeout/throw isolation and `unknown` recording |
+| `tasks-preview` | 2 | One-shot preview consumption, digest match, TTL expiry, principal isolation |
+| `tasks-reconcile` | 4 | `needs_reconcile` settlement, closing lingering side-effect attempts, requeue unlock |
+| `adapters-base` | 2 | Seven-operation adapter contract and six-state report validation |
+| `adapters-antigravity` | 2 | `projectEnvConfig.projectId`, model placeholder lookup, `ForceStopCascadeTree`, unavailable handling |
+| `adapters-codex` | 2 | `codex.exe` discovery, `stdio://` handshake, turn events, `turn/interrupt` |
+| `adapters-dsh` | 7 | DSH baseline 7-op mapping, honest stop, `resultValid: false`, and dispatch integration |
+| `methods-dsh-ops` | 2 | `createDshAdapterOps` error containment, auto-wiring, `registerAgent`, `decideApproval` |
+| `tasks-dispatch` | 8 | `startTask`/`pump`/`drainEffects`, lease reclamation, atomic `maxConcurrent` gate |
+| `config-breakers` | 3 | Five circuit-breaker defaults, valid bounds, `ConfigError` rejections |
+| `index-wiring` | 2 | Off leaves DB untouched, on initializes/seeds, external adapter init degradation |
+| `mcp-tasks-tools` | 3 | 6 gated task MCP tools visibility, disabled rejections, `reconcile`/`decideApproval` exclusion |
+| `cli-tasks` | 4 | `tasks` / `agents` flag parsing, `UsageError` (exit 2), JSON-RPC calls |
+| `cli-agents-approve` | 3 | `tasks approve` flag checks, `dsh.tasks.decideApproval`, and `agents` CLI commands |
 | `registry` | 10 | Sticky-session I/O, concurrent updates, key isolation, rotation |
 | `pending` | 36 | Pending store, long polling, cancellation withdrawal, allowance pre-claim, transaction boundary |
-| `approvals` | 15 | Config validation, gate branches, ownership, waterfall, disposal races |
+| `approvals` | 15 | Config validation, gate branches, ownership, waterfall, disposal races (requires `@deepseek-ai/cordis`) |
 | `approval-state` | 20 | Restarts, migration, ticket replay, cross-process quotas, TTL, recovery |
 | `wait` | 6 | Sliced waiting (real HTTP stub) |
 | `abort` | 7 | The abort chain (real socket / in-process registry) |
@@ -718,10 +793,10 @@ node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a 
 
 </details>
 
-`npm test` runs these sixteen test files plus the catalog smoke in a fixed order; `npm run test:host` runs the real-WebServer integration test; `npm run test:e2e` / `npm run test:edge` need a live Harness.
+`npm test` runs these thirty-five test files plus the catalog smoke in a fixed order; `npm run test:host` runs the real-WebServer integration test; `npm run test:e2e` / `npm run test:edge` need a live Harness.
 
 > [!TIP]
-> **Do not use `node --test`**: it forks a child process per file, which DSH's sandbox blocks with `spawn EPERM`.
+> **If `node --test` hits `spawn EPERM` in a restricted sandbox**: run individual files via `node <file>` or pass `node --test --test-isolation=none <file>`.
 
 A few worth calling out:
 
@@ -730,7 +805,7 @@ A few worth calling out:
 - **Edge** probes the protocol layer: batches, notifications, id shapes, auth headers, oversized bodies (a genuine 413, not a dropped connection), parameter-injection defences, timeout clamping, concurrent asks, `limit` semantics.
 - **Port drift** (manual): point `endpoint.json` at a dead port and run `dsh-rpc ping`; expect exit code 3 and a readable error mentioning `nothing is listening`, `pid` and `health --wait`.
 
-Local verification (2026-11-18, 0.8.1): 248/257 pass on this machine. The nine failures are exactly the cases that spawn a real subprocess pipe (`abort` 1, `cli-mcp-regressions` 8), blocked by the DSH sandbox (`spawn EPERM`) rather than by a regression — the same chain is green on the GitHub Actions ubuntu runner (run 44307387584). Also green: catalog smoke, the real-WebServer integration test (1/1), end-to-end 14/14 (against the installed 0.7.7 plugin, proving client-side backward compatibility), version consistency across the three places, and the package manifest check.
+Local verification (2026-11-19, 0.9.0, real repository): all 35 test files in the `npm test` chain pass (**326/326** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.mjs` (`methods: 29` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`), and UTF-8 no-BOM / LF formatting checks.
 
 ## License
 

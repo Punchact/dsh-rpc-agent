@@ -1,5 +1,45 @@
 # 变更记录
 
+## [0.9.0] - Unreleased
+
+> 本版主题：把本插件扩展为本机多执行方任务中心——独立 SQLite 任务账本、能力卡与只读探测、有界派发环、三套执行方适配器，以及默认关闭的熔断开关。`PROTOCOL_VERSION` 由 `2026-11-04` 升至 `2026-11-19`。
+
+### 新增
+
+- **任务中心账本与状态机**（默认 `$DSH_HOME/storages/task-center/tasks.db`，WAL + `foreign_keys=ON`）：
+  - 新建 15 张表（`schema_meta`、`principals`、`workspaces`、`agents`、`capability_revisions`、`previews`、`tasks`、`mandates`、`attempts`、`events`、`effects`、`inputs`、`approvals`、`artifacts`、`attention`）。
+  - 11 态任务状态机、`expectedStateVersion` 乐观锁、基于 `(principalId, idempotencyKey)` 的提交/控制幂等校验、`effects` 持久出箱（带 `lease_expires_at` 租约回收）与一次性 `previews` 绑定。
+  - 派生阶段 `derivePhase` 按 8 档优先级现算（`person/delivery` → `person/approval` → `person/answer` → `person/reconcile` → `person/review` → `machine/queued` → `machine/working` → `done`），不写回数据库。
+- **RPC、MCP 与 CLI 扩展**（JSON-RPC 方法总数 **17 → 29**，MCP 工具 **11（默认）+ 6（`tasksEnabled: true` 时共 17 个）**）：
+  - 新增 9 个任务 RPC：`dsh.tasks.{preview,submit,get,list,cancel,dispatch,pump,reconcile,decideApproval}`；新增 3 个代理 RPC：`dsh.agents.{register,list,probe}`。
+  - 新增 6 个受开关门控的 MCP 工具：`dsh_tasks_{submit,list,get,cancel}` 与 `dsh_agents_{list,probe}`（有意排除 `reconcile` 与 `decideApproval`，人工核对与审批留在 RPC/CLI 面）。
+  - 新增 CLI 子命令：`dsh-rpc tasks <preview|submit|list|get|cancel|dispatch|pump|reconcile|approve>` 与 `dsh-rpc agents <register|list|probe>`。
+- **三个执行方适配器**（统一实现七操作契约 `probe`/`start`/`inspect`/`sendInput`/`cancel`/`events`/`decideApproval`）：
+  - DSH 自身基准适配器（`lib/adapters/dsh.mjs` + `createDshAdapterOps`）：注入 7 个会话操作包装，`tasksEnabled: true` 时自动装配；`probe` 只读、`cancel.stopped` 严格以底层确认为准、未校验结果保持 `resultValid: false`。
+  - Antigravity 适配器（`lib/adapters/antigravity.mjs`）：通过 `ForceStopCascadeTree` 执行会话树级取消，传入 `projectEnvConfig.projectId` 入项目与 `MODEL_PLACEHOLDER_*` 选模型，不把持久化 locator 写入密钥/CSRF。
+  - Codex App Server 适配器（`lib/adapters/codex.mjs`）：通过 `app-server --listen stdio://` 建会话并用 `turn/interrupt` 中断轮次，Windows 下跳过 0 字节 `WindowsApps` 别名或回落 `.codex/.sandbox-bin/codex.exe`。
+- **能力卡、只读探测与能力修订**：
+  - `capability-card@1` 规范化与哈希，强制必填非空 `limitations[]`，`declared` 与 `verified` 字段分离；`dsh.agents.probe` 只读探测 6 项控制项并记录 `verified` / `partial` / `unknown`（带原因与耗时 `elapsedMs`）。
+  - 支持能力修订表（含 `review.diff@1` 基线与 `control_requirements_json` 字段）及策略/降级字段（`policy_revision`、`limitations[]`、`degraded[]`）。
+
+### 修复
+
+- `scripts.test` 新增并接入 19 个任务中心与 CLI/适配器测试套件（全链 35 个测试文件、326 例，本机与 CI 均全绿），并更新 `catalog.smoke.mjs` 校验 29 个 RPC 方法。
+- `dispatch.mjs` 修复了租约到期回收与原子 `maxConcurrent` 门控竞态，防止同一写事务之外并发超发或将任务卡死在 `dispatching` / `in_flight`。
+
+### 行为变化
+
+- **默认完全关闭（与 0.8.1 行为零差异）**：`tasksEnabled` 默认 `false`；未显式开启时不会创建 `tasks.db`，MCP 工具列表保持 11 个，不改变任何既有 `dsh.*` 会话语义。
+- **开启后的变化**：设置 `tasksEnabled: true` 并重启宿主后，首次启动在 `$DSH_HOME/storages/task-center/tasks.db` 初始化账本并播种 `local-operator` 与 `local` 工作区，启动 5 秒定时 `drainEffects` 出箱排水（`.unref()`），MCP 侧多出 6 个任务/代理工具。
+
+### 关闭方式
+
+- `tasksEnabled: false`：彻底关闭任务中心初始化、DB 打开、定时器与任务 MCP 工具暴露（已有的 `tasks.db` 保留不动）。
+- `tasksExternalAdapter: "none"`：仅保留 DSH 基准适配器，不装配 `antigravity` 或 `codex` 外部适配器。
+- `tasksMaxConcurrent: 1`：有界派发并发上限（整数 `1..32`，默认 `1`），超限时 `startTask` 直接报 `STATE_CONFLICT`。
+- `tasksRequireReconcileOnUnknown: true`：未识别状态或无结构化 `attention` 的 `blocked` 报告一律转 `needs_reconcile`（默认 `true`）。
+- `tasksPreviewTtlMs: 300000`：预览有效期（整数 `1000..3600000` ms，默认 `300000`），超时或已消费均拒绝提交。
+
 ## [0.8.1] - 2026-11-18
 
 > 0.8.0 未单独发布，其观测能力并入本版。

@@ -546,6 +546,45 @@ compression: gzip
 4. **为什么 `mcp` 统计可调用工具而不是配置里的 server 列表**：从可见工具名按 `^mcp__([^_]+(?:_[^_]+)*?)__` 归并，只能反映当前 agent 实际上能调得到的 `mcp__*` 工具前缀，不等于 profile 里配置了哪些 MCP server（连接失败、被禁用或未注册工具的 server 不会出现在工具表里）。因此该节明确标注 `source: tools(mcp__)` 并附固定声明（`these are the MCP tools exposed to this agent, not the servers in the profile`），工具名每节最多展示 40 个并在末尾标 `+N more`。
 5. **未来读者凭什么相信某一节**：每节先看状态再看来源：`ok` 表示该 `source` 完整返回了契约所需的数据；`partial` 表示 `source` 应答但缺失部分维度（首行明示缺口，如 `tools` 仅有名称没有 schema、`sessions` 无总数仅支持按 id 查询）；`unavailable` 只意味着"当前宿主环境未向本桥暴露该事实"，不代表该能力不存在。此外，`tools` 与 `loader` 两条路径在 S5 阶段已由假 `ctx` 桩单测覆盖，**尚未在 live Harness Host 内实测**，上线实机验证后需补充运行期观测记录。
 
+---
+
+## 28. 决策 0.9.0-a：任务账本由 DSH 持有、任务状态不跟随会话
+
+- **决策**：任务状态、尝试记录（`attempts`）、事件流（`events`）、副作用出箱（`effects`）与待批/待答（`approvals`/`attention`）全部由 DSH 侧本地 SQLite 账本（`$DSH_HOME/storages/task-center/tasks.db`）独立持有，不绑定到 Antigravity 级联会话、Codex 进程或 DSH 单条会话本身的生命周期。
+- **为什么**：外部执行方的会话模型各不相同且经常不可逆转——Antigravity 的 `ForceStopCascadeTree` 会终止整棵对话树并可能留下不可继续续跑的状态，Codex 的 `ephemeral` stdio 进程退出后内存现场即失，DSH 会话重启也会丢掉易失队列状态。只有把任务账本留在 DSH 自己的 WAL 事务库里，调度中心才拥有跨重启、跨执行方、跨进程的一份权威事实。
+- **反例或代价**：引入了本地持久化数据库与主外键/乐观锁迁移维护成本；每步推进（`startTask`/`pump`/`reconcile`）都必须走事务写库，换取的是执行方崩溃或进程重启时任务不会人间蒸发。
+
+## 29. 决策 0.9.0-b：派生阶段现算不落库（避免第二真相）
+
+- **决策**：对外展示的 `phase`（`person/delivery`、`person/approval`、`person/answer`、`person/reconcile`、`person/review`、`machine/queued`、`machine/working`、`done`）每次读取通过纯函数 `derivePhase(task, attentionRows, lastEvent)` 按固定优先级现场派生，不在 `tasks` 表额外存 `phase` 列。
+- **为什么**：若在数据库同时维护 `status`、`attention.status` 和 `phase` 两个/三个可变列，只要任何一条分支（如审批过期、人工核对关闭 attention、重连推进）忘了同步改写 `phase`，界面就会出现「状态是 `running` 或 `attention` 已空，但 `phase` 还显示在等你审批」的分裂真相。纯函数现算确保「谁在等谁」永远严格派生自唯一真相源。
+- **反例或代价**：每次 `get` 需读取任务行、关联的 `attention` 行与末条事件再计算一次（同一次读事务内几微秒级别），且无法直接写 `WHERE phase = 'person/approval'` 的单列索引查询；若未来列表需按 `phase` 过滤，应写等价 SQL 谓词或物化视图，而不是把可写状态拆成两份。
+
+## 30. 决策 0.9.0-c：能力卡必须自述弱点、`declared` 与 `verified` 分离
+
+- **决策**：能力卡（`capability-card@1`）强制要求非空 `limitations[]`（空数组直接在 `normalizeCard` 阶段报 `INVALID_CARD` 拒收），并且严格把注册自称的 `declared` 与只读探测证实的 `verified` 分开存储与结算（部分探测记为 `partial`，全过才为 `verified`）。
+- **为什么**：一份只列支持能力、不承认短板的声明本质是广告而不是工程契约；若探测结果覆盖 `declared`，排查时就分不清"它本来吹自己行"还是"刚才本机确实没通"。保留 `declared` 并单独维护 `verified` 与 `probe_evidence_json`，才能让上层在 `preview` 和调度阶段看清真实能力边界。
+- **反例或代价**：注册新执行方时不能传空 `limitations: []`，配置编写多一行审视成本；同时任何外部执行方升级后必须重跑 `agents.probe` 才会更新 `verified`，不会在后台悄悄篡改能力状态。
+
+## 31. 决策 0.9.0-d：适配器七操作契约 + `effects` 出箱与租约（为什么不是内存里排个队）
+
+- **决策**：所有执行方（DSH 自身、Antigravity、Codex）统一收口到 `probe`/`start`/`inspect`/`sendInput`/`cancel`/`events`/`decideApproval` 七个显式操作；而 `cancel` 与 `decide_approval` 等外部副作用先写入带 `idempotency_key` 和 `lease_expires_at` 租约的 `effects` 出箱表，再由有界 `drainEffects` 抢占执行并写回回执。
+- **为什么**：如果把取消、审批放进内存队列，一旦宿主崩溃、插件重载或执行方进程卡死，队列里的指令会静默丢失，或者同一条 `cancel`/`allow-once` 在重试时被发两次。出箱表 + 租约到期回收保证了「至少记录在案、租约过期可被新排水接管、同幂等键不重做」，失败时还能把 `cancel.failed` 显式升级给操作者处理。
+- **反例或代价**：不能指望在单次同步调用内直接"内存一步到位"完成所有副作用；延迟最多受 `drainEffects` 周期（默认 5 秒或显式触发）影响，且需要在 `effects` 表维护租约与状态列。
+
+## 32. 决策 0.9.0-e：取消证据规则（为什么 HTTP 200 不算、`needs_reconcile` 是一等状态）
+
+- **决策**：`dsh.tasks.cancel` 只登记 `cancel_requested`；适配器返回的 `stopped` 必须以目标系统的状态机收口证据为前提（Antigravity 必须见 `RUNNING → CANCELING → IDLE` 且携带 `EXECUTOR_TERMINATION_REASON_USER_CANCELED`，Codex 必须见 `turn/completed.status="interrupted"`，DSH 自身只有宿主显式确认 `stopped: true` 才算），绝不把 `Cancel` 请求的 HTTP 200 或 `accepted: true` 当成 `cancelled`；任何拒停、不支持取消或失联统一把任务推向一等状态 `needs_reconcile`。
+- **为什么**：Phase 0 实测已证明，部分外部 RPC 收到取消请求返回 HTTP 200 后，底层步骤/子代理树可能仍在继续产出或停机原因缺失；假装已取消会导致调用方误以为副作用已停止，进而在工作区并发起冲突任务。把 `needs_reconcile` 设为显式非终态一等公民，逼迫系统把「不确定停没停」端到人或核对流程面前，直到拿出外部观察证据（`reconcile`）才允许关闭活跃 `attempt` 并解锁 `requeue`。
+- **反例或代价**：操作者有时会看到任务停在 `needs_reconcile` 而必须介入执行一次 `tasks reconcile`，体验上不如「永远报告成功」省事，但换来的是绝不对未确认的副作用撒谎。
+
+## 33. 决策 0.9.0-f：熔断开关默认关（为什么新能力默认不上线）
+
+- **决策**：`tasksEnabled` 默认 `false`、`tasksExternalAdapter` 默认 `"none"`、`tasksMaxConcurrent` 默认 `1`、`tasksRequireReconcileOnUnknown` 默认 `true`、`tasksPreviewTtlMs` 默认 `300000`。新能力必须通过 `cordis.patch.yml` 显式开启。
+- **为什么**：`0.9.0` 的消费者既有直接做会话问答的既有客户端，也有渐进接入任务中心的操作者。如果一升级就自动创建 SQLite 库、起 5 秒后台定时器、挂载 6 个新 MCP 工具或默认把并发放宽到多路外部进程，就会改变老用户的磁盘、端口、工具列表预算并放大外部进程失控半径。默认全关确保 0.8.x 用户的升级回归面为零，打开后也先被并发=1 与未知即转核对两条安全带兜住。
+- **反例或代价**：新装 `0.9.0` 的用户不能"开箱直接调用 `dsh_tasks_submit`"，必须按手册修改 `cordis.patch.yml` 并重启一次宿主，多出一步显式激活动作。
+
+
 
 
 

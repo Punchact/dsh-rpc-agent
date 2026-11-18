@@ -1,6 +1,6 @@
 {
   "name": "@punchact/dsh-rpc-agent",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "description": "Loopback JSON-RPC bridge that lets local AI agents drive DeepSeek Harness sessions",
   "author": "Punchact",
   "license": "MIT",
