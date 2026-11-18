@@ -728,8 +728,17 @@ function formatTaskSummary(task, maxResultChars = DEFAULT_MAX_RESULT_CHARS) {
   };
 }
 
+// Keys that would reach Object.prototype if any later code copies arguments
+// with Object.assign or [[Set]]. JSON.parse stores them as own properties, so
+// the danger is downstream, not here — refuse them at the door.
+const PROTO_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+const MAX_SCHEMA_DEPTH = 8;
+
 function validateValue(schema, value, path, depth = 0) {
   if (!schema || typeof schema !== "object") return null;
+  if (depth > MAX_SCHEMA_DEPTH) {
+    return `invalid arguments: ${path} — nesting deeper than ${MAX_SCHEMA_DEPTH} levels`;
+  }
 
   if (schema.type === "string" && typeof value !== "string") {
     return `invalid arguments: ${path} — expected string`;
@@ -773,7 +782,7 @@ function validateValue(schema, value, path, depth = 0) {
   if (schema.type === "object" && value && typeof value === "object" && !Array.isArray(value)) {
     if (Array.isArray(schema.required)) {
       for (const reqKey of schema.required) {
-        if (!(reqKey in value) || value[reqKey] === undefined) {
+        if (!Object.hasOwn(value, reqKey) || value[reqKey] === undefined) {
           const reqPath = path === "arguments" ? reqKey : `${path}.${reqKey}`;
           return `invalid arguments: ${reqPath} — \`${reqKey}\` is required`;
         }
@@ -782,15 +791,18 @@ function validateValue(schema, value, path, depth = 0) {
     const props = schema.properties && typeof schema.properties === "object" ? schema.properties : null;
     if (schema.additionalProperties === false && props) {
       for (const key of Object.keys(value)) {
-        if (!(key in props)) {
+        // `key in props` is true for "__proto__" on every plain object, so a
+        // prototype key slipped past additionalProperties:false. hasOwn is the
+        // check that actually means "the schema lists this property".
+        if (PROTO_KEYS.has(key) || !Object.hasOwn(props, key)) {
           const propPath = path === "arguments" ? key : `${path}.${key}`;
           return `invalid arguments: ${propPath} — unknown property "${key}"`;
         }
       }
     }
-    if (props && depth < 2) {
+    if (props) {
       for (const [key, val] of Object.entries(value)) {
-        if (val === undefined || !(key in props)) continue;
+        if (PROTO_KEYS.has(key) || val === undefined || !Object.hasOwn(props, key)) continue;
         const propPath = path === "arguments" ? key : `${path}.${key}`;
         const err = validateValue(props[key], val, propPath, depth + 1);
         if (err) return err;

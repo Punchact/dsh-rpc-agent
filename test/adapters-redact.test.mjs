@@ -53,5 +53,44 @@ test("redactDeep redacts sensitive keys, nested strings, and enforces depth limi
   // Depth limit 6 stops recursion beyond level 5 -> 6
   const deep = { a: { b: { c: { d: { e: { f: { g: "too-deep" } } } } } } };
   const clipped = redactDeep(deep);
-  assert.equal(clipped.a.b.c.d.e.f, "[truncated]");
+  assert.equal(clipped.a.b.c.d.e.f, "[truncated: depth]");
+});
+
+
+test("redactSecrets covers Basic auth, cookies, URL userinfo, GitHub PATs and AWS keys", () => {
+  const input = [
+    "authorization: Basic dXNlcjpwYXNzd29yZA==",
+    "cookie: session=abc123; csrftoken=zzz",
+    "fetch https://deploy:hunter2@registry.example/v1",
+    "pat github_pat_11ABCDEFG0123456789_abcdefghijklmnop",
+    "aws AKIAIOSFODNN7EXAMPLE",
+  ].join(" | ");
+
+  const redacted = redactSecrets(input);
+  assert.doesNotMatch(redacted, /dXNlcjpwYXNzd29yZA|session=abc123|hunter2|github_pat_11ABCDEFG|AKIAIOSFODNN7EXAMPLE/);
+  assert.ok(redacted.includes("registry.example/v1"));
+});
+
+test("redactDeep leaves token budgets alone and only redacts string credentials", () => {
+  const out = redactDeep({
+    maxTokens: 4096,
+    tokenCount: 12,
+    totalTokens: 99,
+    tokenLimit: 200,
+    token: "real-secret-value",
+    refresh_token: "another-secret",
+    csrfToken: "csrf-1",
+    headers: { "x-codeium-csrf-token": "hdr-secret" },
+  });
+
+  // Numbers are budgets, not credentials: clobbering them hides real cost data.
+  assert.equal(out.maxTokens, 4096);
+  assert.equal(out.tokenCount, 12);
+  assert.equal(out.totalTokens, 99);
+  assert.equal(out.tokenLimit, 200);
+  // Strings under credential keys still go.
+  assert.equal(out.token, "[redacted]");
+  assert.equal(out.refresh_token, "[redacted]");
+  assert.equal(out.csrfToken, "[redacted]");
+  assert.equal(out.headers["x-codeium-csrf-token"], "[redacted]");
 });

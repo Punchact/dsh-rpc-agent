@@ -186,7 +186,7 @@ Host 抛 `RemoteError(code, message, details)`（`isDSHRemoteError === true`）�
 
 以上数字均为 2026-11-05 在本机实跑，命令见 README §10。
 
-> **现行口径（2026-11-19，0.9.0）**：本表是 2026-11-05 的历史快照，不改写。当前的数量以 README「开发与验证」为准——`npm test` 固定顺序跑 36 个 `*.test.mjs` 共 342 例，外加 `catalog.smoke.mjs`（29 个 RPC 方法）。表中三行随版本长大：`methods` 41 → 85 例，`client` 6 → 8 例；`edge` 仍是 24 项，但**本机 23/24**——第 21 项「create without a cwd reports the directory the Host attached」要求宿主替无 `cwd` 的请求补上工作目录，本机 0.8.1 宿主返回 `null`，属既有环境差异——该项依赖宿主替无 `cwd` 的请求补目录，本机 0.8.1 宿主不补；**CI 不跑 `test:edge`（`.github/workflows/test.yml` 只有 `npm test` / `test:host` / `check:package`），故“CI 下通过”没有证据**，这一项目前只有本机 23/24 的实测。
+> **现行口径（2026-11-19，0.9.0）**：本表是 2026-11-05 的历史快照，不改写。当前的数量以 README「开发与验证」为准——`npm test` 固定顺序跑 36 个 `*.test.mjs` 共 345 例，外加 `catalog.smoke.mjs`（29 个 RPC 方法）。表中三行随版本长大：`methods` 41 → 85 例，`client` 6 → 8 例；`edge` 仍是 24 项，但**本机 23/24**——第 21 项「create without a cwd reports the directory the Host attached」要求宿主替无 `cwd` 的请求补上工作目录，本机 0.8.1 宿主返回 `null`，属既有环境差异——该项依赖宿主替无 `cwd` 的请求补目录，本机 0.8.1 宿主不补；**CI 不跑 `test:edge`（`.github/workflows/test.yml` 只有 `npm test` / `test:host` / `check:package`），故“CI 下通过”没有证据**，这一项目前只有本机 23/24 的实测。
 
 ## 8. 后续可做
 
@@ -613,3 +613,11 @@ compression: gzip
 - **严格协议比宽容协议安全**：Codex 帧的非对象值、错误 `jsonrpc`、非法 `id`/`params`、带 `id` 的未知 method 一律 `failProtocol` 关会话；无 `id` 的未知通知只计数（`unknownMethods`）。UTF-8 用 `StringDecoder` 增量解码，避免 chunk 边界拆坏多字节字符。
 - **入口自己校验**：MCP 的 `callTool` 在分发前按已发布的 `inputSchema` 校验必填项、类型、枚举、范围与未知键（`additionalProperties: false` 时），不指望客户端替我们守 schema。
 - **已知残留（如实记）**：Antigravity 的 `runtimeLocator` 与 `probe()` 会带本机 `httpPort` 与 hub 版本 —— 这是本地运行标识，不含 CSRF token，但确实暴露端口与主机元数据；「取消成功」必须看状态机证据（`RUNNING → CANCELING → IDLE` + `EXECUTOR_TERMINATION_REASON_USER_CANCELED`），HTTP 200 不算。
+
+## 37. 决策 0.9.0-j：净化与入口校验的第三轮收紧（安全复评 t3c）
+
+- **凭据形态按"实际出现过的形状"列**，不靠运气：除 `Bearer` / `ghp_` / `sk-` / csrf 外，补 `Authorization: Basic`、`Cookie` / `Set-Cookie`（止于分号）、URL 里的 `user:pass@`、`github_pat_`、`AKIA`。Cookie 那条第一版写成"到行尾"，把整行其余内容一起吃进 `[redacted]`，连带把后面的 URL 也藏了——正则的边界就是它的语义，写宽了同样是谎。
+- **只对字符串做凭据替换，并放过计数器**：`maxTokens` / `tokenCount` / `totalTokens` 这类键名含 `token`、值是数字。把数字改成 `[redacted]` 既没意义又毁掉成本可见性。规则改为「键名像凭据 **且** 值是字符串 **且** 不在计数白名单」；深度截断也改成 `[truncated: depth]`，让读者知道是递归上限而不是空值。
+- **入口校验改用 `Object.hasOwn`**：`"__proto__" in props` 在任何普通对象上都为真，于是 `additionalProperties: false` 把 `__proto__` 当成合法属性放行——一旦下游用 `Object.assign` 复制参数就是原型污染。现在 `__proto__` / `constructor` / `prototype` 直接拒绝，属性存在性一律用 `hasOwn`。
+- **递归上限从 2 提到 8**：原来的 `depth < 2` 让三层以下的 `minimum` / `type` 约束完全不检查——schema 写多深就漏多深。现在按 `MAX_SCHEMA_DEPTH = 8` 递归，超限直接报错而不是静默跳过。
+- **已知残留（如实记）**：①任务结果原样落账（见 README「已知边界」），要脱敏只能在输出侧；②`inputSchema` 只覆盖我们发布的工具，客户端带进来的 `__proto__` 已被拒，其余未知键在 `additionalProperties` 未声明时会透传给 Host——那属于 Host 的校验范围。

@@ -76,7 +76,7 @@ Repository and package name are both `dsh-rpc-agent`; the commands (`dsh-rpc`, `
 - **Self-describing**: `dsh_capabilities` returns an eight-section snapshot (runtime, permission presets, callable tools, MCP prefixes, sessions, workspaces, plugins), so a planner does not have to guess what this machine offers.
 - **No pretend knowledge**: when an outer client caps tool calls below the bridge budget, the bridge says so and recommends polling in slices instead of letting a long job look like a failure.
 - **Managed external agent tasks (Task centre, `tasksEnabled: false` by default)**: a 15-table SQLite ledger, 11-state machine, and capability cards/read-only probes driving DSH itself, Antigravity, and Codex App Server; see [docs/task-center.md](./docs/task-center.md).
-- **Regression tests guard the sharp edges**: 36 test files (342 cases) + catalog smoke (342/342 pass locally, including the 15 `approvals` cases) + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
+- **Regression tests guard the sharp edges**: 36 test files (345 cases) + catalog smoke (345/345 pass locally, including the 15 `approvals` cases) + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
 
 ## Install and update
 
@@ -718,6 +718,7 @@ Everything the page shows comes from that read-only endpoint; it writes nothing.
 - **Approval policy is not copied**: the Harness still applies its own approval and sandbox policy; a tool needing human approval can leave the turn hanging for a long time. `permissionPreset` sets that session's default preset, it is not a grant.
 - **Location is decided at creation**: `workspaceId` / `cwd` do nothing for an existing session — the bridge rejects them instead of ignoring them. Moving means creating a session.
 - **Switching models changes the profile default**: `selectModel` is the Host's model-switch entry point and it stores the choice as the profile default.
+- **The ledger stores the result itself; it does not silently rewrite it**: task results (the DSH turn text, the evidence an adapter reports) are persisted exactly as produced in `storages/task-center/tasks.db`. Only **adapter failure text and debug logs** are redacted. Results are the deliverable — rewriting them would be tampering; if a result contains a credential, that credential came from the output side. Constrain the producer, not the ledger.
 - **Permission presets need an optional service**: on a deployment without the `permissionPresets` service, passing `permissionPreset` yields `-32000` with an explanation.
 - **Workspaces are create-only**: the bridge exposes `workspaces.list` / `workspaces.create`; delete and rename them in the GUI.
 - **Only host-visible sessions are forwarded**: `sessions.list` and `history` go through the Host's `remoteAccess` filter.
@@ -748,9 +749,9 @@ Everything the page shows comes from that read-only endpoint; it writes nothing.
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 36 test files, 342 cases, plus catalog smoke; no running Harness needed
+npm test                       # 36 test files, 345 cases, plus catalog smoke; no running Harness needed
 node test/host.test.mjs        # 1 case: real WebServer integration (needs npm ci first)
-node test/e2e.mjs --cwd .      # 14 cases: end to end against a real Harness
+node test/e2e.mjs              # 14 cases: end to end against a real Harness (--cwd takes an absolute path only)
 node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a real Harness
 ```
 
@@ -772,19 +773,19 @@ node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a 
 | `tasks-degraded` | 4 | Degraded permission: controls the card marks `unsupported` (`start`/`steer`/`cancel`/`inspect`/`events`/`approval`) map to a readable consequence; task detail/list carry `degraded[]` |
 | `agents-card` | 5 | `capability-card@1` normalization, empty `limitations` rejection, `verified` merging |
 | `agents-probe` | 1 | Read-only probe timeout/throw isolation and `unknown` recording |
-| `tasks-preview` | 2 | One-shot preview consumption, digest match, TTL expiry, principal isolation |
+| `tasks-preview` | 3 | One-shot preview consumption, digest match, TTL expiry, principal isolation, and `degraded[]` from the capability card shape |
 | `tasks-reconcile` | 4 | `needs_reconcile` settlement, closing lingering side-effect attempts, requeue unlock |
-| `adapters-base` | 2 | Seven-operation adapter contract and six-state report validation |
-| `adapters-redact` | 2 | Credential-shaped redaction, truncation and depth limits |
-| `adapters-antigravity` | 2 | `projectEnvConfig.projectId`, model placeholder lookup, `ForceStopCascadeTree`, unavailable handling |
-| `adapters-codex` | 2 | `codex.exe` discovery, `stdio://` handshake, turn events, `turn/interrupt` |
+| `adapters-base` | 4 | Seven-operation adapter contract, six-state report validation, failure sanitising and the curated reason list |
+| `adapters-redact` | 4 | Credential-shaped redaction (Bearer/Basic/Cookie/userinfo/PAT/AK), truncation, depth limit, and token budgets left intact |
+| `adapters-antigravity` | 3 | `projectEnvConfig.projectId`, model placeholder lookup, `ForceStopCascadeTree`, response cap, unavailable handling |
+| `adapters-codex` | 5 | `codex.exe` discovery, `stdio://` handshake, frame shape and size limits, event queue, `turn/interrupt` |
 | `adapters-dsh` | 7 | DSH baseline 7-op mapping, honest stop, `resultValid: false`, and dispatch integration |
 | `methods-dsh-ops` | 2 | `createDshAdapterOps` error containment, auto-wiring, `registerAgent`, `decideApproval` |
-| `tasks-dispatch` | 8 | `startTask`/`pump`/`drainEffects`, lease reclamation, atomic `maxConcurrent` gate |
+| `tasks-dispatch` | 10 | `startTask`/`pump`/`drainEffects`, lease reclamation, atomic `maxConcurrent` gate, failure sanitising |
 | `config-breakers` | 3 | Five circuit-breaker defaults, valid bounds, `ConfigError` rejections |
 | `index-wiring` | 2 | Off leaves DB untouched, on initializes/seeds, external adapter init degradation |
-| `mcp-tasks-tools` | 3 | 6 gated task MCP tools visibility, disabled rejections, `reconcile`/`decideApproval` exclusion |
-| `cli-tasks` | 4 | `tasks` / `agents` flag parsing, `UsageError` (exit 2), JSON-RPC calls |
+| `mcp-tasks-tools` | 6 | 6 gated task MCP tools visibility, disabled rejections, `reconcile`/`decideApproval` exclusion, argument validation and prototype-key refusal |
+| `cli-tasks` | 5 | `tasks` / `agents` flag parsing, `UsageError` (exit 2), JSON-RPC calls, version-skew hint |
 | `cli-agents-approve` | 3 | `tasks approve` flag checks, `dsh.tasks.decideApproval`, and `agents` CLI commands |
 | `registry` | 10 | Sticky-session I/O, concurrent updates, key isolation, rotation |
 | `pending` | 36 | Pending store, long polling, cancellation withdrawal, allowance pre-claim, transaction boundary |
@@ -810,7 +811,7 @@ A few worth calling out:
 - **Edge** probes the protocol layer: batches, notifications, id shapes, auth headers, oversized bodies (a genuine 413, not a dropped connection), parameter-injection defences, timeout clamping, concurrent asks, `limit` semantics.
 - **Port drift** (manual): point `endpoint.json` at a dead port and run `dsh-rpc ping`; expect exit code 3 and a readable error mentioning `nothing is listening`, `pid` and `health --wait`.
 
-Local verification (2026-11-19, 0.9.0, real repository): all 36 test files in the `npm test` chain pass (**342/342** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.mjs` (`methods: 29` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`), and UTF-8 no-BOM / LF formatting checks.
+Local verification (2026-11-19, 0.9.0, real repository): all 36 test files in the `npm test` chain pass (**345/345** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.mjs` (`methods: 29` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`). Formatting (UTF-8 without BOM, LF) is a review convention here, not an automated gate.
 
 ## License
 

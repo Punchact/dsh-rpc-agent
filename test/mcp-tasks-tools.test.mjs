@@ -260,3 +260,41 @@ test("MCP tells a 0.8.x plugin apart from a disabled 0.9.0 one instead of sugges
     },
   );
 });
+
+test("MCP refuses prototype keys and schema constraints deeper than the old cap", async () => {
+  resetBridgeDefaults();
+
+  // JSON.parse is what a real client does: it stores "__proto__" as an own
+  // property. `key in props` is true for it on every plain object, so the
+  // additionalProperties check used to wave it through.
+  const protoArgs = JSON.parse('{"session_id":"s-1","__proto__":{"polluted":true}}');
+  const protoErr = validateToolArgs(
+    { type: "object", properties: { session_id: { type: "string" } }, additionalProperties: false },
+    protoArgs,
+  );
+  assert.match(String(protoErr), /unknown property "__proto__"/);
+
+  const ctorErr = validateToolArgs(
+    { type: "object", properties: {}, additionalProperties: false },
+    { constructor: { polluted: true } },
+  );
+  assert.match(String(ctorErr), /unknown property "constructor"/);
+
+  // Constraints three levels down must still be checked: the recursion cap was 2.
+  const deepSchema = {
+    type: "object",
+    properties: {
+      a: {
+        type: "object",
+        properties: {
+          b: { type: "object", properties: { c: { type: "object", properties: { d: { type: "integer", minimum: 10 } } } } },
+        },
+      },
+    },
+  };
+  assert.equal(validateToolArgs(deepSchema, { a: { b: { c: { d: 42 } } } }), null);
+  assert.match(
+    String(validateToolArgs(deepSchema, { a: { b: { c: { d: 3 } } } })),
+    /a\.b\.c\.d — must be >= 10/,
+  );
+});
