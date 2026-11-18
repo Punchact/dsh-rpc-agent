@@ -536,5 +536,16 @@ compression: gzip
 3. **为什么 `maxResultChars` 只截断轮次回答正文（`content[1]`）**：必须直说——实测遇到的 413 属于多轮调用累积造成的上下文增长，而非单次回答过大；因此 `maxResultChars` 只是防止病态超长输出一次打爆客户端的护栏，**不是**解决累积上下文 413 的方案。正因如此，截断只作用于正文块（保证 `session`、`— meta`、`trace:`、`note:`、`reason:`、`next:`、`advice:` 块绝不被砍掉，否则丢失会话 id 或下一步提示会诱发重试），截断时在 `\r\n` 与空白边界对齐，并保留明确提示说明如何通过配置放宽。
 4. **为什么默认上限取 `20000` 字符**：正常一轮回答的正文通常只有几 KB；`20000` 字符足以完整容纳长分析报告而不误伤常规输出，同时又把单条 tool result 的正文体量远远压在各类客户端的单次响应上限之下，并允许通过 `config.maxResultChars`（范围 `0..200000`，`0` 为关闭）按需调整。
 
+## 27. 决策 0.8.1-i：能力自述的分节契约与“不可用也是答案”
+
+> 2026-11-18 S5 实现决定（`lib/host-facts.mjs`、`lib/capabilities.mjs`、`lib/methods.mjs`、`lib/http.mjs`、`bin/dsh-rpc-mcp.mjs`、`bin/dsh-rpc.mjs`、`index.mjs`）。
+
+1. **为什么每节都带 `status` 与 `source`（或 `— <reason>`）**：规划器在写计划前真正要问的是"这个 Harness 此刻在这里能做什么、不能观测到什么"，而不是一份由配置文件拼出的乐观清单。因此八个合同节（`identity`、`runtime`、`permissions`、`tools`、`mcp`、`sessions`、`workspace`、`plugins`）各自独立给出 `ok` / `partial` / `unavailable` 状态与来源标签 `source`；当宿主不暴露某项服务（或该服务抛错）时，该节直接输出单行 `<id> [unavailable] — <reason>`，把"不可观测"作为明确结论交还给调用方，而不是退回空白或抛异常打断整个调用。
+2. **为什么采集（`lib/host-facts.mjs`）与投影（`lib/capabilities.mjs`）分层**：把所有 `ctx.get(...)`（且白名单仅限 `permissionPresets`、`tools`、`sessions`、`workspaceRegistry`、`loader` 五个服务名）收口到 `lib/host-facts.mjs` 并逐项包裹容错，使 `lib/capabilities.mjs` 保持零宿主依赖的纯函数——可以在没有运行态 Host 的单测里直接锁定节序、状态计数、单行 `unavailable`、未知 id 归入 `missing` 与 `max_chars` 截断线，同时把"不创会话、不唤醒冷会话"的只读边界固化在采集层。
+3. **为什么不读 profile 配置文件，也不调用 `which`**：读取 `~/.dsh/profiles/*/cordis.patch.yml` 或在子进程里跑 `which` 只能证明"磁盘上写过什么"或"某条路径恰好存在某可执行文件"，既不能说明当前活着的 agent 作用域里实际挂上了哪些服务，还会在宿主未加载、配置漂移或沙箱隔离时撒谎。桥只报告自己能通过运行时进程与 `ctx.get(...)` 直接观察到的事实。
+4. **为什么 `mcp` 统计可调用工具而不是配置里的 server 列表**：从可见工具名按 `^mcp__([^_]+(?:_[^_]+)*?)__` 归并，只能反映当前 agent 实际上能调得到的 `mcp__*` 工具前缀，不等于 profile 里配置了哪些 MCP server（连接失败、被禁用或未注册工具的 server 不会出现在工具表里）。因此该节明确标注 `source: tools(mcp__)` 并附固定声明（`these are the MCP tools exposed to this agent, not the servers in the profile`），工具名每节最多展示 40 个并在末尾标 `+N more`。
+5. **未来读者凭什么相信某一节**：每节先看状态再看来源：`ok` 表示该 `source` 完整返回了契约所需的数据；`partial` 表示 `source` 应答但缺失部分维度（首行明示缺口，如 `tools` 仅有名称没有 schema、`sessions` 无总数仅支持按 id 查询）；`unavailable` 只意味着"当前宿主环境未向本桥暴露该事实"，不代表该能力不存在。此外，`tools` 与 `loader` 两条路径在 S5 阶段已由假 `ctx` 桩单测覆盖，**尚未在 live Harness Host 内实测**，上线实机验证后需补充运行期观测记录。
+
+
 
 

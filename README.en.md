@@ -151,7 +151,7 @@ Cursor / Codex use the equivalent config form (backslashes in JSON must be escap
 
 On the local-checkout route, replace the path with `<path-to-your-clone>\bin\dsh-rpc-mcp.mjs`. The rest of this document writes `node bin/...`, which means "run from inside the package".
 
-**Ten tools** are exposed:
+**Eleven tools** are exposed:
 
 | Tool | Purpose |
 | --- | --- |
@@ -162,6 +162,7 @@ On the local-checkout route, replace the path with `<path-to-your-clone>\bin\dsh
 | `dsh_history` | Read the recent event window of a session (tool calls, results, turn ends) without activating its agent |
 | `dsh_workspaces` | List workspaces, or register a new one |
 | `dsh_permissions` | List permission presets (sandbox mode + approval policy) |
+| `dsh_capabilities` | Read-only eight-section snapshot of what this Harness can do right now (no session created or touched) |
 | `dsh_status` | Confirm the endpoint and token are readable |
 | `dsh_approvals_pending` | List escalation requests waiting for your answer |
 | `dsh_approvals_resolve` | Answer one escalation request |
@@ -191,6 +192,8 @@ dsh_history({ session_id: "session-xxxx", since: 42, limit: 100 })
 // Pass kinds: ["*"] for every event type
 dsh_history({ session_id: "session-xxxx", kinds: ["*"] })
 ```
+
+Before drafting a plan, use the read-only `dsh_capabilities` tool to inspect what this Harness instance can actually observe right now without creating or waking a session. It splits the environment into eight sections (`identity`, `runtime`, `permissions`, `tools`, `mcp`, `sessions`, `workspace`, `plugins`), each stamped with its own status: `[ok]` means the named `source` answered in full; `[partial]` means the source answered with less than the full contract and states what is missing on its first line (for example, tool names without schemas); `[unavailable]` means only that this host does not expose that fact here — not that the capability does not exist. The `mcp` section groups only the callable `mcp__*` tools exposed to this agent and never claims to enumerate servers configured in a profile.
 
 ### Sticky sessions
 
@@ -224,6 +227,7 @@ node bin/dsh-rpc.mjs history --session session-xxxx --limit 20
 node bin/dsh-rpc.mjs sessions --limit 10
 node bin/dsh-rpc.mjs models                  # models DSH can route to
 node bin/dsh-rpc.mjs discover                # self-description: methods, transport, result shape
+node bin/dsh-rpc.mjs capabilities            # eight-section capability snapshot (--sections / --max-chars / --session)
 node bin/dsh-rpc.mjs cancel --session session-xxxx
 node bin/dsh-rpc.mjs call dsh.sessions.history '{"sessionId":"session-xxxx"}' --timeout 30000
 ```

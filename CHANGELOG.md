@@ -13,22 +13,32 @@
   - 输出包含摘要头、受展示预算约束的逐条事件文本（超预算时末尾提示 `… +N more (raise limit or max_chars)`）以及始终附带的 `structuredContent`。
   - 增量边界：`since` 与 `kinds` 是在"最新 `limit` 条事件"的窗口内过滤，若增量超过 `limit` 条会静默不完整，需要大增量时须调高 `limit`（最高 500）；摘要头里的 `turn` 与 `running` 始终反映未过滤的整段窗口。`limit` 本身只是传给会话存储的窗口提示，不是硬上限——摘要头一律报告实际到达的事件条数。
   - 混版诚实性：当桥连着的插件早于 0.8.1（不认 `since`/`kinds`/`max_chars`）时，回答不再打印 `filtered:` 行，而是改印 `note:` 说明"这些记录是未过滤、未截断的整段窗口，请升级插件或自行过滤"，并在 `structuredContent.note` 中同步同一句话。
-- C `structuredContent`：- TODO(S2..S6)
-- D `dsh_capabilities`：- TODO(S2..S6)
+- C `structuredContent`：`dsh_ask` / `dsh_wait` 在 `trace: "full"` 时、以及 `dsh_history` 在任何档位下，MCP 结果的 `structuredContent` 携带机器可读载荷（工具明细、事件记录、`truncated` / `note` 等），人读文本与机器消费各取所需；非 `full` 档位不附带，以免改变既有调用的字节形态。
+- D `dsh_capabilities`：
+  - 新增第 11 个 MCP 工具 `dsh_capabilities`、RPC 方法 `dsh.capabilities`（及 `dsh.discover` 目录项）与 CLI 子命令 `capabilities`（`--sections`、`--max-chars`、`--session`、`--json`），只读返回当前 Harness 的八节能力快照（`identity`、`runtime`、`permissions`、`tools`、`mcp`、`sessions`、`workspace`、`plugins`），**不创建、不恢复、不触碰**任何会话，无活跃会话时同样可用。
+  - 采集（`lib/host-facts.mjs`）与纯格式化投影（`lib/capabilities.mjs`）分离：只有采集层通过白名单调用 `ctx.get(...)`（仅限 `permissionPresets`、`tools`、`sessions`、`workspaceRegistry`、`loader`），缺失或抛错一律降级为单行 `<id> [unavailable] — <reason>` 而不抛异常，不读 profile YAML、不调 `which`。
+  - 每节带独立状态（`ok` / `partial` / `unavailable`）与来源标签 `source`；`mcp` 只按 `^mcp__([^_]+(?:_[^_]+)*?)__` 归并当前实际可调用的 MCP 工具并明示"非 profile 服务器清单"，每节工具名上限 40 个（附 `+N more`），全文默认上限 `max_chars = 8000`（`0` 不截断、硬顶 `40000`），附 `structuredContent`（`sections`、`truncated`、`missing`）。
 - E 超时契约：`dsh_ask.timeout_ms` 与 `dsh_wait.timeout_ms` 保持 `3600000` 上限，但在 schema 描述中明确外层 MCP 客户端单次调用超时（如 Codex 默认 `tool_timeout_sec = 900` s）先于桥上限生效、长任务应走 `wait:false` + `dsh_wait({ session_id, since })`；新增纯模块 `lib/advice.mjs`，当 `dsh_ask(wait:true)` 或 `dsh_wait` 在 `>= 600000` ms 预算上超时时每会话一次性追加 `advice:` 提示块（有界去重 200 个会话，可通过 `config.timeoutAdvice: false` 关闭；`dsh_ask(wait:false)` 永不追加）。
 - F 结果护栏：新增 `config.maxResultChars`（默认 `20000`，允许 `0..200000`，`0` 表示不截断）与 `lib/mcp-format.mjs` 的 `capText`；仅对 `formatToolResult` 的轮次正文块（`content[1]`）做边界对齐截断并附截断说明，`session`、`— meta`、`trace:`、`note:`、`reason:`、`advice:` 与 `next:` 块均原样保留。
 
 ### 修复
 
-- TODO(S2..S6)
+- `npm test` 现在包含 `trace-format`、`history-format`、`advice` 三个套件——它们此前不在 CI 链里，等于新写的断言从未被跑过。
+- `dsh_history` 的 `limit` 属性描述不再暗示硬上限：它只是传给会话存储的窗口提示，摘要头一律报告实际到达条数。
 
 ### 行为变化
 
-- TODO(S2..S6)
+- **默认多出 `trace:` 块**：`dsh_ask` / `dsh_wait` 默认 `trace: "errors"`，结果里会出现工具调用轨迹块，元信息行在有失败调用时多出 `(M errors)` 后缀。要保持 0.7.x 的逐字节输出，设置 `traceDefault: "none"` 或在调用时传 `trace: "none"`。
+- **轮次正文有默认上限**：单次 MCP 结果的正文块默认最多 20000 字符，超出时截断并附说明（见 `maxResultChars`）。
+- **长预算超时会多一条建议行**：当 `dsh_ask(wait:true)` 或 `dsh_wait` 在 `>= 600000` ms 的预算上真的超时，结果末尾会出现一次 `advice:` 块（每个会话只出现一次）。
+- **工具数量从 9 个变成 10 个**：`dsh_history` 加入工具面，按工具枚举做缓存的客户端需要重新拉取 `tools/list`。
 
 ### 关闭方式
 
-- `traceDefault: "none"`：- TODO(S2..S6)
+- `traceDefault: "none"`：恢复到 0.7.x 的结果形态（不渲染轨迹、不改元信息行、不附带 `structuredContent`）。
+- `maxResultChars: 0`：关闭正文截断，单次结果不设上限（`0..200000` 之间的任何值都可用作新上限）。
+- `timeoutAdvice: false`：不再追加 `advice:` 提示块。
+- `dsh_history` 无需开关：它只读事件窗口、不激活 agent、不改任何会话状态；不调用即无副作用。
 
 ## [0.7.8] - 2026-11-18
 

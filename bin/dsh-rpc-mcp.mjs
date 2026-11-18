@@ -16,6 +16,7 @@ import { formatToolResult, formatToolError } from "../lib/mcp-format.mjs";
 import { createInflight } from "../lib/inflight.mjs";
 import { normalizeTraceLevel } from "../lib/trace-format.mjs";
 import { DEFAULT_HISTORY_KINDS, formatHistory } from "../lib/history-format.mjs";
+import { formatCapabilities } from "../lib/capabilities.mjs";
 import { TIMEOUT_ADVICE, shouldAdviseTimeout } from "../lib/advice.mjs";
 
 const PROTOCOL_VERSION = "2024-11-05";
@@ -291,6 +292,37 @@ const TOOLS = [
       "Report the bridge version, mounted endpoint, token source and any active runs. " +
       "Use dsh_sessions and dsh_history to inspect sessions and their recent events.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "dsh_capabilities",
+    title: "Inspect Harness capabilities",
+    description:
+      "Read-only snapshot of what this Harness can do right now across eight sections " +
+      "(identity, runtime, permissions, tools, mcp, sessions, workspace, plugins). " +
+      "`unavailable` means this host does not expose that fact here — not that it does not exist. " +
+      "Does not create, resume, or touch any session.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sections: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            'Section ids to include (default ["*"] for all eight: identity, runtime, permissions, tools, mcp, sessions, workspace, plugins).',
+        },
+        max_chars: {
+          type: "integer",
+          minimum: 0,
+          maximum: 40000,
+          description: "Cap the rendered text length (default 8000; 0 = uncapped, hard ceiling 40000).",
+        },
+        session_id: {
+          type: "string",
+          description: "Optional session id to include caller session facts in `permissions` and `sessions`.",
+        },
+      },
+      additionalProperties: false,
+    },
   },
 ];
 
@@ -781,6 +813,49 @@ async function callTool(name, args, signal = undefined) {
           `active runs: ${result.activeRuns?.length ?? 0}`,
         ].join("\n");
         return { content: [{ type: "text", text }] };
+      }
+
+      case "dsh_capabilities": {
+        const params = {};
+        if (args.sections !== undefined) params.sections = args.sections;
+        if (args.max_chars !== undefined) params.max_chars = args.max_chars;
+        if (typeof args.session_id === "string" && args.session_id.trim()) {
+          params.session_id = args.session_id.trim();
+        }
+        // A newer CLI/MCP bridge can be paired with an older plugin inside the
+        // profile: the tool exists here but the RPC method does not exist there.
+        // Say which half is stale instead of forwarding "unknown method" verbatim.
+        let payload;
+        try {
+          payload = await call("dsh.capabilities", params);
+        } catch (error) {
+          const message = String(error?.message ?? error);
+          if (!/unknown method/i.test(message)) throw error;
+          return formatToolError(
+            "this Harness plugin does not implement dsh.capabilities",
+            undefined,
+            "upgrade the plugin inside the DSH profile to 0.8.1 — the MCP bridge and the plugin ship together",
+          );
+        }
+        const sections = Array.isArray(payload?.sections) ? payload.sections : [];
+        const missing = Array.isArray(payload?.missing) ? payload.missing : [];
+        const truncated = Boolean(payload?.truncated);
+        const text =
+          typeof payload?.text === "string" && payload.text.length > 0
+            ? payload.text
+            : formatCapabilities(sections, {
+                maxChars: args.max_chars,
+                missing,
+              }).text;
+        return {
+          content: [{ type: "text", text }],
+          isError: false,
+          structuredContent: {
+            sections,
+            truncated,
+            missing,
+          },
+        };
       }
 
       default:
