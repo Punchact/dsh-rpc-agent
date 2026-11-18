@@ -8,9 +8,13 @@
 // The endpoint and token resolve from (in order) --url/--token, DSH_RPC_URL /
 // DSH_RPC_TOKEN, then the files the plugin publishes under $DSH_HOME/dsh-rpc/.
 
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { rpcCall, rpcStream, waitForTurn, WAIT_SLICE_MS } from "../lib/client.mjs";
+import { ADAPTER_FAILURE_MESSAGES, sanitizeAdapterFailure } from "../lib/adapters/base.mjs";
 import { endpointPath, readEndpoint, stateDir, tokenPath } from "../lib/auth.mjs";
 import { describeTrace, isTraceLevel, normalizeTraceLevel } from "../lib/trace-format.mjs";
 
@@ -34,6 +38,8 @@ COMMANDS
   wait --session ID         wait for the turn already running on a session
   cancel --session ID       cancel the in-flight turn
   history --session ID      show the recent event window
+  tasks <subcommand>        manage task-center tasks (preview|submit|list|get|cancel|dispatch|pump|reconcile|approve)
+  agents <subcommand>       manage agent capability cards (register|list|probe)
   call <method> [json]      raw JSON-RPC call (json params optional)
   env                       print the endpoint and token as shell exports
 
@@ -68,7 +74,7 @@ Endpoint discovery (auto): $DSH_HOME/dsh-rpc/endpoint.json and .../token
   endpoint  : ${endpointPath()}
 `;
 
-const BOOLEAN_FLAGS = new Set(["json", "stream", "help", "verbose", "queue"]);
+const BOOLEAN_FLAGS = new Set(["json", "stream", "help", "verbose", "queue", "verified-only", "enabled"]);
 const VALUE_FLAGS = new Set([
   "cwd",
   "workspace",
@@ -87,6 +93,32 @@ const VALUE_FLAGS = new Set([
   "trace",
   "url",
   "token",
+  "task",
+  "agent",
+  "capability",
+  "principal",
+  "preview",
+  "idempotency-key",
+  "expected-version",
+  "reason",
+  "status",
+  "cursor",
+  "max-steps",
+  "observed",
+  "note",
+  "result",
+  "digest",
+  "ttl",
+  "input",
+  "file",
+  "kind",
+  "controls",
+  "project",
+  "title",
+  "attempt",
+  "approval",
+  "decision",
+  "after-seq",
 ]);
 
 function parseArgv(argv) {
@@ -133,18 +165,21 @@ function connectionOptions(flags) {
   return { url: flags.url, token: flags.token };
 }
 
-function numberOf(flags, key) {
+function numberOf(flags, key, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
   if (flags[key] === undefined) return undefined;
-  const value = Number(flags[key]);
-  if (!Number.isFinite(value) || value <= 0) throw new UsageError(`--${key} must be a positive number`);
-  return Math.floor(value);
+  const raw = typeof flags[key] === "string" ? flags[key].trim() : "";
+  if (!/^-?\d+$/.test(raw)) {
+    throw new UsageError(`--${key} must be a safe integer between ${min} and ${max}`);
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new UsageError(`--${key} must be a safe integer between ${min} and ${max}`);
+  }
+  return value;
 }
 
 function cursorOf(flags, key) {
-  if (flags[key] === undefined) return undefined;
-  const value = Number(flags[key]);
-  if (!Number.isFinite(value) || value < 0) throw new UsageError(`--${key} must be a non-negative number`);
-  return Math.floor(value);
+  return numberOf(flags, key, { min: 0, max: Number.MAX_SAFE_INTEGER });
 }
 
 function shellDoubleQuote(value) {
@@ -378,6 +413,18 @@ async function probeHealth(explicitUrl, budgetMs) {
 
   note(`health check failed after ${Date.now() - startedAt}ms: ${failure.message}`);
   return failure.kind === "http" ? 1 : 3;
+}
+
+/**
+ * Mixed-version hint (acceptance A18): a 0.9.0 bridge talking to a pre-0.9.0 plugin
+ * must say what to do next instead of leaking the raw RPC error, and may never
+ * half-succeed. Returns the hint line, or null when the error is unrelated.
+ */
+function mixedVersionHint(message) {
+  if (!/unknown method: dsh\.(tasks|agents)\./.test(typeof message === "string" ? message : "")) {
+    return null;
+  }
+  return "  next: this Harness plugin predates the task centre (0.9.0). Upgrade the plugin inside the DSH profile — the bridge and the plugin ship together.";
 }
 
 async function main(argv) {
@@ -617,26 +664,305 @@ async function main(argv) {
       }
       return 0;
     }
+    case "tasks":
+      return await runTasksCommand(flags, rest, options);
+    case "agents":
+      return await runAgentsCommand(flags, rest, options);
     default:
       throw new UsageError(`unknown command: ${command}`);
   }
 }
 
-main(process.argv.slice(2))
-  .then(async (code) => {
-    await flushStdio();
-    process.exit(code);
-  })
-  .catch(async (error) => {
-    if (error instanceof UsageError) {
-      note(`dsh-rpc: ${error.message}`);
-      note("run `dsh-rpc --help` for usage");
-      await flushStdio();
-      process.exit(2);
+function parseJsonFlag(raw, name) {
+  if (raw === undefined) return undefined;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new UsageError(`--${name} must be valid JSON`);
+  }
+}
+
+async function runTasksCommand(flags, rest, options) {
+  const [sub, ...args] = rest;
+  if (!sub) throw new UsageError("tasks needs a subcommand: preview|submit|list|get|cancel|dispatch|pump|reconcile");
+  const firstId = flags.task ?? args[0];
+  if (flags["after-seq"] !== undefined) {
+    cursorOf(flags, "after-seq");
+  }
+
+  switch (sub) {
+    case "preview": {
+      const params = {
+        principalId: flags.principal ?? "local-operator",
+        capabilityRevisionId: flags.capability,
+        workspaceId: flags.workspace ?? "local",
+        agentId: flags.agent,
+      };
+      if (!params.capabilityRevisionId) throw new UsageError("tasks preview needs --capability <revisionId>");
+      if (!params.agentId) throw new UsageError("tasks preview needs --agent <agentId>");
+      if (flags.digest) params.requestDigest = flags.digest;
+      if (flags.ttl !== undefined) params.ttlMs = numberOf(flags, "ttl", { min: 1000, max: 3_600_000 });
+      if (flags.input !== undefined) params.input = parseJsonFlag(flags.input, "input");
+      const result = await rpcCall("dsh.tasks.preview", params, options);
+      print(
+        flags.json
+          ? JSON.stringify(result, null, 2)
+          : `preview ${result.previewId}  agent=${result.agentId}  expires=${result.expiresAt}`,
+      );
+      return 0;
     }
-    const code = failureExitCode(error);
-    note(code === 3 ? `dsh-rpc: cannot reach the Harness (is it running?) — ${error?.message ?? error}` : `dsh-rpc: ${error?.message ?? error}`);
-    if (error?.data) note(`  ${JSON.stringify(error.data)}`);
-    await flushStdio();
-    process.exit(code);
-  });
+    case "submit": {
+      const params = {
+        idempotencyKey: flags["idempotency-key"] ?? `cli_${randomUUID()}`,
+      };
+      if (flags.preview) params.previewId = flags.preview;
+      if (flags.principal) params.principalId = flags.principal;
+      if (flags.workspace) params.workspaceId = flags.workspace;
+      if (flags.agent) params.agentId = flags.agent;
+      if (flags.capability) params.capabilityRevisionId = flags.capability;
+      if (flags.input !== undefined) params.input = parseJsonFlag(flags.input, "input");
+      else if (args.length > 0) params.input = { prompt: args.join(" ") };
+      const result = await rpcCall("dsh.tasks.submit", params, options);
+      print(
+        flags.json
+          ? JSON.stringify(result, null, 2)
+          : `task ${result.taskId} · ${result.status} · ${result.phase ?? "?"}${result.deduplicated ? " (deduplicated)" : ""}`,
+      );
+      return 0;
+    }
+    case "list": {
+      const params = {};
+      if (flags.status) params.status = flags.status;
+      if (flags.workspace) params.workspaceId = flags.workspace;
+      if (flags.principal) params.principalId = flags.principal;
+      if (flags.cursor) params.cursor = flags.cursor;
+      const limit = numberOf(flags, "limit", { min: 1, max: 200 });
+      if (limit) params.limit = limit;
+      const result = await rpcCall("dsh.tasks.list", params, options);
+      if (flags.json) {
+        print(JSON.stringify(result, null, 2));
+        return 0;
+      }
+      for (const item of result.items ?? []) {
+        print(`task ${item.taskId} · ${item.status} · ${item.phase ?? "?"}  v${item.stateVersion}`);
+      }
+      note(`${(result.items ?? []).length} task(s)${result.hasMore ? ` (next cursor: ${result.nextCursor})` : ""}`);
+      return 0;
+    }
+    case "get": {
+      if (!firstId) throw new UsageError("tasks get needs <taskId> or --task <id>");
+      const params = { taskId: firstId };
+      if (flags.principal) params.principalId = flags.principal;
+      const result = await rpcCall("dsh.tasks.get", params, options);
+      if (flags.json) {
+        print(JSON.stringify(result, null, 2));
+        return 0;
+      }
+      print(`task ${result.taskId} · ${result.status} · ${result.phase ?? "?"} · v${result.stateVersion}`);
+      if (result.notice) print(`notice: ${result.notice}`);
+      return 0;
+    }
+    case "cancel": {
+      if (!firstId) throw new UsageError("tasks cancel needs <taskId> or --task <id>");
+      const expectedStateVersion = numberOf(flags, "expected-version");
+      if (!expectedStateVersion) throw new UsageError("tasks cancel needs --expected-version <N>");
+      const params = {
+        taskId: firstId,
+        expectedStateVersion,
+        idempotencyKey: flags["idempotency-key"] ?? `cli_cancel_${randomUUID()}`,
+      };
+      if (flags.reason) params.reason = flags.reason;
+      if (flags.principal) params.principalId = flags.principal;
+      const result = await rpcCall("dsh.tasks.cancel", params, options);
+      print(
+        flags.json
+          ? JSON.stringify(result, null, 2)
+          : `task ${result.taskId} · ${result.status} · v${result.stateVersion}${result.notice ? ` (${result.notice})` : ""}`,
+      );
+      return 0;
+    }
+    case "dispatch": {
+      if (!firstId) throw new UsageError("tasks dispatch needs <taskId> or --task <id>");
+      const params = { taskId: firstId };
+      const promptArgs = flags.task ? args : args.slice(1);
+      if (promptArgs.length > 0) params.prompt = promptArgs.join(" ");
+      if (flags.model) params.model = flags.model;
+      if (flags.project) params.projectId = flags.project;
+      if (flags.title) params.title = flags.title;
+      const result = await rpcCall("dsh.tasks.dispatch", params, options);
+      const knownSafeMessages = new Set(Object.values(ADAPTER_FAILURE_MESSAGES));
+      const safeError =
+        result.dispatchFailed && result.error
+          ? knownSafeMessages.has(result.error)
+            ? result.error
+            : sanitizeAdapterFailure({ message: result.error }).message
+          : result.error;
+      const safeResult = result.dispatchFailed ? { ...result, error: safeError } : result;
+      print(
+        flags.json
+          ? JSON.stringify(safeResult, null, 2)
+          : `task ${safeResult.taskId} · ${safeResult.status} · v${safeResult.stateVersion}${safeResult.dispatchFailed ? ` (failed: ${safeResult.error})` : ""}`,
+      );
+      return safeResult.dispatchFailed ? 1 : 0;
+    }
+    case "pump": {
+      if (!firstId) throw new UsageError("tasks pump needs <taskId> or --task <id>");
+      const params = { taskId: firstId };
+      const maxSteps = numberOf(flags, "max-steps", { min: 1, max: 1000 });
+      if (maxSteps) params.maxSteps = maxSteps;
+      const timeout = numberOf(flags, "timeout", { min: 1, max: 3_600_000 });
+      if (timeout) params.deadlineMs = timeout;
+      if (flags.cursor !== undefined) {
+        const rawCur = String(flags.cursor).trim();
+        if (!rawCur) throw new UsageError("--cursor must be non-empty");
+        if (/^-?[\d.eE+-]+$/.test(rawCur)) {
+          params.cursor = cursorOf(flags, "cursor");
+        } else {
+          params.cursor = rawCur;
+        }
+      }
+      const result = await rpcCall("dsh.tasks.pump", params, options);
+      print(
+        flags.json
+          ? JSON.stringify(result, null, 2)
+          : `task ${result.taskId} · ${result.status} · steps=${result.stepsProcessed}`,
+      );
+      return 0;
+    }
+    case "reconcile": {
+      if (!firstId) throw new UsageError("tasks reconcile needs <taskId> or --task <id>");
+      if (!flags.observed) throw new UsageError("tasks reconcile needs --observed succeeded|failed|cancelled");
+      const evidence = { observedState: flags.observed };
+      if (flags.note) evidence.note = flags.note;
+      if (flags.result !== undefined) evidence.result = parseJsonFlag(flags.result, "result");
+      const result = await rpcCall("dsh.tasks.reconcile", { taskId: firstId, evidence }, options);
+      print(
+        flags.json
+          ? JSON.stringify(result, null, 2)
+          : `task ${result.taskId} · ${result.from} -> ${result.status} · closed=${result.attemptsClosed}`,
+      );
+      return 0;
+    }
+    case "approve": {
+      if (!firstId) throw new UsageError("tasks approve needs <taskId> or --task <id>");
+      const attemptId = flags.attempt;
+      if (!attemptId) throw new UsageError("tasks approve needs --attempt <attemptId>");
+      const approvalId = flags.approval;
+      if (!approvalId) throw new UsageError("tasks approve needs --approval <approvalId>");
+      const decision = flags.decision;
+      if (decision !== "allow" && decision !== "deny") {
+        throw new UsageError("tasks approve needs --decision allow|deny");
+      }
+      const params = { taskId: firstId, attemptId, approvalId, decision };
+      if (flags.reason) params.reason = flags.reason;
+      if (flags["idempotency-key"]) params.idempotencyKey = flags["idempotency-key"];
+      const result = await rpcCall("dsh.tasks.decideApproval", params, options);
+      print(
+        flags.json
+          ? JSON.stringify(result, null, 2)
+          : `task ${result.taskId} · approval ${result.approvalId} -> ${result.decision} · ${result.status} · v${result.stateVersion}`,
+      );
+      return 0;
+    }
+    default:
+      throw new UsageError(`unknown tasks subcommand: ${sub}`);
+  }
+}
+
+async function runAgentsCommand(flags, rest, options) {
+  const [sub, ...args] = rest;
+  if (!sub) throw new UsageError("agents needs a subcommand: register|list|probe");
+
+  switch (sub) {
+    case "register": {
+      let payload;
+      if (flags.file) {
+        try {
+          payload = JSON.parse(readFileSync(flags.file, "utf8"));
+        } catch (err) {
+          throw new UsageError(`cannot read --file ${flags.file}: ${err?.message ?? err}`);
+        }
+      } else if (args[0]) {
+        payload = parseJsonFlag(args[0], "card");
+      } else {
+        throw new UsageError("agents register needs --file <card.json> or inline JSON");
+      }
+      const params = payload?.card ? payload : { card: payload };
+      if (flags.enabled !== undefined) params.enabled = Boolean(flags.enabled);
+      const result = await rpcCall("dsh.agents.register", params, options);
+      print(
+        flags.json
+          ? JSON.stringify(result, null, 2)
+          : `agent ${result.agentId} · probeStatus=${result.probeStatus}`,
+      );
+      return 0;
+    }
+    case "list": {
+      const params = {};
+      if (flags.kind) params.kind = flags.kind;
+      if (flags["verified-only"]) params.verifiedOnly = true;
+      const result = await rpcCall("dsh.agents.list", params, options);
+      if (flags.json) {
+        print(JSON.stringify(result, null, 2));
+        return 0;
+      }
+      for (const item of result.items ?? []) {
+        print(`agent ${item.agentId} · ${item.kind} · ${item.probeStatus}`);
+      }
+      note(`${result.total ?? (result.items ?? []).length} agent(s)`);
+      return 0;
+    }
+    case "probe": {
+      const agentId = flags.agent ?? args[0];
+      if (!agentId) throw new UsageError("agents probe needs <agentId> or --agent <id>");
+      const params = { agentId };
+      if (flags.controls) {
+        params.controls = String(flags.controls)
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
+      const result = await rpcCall("dsh.agents.probe", params, options);
+      print(
+        flags.json
+          ? JSON.stringify(result, null, 2)
+          : `agent ${result.agentId} · ${result.probeStatus} · unknown=${(result.unknown ?? []).length}`,
+      );
+      return 0;
+    }
+    default:
+      throw new UsageError(`unknown agents subcommand: ${sub}`);
+  }
+}
+
+const IS_MAIN =
+  Boolean(process.argv[1]) && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (IS_MAIN) {
+  main(process.argv.slice(2))
+    .then(async (code) => {
+      await flushStdio();
+      process.exit(code);
+    })
+    .catch(async (error) => {
+      if (error instanceof UsageError) {
+        note(`dsh-rpc: ${error.message}`);
+        note("run `dsh-rpc --help` for usage");
+        await flushStdio();
+        process.exit(2);
+      }
+      const code = failureExitCode(error);
+      note(
+        code === 3
+          ? `dsh-rpc: cannot reach the Harness (is it running?) — ${error?.message ?? error}`
+          : `dsh-rpc: ${error?.message ?? error}`,
+      );
+      if (error?.data) note(`  ${JSON.stringify(error.data)}`);
+      const hint = mixedVersionHint(error?.message);
+      if (hint) note(hint);
+      await flushStdio();
+      process.exit(code);
+    });
+}
+
+export { UsageError, main, mixedVersionHint, parseArgv, runAgentsCommand, runTasksCommand };

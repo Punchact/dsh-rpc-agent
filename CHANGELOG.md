@@ -1,5 +1,59 @@
 # 变更记录
 
+## [0.9.0] - Unreleased
+
+> 本版主题：把本插件扩展为本机多执行方任务中心——独立 SQLite 任务账本、能力卡与只读探测、有界派发环、三套执行方适配器，以及默认关闭的熔断开关。`PROTOCOL_VERSION` 由 `2026-11-04` 升至 `2026-11-19`。
+
+### 新增
+
+- **任务中心账本与状态机**（默认 `$DSH_HOME/storages/task-center/tasks.db`，WAL + `foreign_keys=ON`）：
+  - 新建 15 张表（`schema_meta`、`principals`、`workspaces`、`agents`、`capability_revisions`、`previews`、`tasks`、`mandates`、`attempts`、`events`、`effects`、`inputs`、`approvals`、`artifacts`、`attention`）。
+  - 11 态任务状态机、`expectedStateVersion` 乐观锁、基于 `(principalId, idempotencyKey)` 的提交/控制幂等校验、`effects` 持久出箱（带 `lease_expires_at` 租约回收）与一次性 `previews` 绑定。
+  - 派生阶段 `derivePhase` 按 8 档优先级现算（`person/delivery` → `person/approval` → `person/answer` → `person/reconcile` → `person/review` → `machine/queued` → `machine/working` → `done`），不写回数据库。
+- **RPC、MCP 与 CLI 扩展**（JSON-RPC 方法总数 **17 → 29**，MCP 工具 **11（默认）+ 6（`tasksEnabled: true` 时共 17 个）**）：
+  - 新增 9 个任务 RPC：`dsh.tasks.{preview,submit,get,list,cancel,dispatch,pump,reconcile,decideApproval}`；新增 3 个代理 RPC：`dsh.agents.{register,list,probe}`。
+  - 新增 6 个受开关门控的 MCP 工具：`dsh_tasks_{submit,list,get,cancel}` 与 `dsh_agents_{list,probe}`（有意排除 `reconcile` 与 `decideApproval`，人工核对与审批留在 RPC/CLI 面）。
+  - 新增 CLI 子命令：`dsh-rpc tasks <preview|submit|list|get|cancel|dispatch|pump|reconcile|approve>` 与 `dsh-rpc agents <register|list|probe>`。
+- **三个执行方适配器**（统一实现七操作契约 `probe`/`start`/`inspect`/`sendInput`/`cancel`/`events`/`decideApproval`）：
+  - DSH 自身基准适配器（`lib/adapters/dsh.mjs` + `createDshAdapterOps`）：注入 7 个会话操作包装，`tasksEnabled: true` 时自动装配；`probe` 只读、`cancel.stopped` 严格以底层确认为准、未校验结果保持 `resultValid: false`。
+  - Antigravity 适配器（`lib/adapters/antigravity.mjs`）：通过 `ForceStopCascadeTree` 执行会话树级取消，传入 `projectEnvConfig.projectId` 入项目与 `MODEL_PLACEHOLDER_*` 选模型，不把持久化 locator 写入密钥/CSRF。
+  - Codex App Server 适配器（`lib/adapters/codex.mjs`）：通过 `app-server --listen stdio://` 建会话并用 `turn/interrupt` 中断轮次，Windows 下跳过 0 字节 `WindowsApps` 别名或回落 `.codex/.sandbox-bin/codex.exe`。
+- **能力卡、只读探测与能力修订**：
+  - `capability-card@1` 规范化与哈希，强制必填非空 `limitations[]`，`declared` 与 `verified` 字段分离；`dsh.agents.probe` 只读探测 6 项控制项并记录 `verified` / `partial` / `unknown`（带原因与耗时 `elapsedMs`）。
+  - 支持能力修订表（含 `review.diff@1` 基线与 `control_requirements_json` 字段）及策略/降级字段（`policy_revision`、`limitations[]`、`degraded[]`）。
+- `degraded[]` **按能力卡里 `controls.<name>.support` 计算**（`start`/`steer`/`cancel`/`inspect`/`events`/`approval` 六项），而不是只看拍平的 `cancel`；任务详情、列表与预览都带该字段。
+
+### 修复
+
+- `scripts.test` 新增并接入 20 个任务中心与 CLI/适配器测试套件（全链 36 个测试文件、346 例，本机 346/346 通过；CI 结果见 PR #30），并更新 `catalog.smoke.mjs` 校验 29 个 RPC 方法。
+- `dispatch.mjs` 修复了租约到期回收与原子 `maxConcurrent` 门控竞态，防止同一写事务之外并发超发或将任务卡死在 `dispatching` / `in_flight`。
+- **取消确认后立刻收口**：适配器回报 `confirmedStopped: true`（DSH 会话真停了、Antigravity 回执里含该 cascadeId）时，同一次出箱排水内把任务从 `cancel_requested` 推进到 `cancelled` 并写 `cancel.confirmed`；此前只把 effect 标完成，任务会悬在 `cancel_requested` 等一个已停会话永远不会发出的事件。Codex 的 `turn/interrupt` 只算受理，故不设该标志。
+- **幂等键不再掩盖改过的请求**：`cancel` / `resolve` 的重放分支会比较请求意图（取消原因；处置结论 + 证据引用），同键异载荷抛 `STATE_CONFLICT`（`reason: "idempotency_payload_mismatch"`）。`expectedStateVersion` 属并发护栏、重试时本就会变，不参与比较。
+- **`recordAttemptStart` 的 `markRunning: false` 分支加了乐观锁**：绑定 `active_attempt_id` 改为带 `state_version` 条件的写并自增版本，陈旧调用方不再能静默改绑活动尝试。
+- **出箱写入加了租约围栏**：效果完成/失败更新要求行仍处于 `in_flight`，租约过期被回收后迟到的回执只记 `skipped`，不覆盖接手者的结果。
+- **安全加固（外部安全评审 t3 的四类发现）**：
+  - 注册数据不能再挑选可执行文件：`codex` 适配器解析二进制只用插件配置 `tasksAdapters.codex.binary` 与内置发现（`req.binary` / `agent.adapterConfig.binary` 一律忽略），发现器要求普通文件且大小 > 0（跳过 0 字节 WindowsApps 别名）；`dsh.agents.register` 拒绝带 `binary`/`executable`/`command`/`argv` 的 `adapterConfig(Ref)`。
+  - 原始适配器异常不再进账本或回执：新增 `sanitizeAdapterFailure`，把任意异常收敛为固定文案 + 短标识码（`code`/`kind`/`phase`/`httpStatus`）并附**白名单 reason**（如 `binary_not_found`、`no_alive_hub`）的可操作文案；未命中白名单的 reason 一律丢弃，原文只进 `logger.debug`。Antigravity 传输加 `redirect: "error"`、请求超时与 1 MB 响应体上限。
+  - Codex stdio 加边界：单帧 4 MiB 上限（超限判协议错并关闭）、JSON 帧必须是非数组对象、事件队列上限 500（丢最旧并计 `droppedEvents`，由 `events()` 带出）、stderr 只保留尾部 4096 字符。
+  - CLI 与 MCP 入口补齐参数校验：`submit.input` 必须是对象、`list.limit` 1..200、`dispatch`/`pump` 的 `max_steps` 1..1000、标识符必须为非空字符串、数字参数按安全整数与范围校验、JSON 语法失败不进入 RPC。
+  - **安全复评（t3b）后的二次收口**：适配器失败日志默认只记 `taskId/operationId/attemptId/code/reason/kind`，原始文本要 `tasksAdapterDebugDetail: true` 才输出且先脱敏截断（512 字符）；新增 `lib/adapters/redact.mjs`，`Bearer` / `ghp_` / `sk-` / csrf 形态在适配器输出与账本落库前统一替换为 `[redacted]`；Codex 帧改严格校验（非对象、错误 `jsonrpc`、非法 `id`/`params`、带 `id` 的未知 method 一律 `failProtocol`），stdout/stderr 用 `StringDecoder` 增量解码，待审批 map 上限 200 并暴露 `droppedApprovals`；MCP `callTool` 在分发前按 `inputSchema` 校验必填项/类型/枚举/范围/未知键。
+- **安全复评第三轮（t3c）收紧**：凭据形态补 `Basic` / `Cookie` / URL userinfo / `github_pat_` / `AKIA` 五类（Cookie 止于分号，避免吞掉整行）；`redactDeep` 只对字符串凭据替换、放过 `maxTokens`/`tokenCount` 这类计数键，深度截断标记改为 `[truncated: depth]`；MCP 入口校验改用 `Object.hasOwn` 并显式拒绝 `__proto__`/`constructor`/`prototype`，递归上限由 2 提到 8；Cookie 头按逐对遮盖（整行遮盖会吞掉同一行后面的 URL），Bearer 只认"长且非纯字母"的串（`Bearer of bad news` 是句子不是凭据），键名补 `sessionKey` / `x-api-key` / `passphrase` / `credential`。**边界如实记**：任务结果按产出原样落账，脱敏只覆盖适配器失败文本与调试日志——结果是交付物，改写结果等于篡改。
+- **测试与文档口径校正**：`scripts.test` 全链 36 个测试文件、**346 例**；`docs/design.md` 的 §7 历史快照后补了「现行口径（2026-11-19）」注，注明 `methods 41 → 85`、`client 6 → 8`、`edge 24 项但本机 23/24`（第 21 项 `create without a cwd` 因宿主返回 `cwd: null` 失败，属既有行为，非本 PR 引入）。
+
+### 行为变化
+
+- **默认完全关闭（与 0.8.1 行为零差异）**：`tasksEnabled` 默认 `false`；未显式开启时不会创建 `tasks.db`，MCP 工具列表保持 11 个，不改变任何既有 `dsh.*` 会话语义。
+- **开启后的变化**：设置 `tasksEnabled: true` 并重启宿主后，首次启动在 `$DSH_HOME/storages/task-center/tasks.db` 初始化账本并播种 `local-operator` 与 `local` 工作区，启动 5 秒定时 `drainEffects` 出箱排水（`.unref()`），MCP 侧多出 6 个任务/代理工具。
+
+### 关闭方式
+
+- `tasksEnabled: false`：彻底关闭任务中心初始化、DB 打开、定时器与任务 MCP 工具暴露（已有的 `tasks.db` 保留不动）。
+- `tasksExternalAdapter: "none"`：仅保留 DSH 基准适配器，不装配 `antigravity` 或 `codex` 外部适配器。
+- `tasksMaxConcurrent: 1`：有界派发并发上限（整数 `1..32`，默认 `1`），超限时 `startTask` 直接报 `STATE_CONFLICT`。
+- `tasksRequireReconcileOnUnknown: true`：未识别状态或无结构化 `attention` 的 `blocked` 报告一律转 `needs_reconcile`（默认 `true`）。
+- `tasksPreviewTtlMs: 300000`：预览有效期（整数 `1000..3600000` ms，默认 `300000`），超时或已消费均拒绝提交。
+- 其余五个开关见 README 的十项配置表：`tasksDbPath`（默认 `null`）、`tasksProbeTimeoutMs`（默认 `5000`）、`tasksAdapters`（默认 `{}`）、`tasksDispatchMaxSteps`（默认 `50`）、`tasksAdapterDebugDetail`（默认 `false`，仅在打开时把脱敏截断后的适配器原始文本写进 debug 日志）。
+
 ## [0.8.1] - 2026-11-18
 
 > 0.8.0 未单独发布，其观测能力并入本版。

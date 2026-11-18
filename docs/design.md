@@ -186,6 +186,8 @@ Host 抛 `RemoteError(code, message, details)`（`isDSHRemoteError === true`）�
 
 以上数字均为 2026-11-05 在本机实跑，命令见 README §10。
 
+> **现行口径（2026-11-19，0.9.0）**：本表是 2026-11-05 的历史快照，不改写。当前的数量以 README「开发与验证」为准——`npm test` 固定顺序跑 36 个 `*.test.mjs` 共 346 例，外加 `catalog.smoke.mjs`（29 个 RPC 方法）。表中三行随版本长大：`methods` 41 → 85 例，`client` 6 → 8 例；`edge` 仍是 24 项，但**本机 23/24**——第 21 项「create without a cwd reports the directory the Host attached」要求宿主替无 `cwd` 的请求补上工作目录，本机 0.8.1 宿主返回 `null`，属既有环境差异；**CI 不跑 `test:edge`（`.github/workflows/test.yml` 只有 `npm test` / `test:host` / `check:package`），故“CI 下通过”没有证据**，这一项目前只有本机 23/24 的实测。
+
 ## 8. 后续可做
 
 - `dsh.sessions.fork` / `rename` / `projections` 的薄封装。
@@ -546,6 +548,79 @@ compression: gzip
 4. **为什么 `mcp` 统计可调用工具而不是配置里的 server 列表**：从可见工具名按 `^mcp__([^_]+(?:_[^_]+)*?)__` 归并，只能反映当前 agent 实际上能调得到的 `mcp__*` 工具前缀，不等于 profile 里配置了哪些 MCP server（连接失败、被禁用或未注册工具的 server 不会出现在工具表里）。因此该节明确标注 `source: tools(mcp__)` 并附固定声明（`these are the MCP tools exposed to this agent, not the servers in the profile`），工具名每节最多展示 40 个并在末尾标 `+N more`。
 5. **未来读者凭什么相信某一节**：每节先看状态再看来源：`ok` 表示该 `source` 完整返回了契约所需的数据；`partial` 表示 `source` 应答但缺失部分维度（首行明示缺口，如 `tools` 仅有名称没有 schema、`sessions` 无总数仅支持按 id 查询）；`unavailable` 只意味着"当前宿主环境未向本桥暴露该事实"，不代表该能力不存在。此外，`tools` 与 `loader` 两条路径在 S5 阶段已由假 `ctx` 桩单测覆盖，**尚未在 live Harness Host 内实测**，上线实机验证后需补充运行期观测记录。
 
+---
+
+## 28. 决策 0.9.0-a：任务账本由 DSH 持有、任务状态不跟随会话
+
+- **决策**：任务状态、尝试记录（`attempts`）、事件流（`events`）、副作用出箱（`effects`）与待批/待答（`approvals`/`attention`）全部由 DSH 侧本地 SQLite 账本（`$DSH_HOME/storages/task-center/tasks.db`）独立持有，不绑定到 Antigravity 级联会话、Codex 进程或 DSH 单条会话本身的生命周期。
+- **为什么**：外部执行方的会话模型各不相同且经常不可逆转——Antigravity 的 `ForceStopCascadeTree` 会终止整棵对话树并可能留下不可继续续跑的状态，Codex 的 `ephemeral` stdio 进程退出后内存现场即失，DSH 会话重启也会丢掉易失队列状态。只有把任务账本留在 DSH 自己的 WAL 事务库里，调度中心才拥有跨重启、跨执行方、跨进程的一份权威事实。
+- **反例或代价**：引入了本地持久化数据库与主外键/乐观锁迁移维护成本；每步推进（`startTask`/`pump`/`reconcile`）都必须走事务写库，换取的是执行方崩溃或进程重启时任务不会人间蒸发。
+
+## 29. 决策 0.9.0-b：派生阶段现算不落库（避免第二真相）
+
+- **决策**：对外展示的 `phase`（`person/delivery`、`person/approval`、`person/answer`、`person/reconcile`、`person/review`、`machine/queued`、`machine/working`、`done`）每次读取通过纯函数 `derivePhase(task, attentionRows, lastEvent)` 按固定优先级现场派生，不在 `tasks` 表额外存 `phase` 列。
+- **为什么**：若在数据库同时维护 `status`、`attention.status` 和 `phase` 两个/三个可变列，只要任何一条分支（如审批过期、人工核对关闭 attention、重连推进）忘了同步改写 `phase`，界面就会出现「状态是 `running` 或 `attention` 已空，但 `phase` 还显示在等你审批」的分裂真相。纯函数现算确保「谁在等谁」永远严格派生自唯一真相源。
+- **反例或代价**：每次 `get` 需读取任务行、关联的 `attention` 行与末条事件再计算一次（同一次读事务内几微秒级别），且无法直接写 `WHERE phase = 'person/approval'` 的单列索引查询；若未来列表需按 `phase` 过滤，应写等价 SQL 谓词或物化视图，而不是把可写状态拆成两份。
+
+## 30. 决策 0.9.0-c：能力卡必须自述弱点、`declared` 与 `verified` 分离
+
+- **决策**：能力卡（`capability-card@1`）强制要求非空 `limitations[]`（空数组直接在 `normalizeCard` 阶段报 `INVALID_CARD` 拒收），并且严格把注册自称的 `declared` 与只读探测证实的 `verified` 分开存储与结算（部分探测记为 `partial`，全过才为 `verified`）。
+- **为什么**：一份只列支持能力、不承认短板的声明本质是广告而不是工程契约；若探测结果覆盖 `declared`，排查时就分不清"它本来吹自己行"还是"刚才本机确实没通"。保留 `declared` 并单独维护 `verified` 与 `probe_evidence_json`，才能让上层在 `preview` 和调度阶段看清真实能力边界。
+- **反例或代价**：注册新执行方时不能传空 `limitations: []`，配置编写多一行审视成本；同时任何外部执行方升级后必须重跑 `agents.probe` 才会更新 `verified`，不会在后台悄悄篡改能力状态。
+
+## 31. 决策 0.9.0-d：适配器七操作契约 + `effects` 出箱与租约（为什么不是内存里排个队）
+
+- **决策**：所有执行方（DSH 自身、Antigravity、Codex）统一收口到 `probe`/`start`/`inspect`/`sendInput`/`cancel`/`events`/`decideApproval` 七个显式操作；而 `cancel` 与 `decide_approval` 等外部副作用先写入带 `idempotency_key` 和 `lease_expires_at` 租约的 `effects` 出箱表，再由有界 `drainEffects` 抢占执行并写回回执。
+- **为什么**：如果把取消、审批放进内存队列，一旦宿主崩溃、插件重载或执行方进程卡死，队列里的指令会静默丢失，或者同一条 `cancel`/`allow-once` 在重试时被发两次。出箱表 + 租约到期回收保证了「至少记录在案、租约过期可被新排水接管、同幂等键不重做」，失败时还能把 `cancel.failed` 显式升级给操作者处理。
+- **反例或代价**：不能指望在单次同步调用内直接"内存一步到位"完成所有副作用；延迟最多受 `drainEffects` 周期（默认 5 秒或显式触发）影响，且需要在 `effects` 表维护租约与状态列。
+
+## 32. 决策 0.9.0-e：取消证据规则（为什么 HTTP 200 不算、`needs_reconcile` 是一等状态）
+
+- **决策**：`dsh.tasks.cancel` 只登记 `cancel_requested`；适配器返回的 `stopped` 必须以目标系统的状态机收口证据为前提（Antigravity 必须见 `RUNNING → CANCELING → IDLE` 且携带 `EXECUTOR_TERMINATION_REASON_USER_CANCELED`，Codex 必须见 `turn/completed.status="interrupted"`，DSH 自身只有宿主显式确认 `stopped: true` 才算），绝不把 `Cancel` 请求的 HTTP 200 或 `accepted: true` 当成 `cancelled`；任何拒停、不支持取消或失联统一把任务推向一等状态 `needs_reconcile`。
+- **为什么**：Phase 0 实测已证明，部分外部 RPC 收到取消请求返回 HTTP 200 后，底层步骤/子代理树可能仍在继续产出或停机原因缺失；假装已取消会导致调用方误以为副作用已停止，进而在工作区并发起冲突任务。把 `needs_reconcile` 设为显式非终态一等公民，逼迫系统把「不确定停没停」端到人或核对流程面前，直到拿出外部观察证据（`reconcile`）才允许关闭活跃 `attempt` 并解锁 `requeue`。
+- **反例或代价**：操作者有时会看到任务停在 `needs_reconcile` 而必须介入执行一次 `tasks reconcile`，体验上不如「永远报告成功」省事，但换来的是绝不对未确认的副作用撒谎。
+
+## 33. 决策 0.9.0-f：熔断开关默认关（为什么新能力默认不上线）
+
+- **决策**：`tasksEnabled` 默认 `false`、`tasksExternalAdapter` 默认 `"none"`、`tasksMaxConcurrent` 默认 `1`、`tasksRequireReconcileOnUnknown` 默认 `true`、`tasksPreviewTtlMs` 默认 `300000`。新能力必须通过 `cordis.patch.yml` 显式开启。
+- **为什么**：`0.9.0` 的消费者既有直接做会话问答的既有客户端，也有渐进接入任务中心的操作者。如果一升级就自动创建 SQLite 库、起 5 秒后台定时器、挂载 6 个新 MCP 工具或默认把并发放宽到多路外部进程，就会改变老用户的磁盘、端口、工具列表预算并放大外部进程失控半径。默认全关确保 0.8.x 用户的升级回归面为零，打开后也先被并发=1 与未知即转核对两条安全带兜住。
+- **反例或代价**：新装 `0.9.0` 的用户不能"开箱直接调用 `dsh_tasks_submit`"，必须按手册修改 `cordis.patch.yml` 并重启一次宿主，多出一步显式激活动作。
+
+## 34. 决策 0.9.0-g：取消确认、幂等载荷与租约围栏
+
+合并前的外部代码评审（t1）指出四处会真实伤到调用方的缝隙，本版按「宁可报冲突，不要静默撒谎」收口：
+
+1. **取消的确认必须来自执行方，且要当场收口**。适配器的 `cancel` 回报 `confirmedStopped`：DSH 适配器取 `res.stopped === true`，Antigravity 适配器取 `stoppedConversationIds.includes(cascadeId)`（`ForceStopCascadeTree` 的回显），Codex 适配器恒为 `false`（`turn/interrupt` 只是受理，`turn/completed.status: "interrupted"` 才是结果）。确认成立时，同一次 `drainEffects` 内把 `cancel_requested` 推进到 `cancelled` 并写 `cancel.confirmed`；否则任务会等一个已停会话永远发不出的事件。
+2. **幂等键识别的是「同一个请求」，不是「同一个键」**。`cancel` / `resolve` 的重放会比较请求意图（`reason`；`disposition` + `evidenceRef`），不一致抛 `STATE_CONFLICT`。`expectedStateVersion` 刻意不参与比较：它是并发护栏，正常重试时必然变化，把它算进意图会让诚实重试失败。
+3. **`recordAttemptStart(markRunning: false)` 也是状态变更**。绑定活动尝试改为带 `state_version` 条件的更新并自增版本，避免陈旧调用方绕过乐观锁改绑。
+4. **出箱写入围栏**。完成/失败更新要求 `status = 'in_flight'`；租约过期被回收后迟到的回执只记 `skipped`，不覆盖接手者的结果。
+
+同时记录一处**刻意不对称**：`cancel_requested` 下收到 `ready` 报告仍可进 `review_pending`（方案 §5.2：先到可信完成证据就按结果走），而 `waiting` 报告会记 `report.disputed`。前者不是缺陷，是「取消与完成竞态时以证据为准」的落地；差别在于 ready 带结果、waiting 只带一句等待。
+
+## 35. 决策 0.9.0-h：执行方失败的可观测性与安全边界
+
+外部安全评审（t3）指出三类风险：注册数据可影响要 spawn 的可执行文件、原始适配器异常会进任务账本与回执（含路径/端口/URL/堆栈）、Codex stdio 没有帧与队列上限；CLI 与 MCP 入口也缺少运行期校验。四条决策：
+
+1. **可执行文件只能由插件配置决定**。`dsh.agents.register` 是 RPC 入口，其 `adapterConfig(Ref)` 可能来自远端调用方，绝不允许影响 `spawn` 的目标。`resolveCodexBinary` 只接受构造期 `defaultBinary`（来自 `tasksAdapters.codex.binary`）与内置发现顺序，并要求候选是普通文件且大小 > 0——0 字节的 `WindowsApps` 执行别名因此天然被跳过。
+2. **失败信息按「固定文案 + 白名单 reason」发布**。直接静默会让排障归零；直接透传异常会泄漏本机信息。折中是 `sanitizeAdapterFailure`：分类文案只有三句（`unavailable` / `timeout` / `rejected`），可操作细节通过 `ADAPTER_REASON_MESSAGES` 的 17 个白名单键发布；未命中白名单的 reason（含任何带路径或空格的 prose）一律丢弃。白名单是代码变更点，因此适配器无法把任意文本塞进回执。
+3. **stdio 必须有界**。Codex 适配器把单帧限制在 4 MiB（超限即判协议错并关闭会话）、要求 JSON 帧是非数组对象、事件队列上限 500（丢最旧并计 `droppedEvents`）、stderr 只保留尾部 4096 字符——否则一个不合作的子进程能把插件的内存与日志撑爆。
+4. **入口校验按声明执行**。CLI 与 MCP 的 schema 声明与运行期校验必须一致：数字走安全整数与范围校验、JSON 语法失败在进入 RPC 前失败、标识符要求非空字符串。校验失败是 `validationFailed`，不是把脏参数交给账本。
+
+## 36. 决策 0.9.0-i：可观测性与净化的边界
+
+- **原始异常不进普通日志**：适配器失败只记录 `taskId / operationId / attemptId / code / reason / kind`。原始文本需要诊断时，由操作者显式打开 `tasksAdapterDebugDetail`，此时才以 `[raw]` 前缀输出，且先经 `redactSecrets` 并截断到 512 字符。理由：日志常被复制到别处，凭据不该跟着走。
+- **正常输出也要净化**：不止异常 —— DSH 适配器的 `status.reason`、`turn/end` 的 `reason.message`、`tool/result` 的 `error/detail`、审批的 `prompt/summary` 在进入账本前都过 `redactSecrets`（上限 2000 字符）；`applyReport` 落库前再兜一次，避免其它适配器绕过。
+- **严格协议比宽容协议安全**：Codex 帧的非对象值、错误 `jsonrpc`、非法 `id`/`params`、带 `id` 的未知 method 一律 `failProtocol` 关会话；无 `id` 的未知通知只计数（`unknownMethods`）。UTF-8 用 `StringDecoder` 增量解码，避免 chunk 边界拆坏多字节字符。
+- **入口自己校验**：MCP 的 `callTool` 在分发前按已发布的 `inputSchema` 校验必填项、类型、枚举、范围与未知键（`additionalProperties: false` 时），不指望客户端替我们守 schema。
+- **已知残留（如实记）**：Antigravity 的 `runtimeLocator` 与 `probe()` 会带本机 `httpPort` 与 hub 版本 —— 这是本地运行标识，不含 CSRF token，但确实暴露端口与主机元数据；「取消成功」必须看状态机证据（`RUNNING → CANCELING → IDLE` + `EXECUTOR_TERMINATION_REASON_USER_CANCELED`），HTTP 200 不算。
+
+## 37. 决策 0.9.0-j：净化与入口校验的第三轮收紧（安全复评 t3c）
+
+**残留与边界的准确说法**：会脱敏的是适配器失败文本、调试日志与 worker 上报的自由文本（`report` 的 `message`/`summary`/`reason`/`reviewPrompt`、attention 的 `prompt`/`summary`）；`attempts.result_json` 与 evidence 原样落账。Cookie 头按"逐对遮盖、保留同行其余内容"处理——整行遮盖会连一个紧跟其后的 URL 一起吞掉，而那是别人的证据。
 
 
-
+- **凭据形态按"实际出现过的形状"列**，不靠运气：除 `Bearer` / `ghp_` / `sk-` / csrf 外，补 `Authorization: Basic`、`Cookie` / `Set-Cookie`（止于分号）、URL 里的 `user:pass@`、`github_pat_`、`AKIA`。Cookie 那条第一版写成"到行尾"，把整行其余内容一起吃进 `[redacted]`，连带把后面的 URL 也藏了——正则的边界就是它的语义，写宽了同样是谎。
+- **只对字符串做凭据替换，并放过计数器**：`maxTokens` / `tokenCount` / `totalTokens` 这类键名含 `token`、值是数字。把数字改成 `[redacted]` 既没意义又毁掉成本可见性。规则改为「键名像凭据 **且** 值是字符串 **且** 不在计数白名单」；深度截断也改成 `[truncated: depth]`，让读者知道是递归上限而不是空值。
+- **入口校验改用 `Object.hasOwn`**：`"__proto__" in props` 在任何普通对象上都为真，于是 `additionalProperties: false` 把 `__proto__` 当成合法属性放行——一旦下游用 `Object.assign` 复制参数就是原型污染。现在 `__proto__` / `constructor` / `prototype` 直接拒绝，属性存在性一律用 `hasOwn`。
+- **递归上限从 2 提到 8**：原来的 `depth < 2` 让三层以下的 `minimum` / `type` 约束完全不检查——schema 写多深就漏多深。现在按 `MAX_SCHEMA_DEPTH = 8` 递归，超限直接报错而不是静默跳过。
+- **已知残留（如实记）**：①任务结果原样落账（见 README「已知边界」），要脱敏只能在输出侧；②`inputSchema` 只覆盖我们发布的工具，客户端带进来的 `__proto__` 已被拒，其余未知键在 `additionalProperties` 未声明时会透传给 Host——那属于 Host 的校验范围。

@@ -51,6 +51,9 @@ const methods = createMethods(
 const info = await methods.discover();
 const names = (info.methods ?? []).map((method) => method.name).sort();
 const expected = [
+  "dsh.agents.list",
+  "dsh.agents.probe",
+  "dsh.agents.register",
   "dsh.approvals.pending",
   "dsh.approvals.resolve",
   "dsh.capabilities",
@@ -66,6 +69,15 @@ const expected = [
   "dsh.sessions.list",
   "dsh.sessions.prompt",
   "dsh.sessions.wait",
+  "dsh.tasks.cancel",
+  "dsh.tasks.decideApproval",
+  "dsh.tasks.dispatch",
+  "dsh.tasks.get",
+  "dsh.tasks.list",
+  "dsh.tasks.preview",
+  "dsh.tasks.pump",
+  "dsh.tasks.reconcile",
+  "dsh.tasks.submit",
   "dsh.workspaces.create",
   "dsh.workspaces.list",
 ];
@@ -91,7 +103,25 @@ for (const want of ["workspaceId", "agentPreset", "model", "reasoningEffort", "p
 // pass a field that is guaranteed to be rejected.
 check(!createParams.includes("sessionId"), "dsh.sessions.create must not advertise sessionId");
 
-const handlers = ["listWorkspaces", "createWorkspace", "permissionCatalog", "configure", "capabilities"];
+const handlers = [
+  "listWorkspaces",
+  "createWorkspace",
+  "permissionCatalog",
+  "configure",
+  "capabilities",
+  "submitTask",
+  "getTask",
+  "listTasks",
+  "cancelTask",
+  "previewTask",
+  "reconcileTask",
+  "registerAgent",
+  "listAgents",
+  "probeAgent",
+  "dispatchTask",
+  "pumpTask",
+  "decideApprovalTask",
+];
 for (const name of handlers) {
   check(typeof methods[name] === "function", `handler missing: ${name}`);
 }

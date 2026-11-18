@@ -8,11 +8,20 @@
 //   Claude Code : claude mcp add dsh -- node "<path>/bin/dsh-rpc-mcp.mjs"
 //   Cursor/Codex: {"mcpServers":{"dsh":{"command":"node","args":["<path>/bin/dsh-rpc-mcp.mjs"]}}}
 //
+// Task-center note: `dsh.tasks.reconcile` and `dsh.tasks.decideApproval` are
+// intentionally NOT exposed as MCP tools — both require human operator judgment
+// and must only be invoked through the operator CLI (`bin/dsh-rpc.mjs`) or RPC.
+//
 // stdout carries protocol frames only; every diagnostic goes to stderr.
 
+import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { rpcCall, waitForTurn, WAIT_SLICE_MS } from "../lib/client.mjs";
+import { sanitizeAdapterFailure } from "../lib/adapters/base.mjs";
 import { PLUGIN_VERSION } from "../lib/version.mjs";
-import { formatToolResult, formatToolError } from "../lib/mcp-format.mjs";
+import { capText, formatToolResult, formatToolError } from "../lib/mcp-format.mjs";
 import { createInflight } from "../lib/inflight.mjs";
 import { normalizeTraceLevel } from "../lib/trace-format.mjs";
 import { DEFAULT_HISTORY_KINDS, formatHistory } from "../lib/history-format.mjs";
@@ -27,7 +36,7 @@ const SERVER_INFO = { name: "dsh-rpc", version: PLUGIN_VERSION, title: "DeepSeek
 // the registry key. `mcp` is the fallback for clients that send no `clientInfo`.
 let clientNamespace = "mcp";
 
-const TOOLS = [
+const BASE_TOOLS = [
   {
     name: "dsh_ask",
     title: "Ask DeepSeek Harness",
@@ -326,6 +335,108 @@ const TOOLS = [
   },
 ];
 
+const TASK_TOOLS = [
+  {
+    name: "dsh_tasks_submit",
+    title: "Submit a task to the DSH task center",
+    description:
+      "Idempotently submit a task to the DSH task ledger. Pass preview_id (recommended) or workspace_id + agent_id + capability_revision_id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        idempotency_key: { type: "string", description: "Caller-chosen idempotency key (auto-generated if omitted)." },
+        preview_id: { type: "string", description: "One-shot preview id from dsh.tasks.preview." },
+        principal_id: { type: "string", description: "Caller principal id (defaults to local-operator)." },
+        workspace_id: { type: "string", description: "Workspace id (required when preview_id is omitted)." },
+        agent_id: { type: "string", description: "Target agent id (required when preview_id is omitted)." },
+        capability_revision_id: { type: "string", description: "Capability revision id (required when preview_id is omitted)." },
+        prompt: { type: "string", description: "Task prompt text (packaged into input if input is omitted)." },
+        input: { type: "object", description: "Structured task input payload." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "dsh_tasks_list",
+    title: "List DSH tasks",
+    description: "List tasks in the DSH task center with optional status, workspace, or cursor filters.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        status: { type: "string", description: "Filter by task state." },
+        workspace_id: { type: "string", description: "Filter by workspace id." },
+        principal_id: { type: "string", description: "Filter by principal id." },
+        cursor: { type: "string", description: "Pagination cursor from previous response." },
+        limit: { type: "integer", minimum: 1, maximum: 200, description: "Max items to return (default 50)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "dsh_tasks_get",
+    title: "Get DSH task detail",
+    description: "Inspect a task's authoritative state, derived phase, active attempt, pending items, and artifacts.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "Task id to inspect." },
+        principal_id: { type: "string", description: "Optional principal scope." },
+      },
+      required: ["task_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "dsh_tasks_cancel",
+    title: "Request cancellation of a DSH task",
+    description:
+      "Durably register a cancellation request on a task (transitions to cancel_requested, or needs_reconcile if executor lacks cancel support).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "Task id to cancel." },
+        expected_state_version: { type: "integer", minimum: 1, description: "Current stateVersion for optimistic locking." },
+        idempotency_key: { type: "string", description: "Idempotency key (auto-generated if omitted)." },
+        reason: { type: "string", description: "Optional human-readable cancellation reason." },
+        principal_id: { type: "string", description: "Optional principal scope." },
+      },
+      required: ["task_id", "expected_state_version"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "dsh_agents_list",
+    title: "List registered task-center agents",
+    description: "List agent capability cards registered in the DSH task center with probe status.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        kind: { type: "string", description: "Filter by adapter kind." },
+        enabled: { type: "boolean", description: "Filter by enabled flag." },
+        verified_only: { type: "boolean", description: "Only return fully verified agents." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "dsh_agents_probe",
+    title: "Probe an agent's read-only controls",
+    description: "Run read-only control probes on a registered agent and update verified vs unknown controls.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        agent_id: { type: "string", description: "Registered agent id." },
+        controls: { type: "array", items: { type: "string" }, description: "Subset of controls to probe." },
+      },
+      required: ["agent_id"],
+      additionalProperties: false,
+    },
+  },
+];
+
+const TOOLS = [...BASE_TOOLS, ...TASK_TOOLS];
+const TASK_TOOL_NAMES = new Set(TASK_TOOLS.map((t) => t.name));
+
 // --------------------------------------------------------------- transport --
 
 let buffer = "";
@@ -351,21 +462,26 @@ function track(work) {
     });
 }
 
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
-  buffer += chunk;
-  let newline = buffer.indexOf("\n");
-  while (newline >= 0) {
-    const line = buffer.slice(0, newline).trim();
-    buffer = buffer.slice(newline + 1);
-    if (line.length > 0) track(handleLine(line));
-    newline = buffer.indexOf("\n");
-  }
-});
-process.stdin.on("end", () => {
-  closing = true;
-  if (pending === 0) process.exit(0);
-});
+const IS_MAIN =
+  Boolean(process.argv[1]) && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (IS_MAIN) {
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => {
+    buffer += chunk;
+    let newline = buffer.indexOf("\n");
+    while (newline >= 0) {
+      const line = buffer.slice(0, newline).trim();
+      buffer = buffer.slice(newline + 1);
+      if (line.length > 0) track(handleLine(line));
+      newline = buffer.indexOf("\n");
+    }
+  });
+  process.stdin.on("end", () => {
+    closing = true;
+    if (pending === 0) process.exit(0);
+  });
+}
 
 function send(payload) {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
@@ -434,9 +550,11 @@ async function handleLine(line) {
         if (!isNotification) reply(id, {});
         return;
 
-      case "tools/list":
-        reply(id, { tools: TOOLS });
+      case "tools/list": {
+        const tools = await listTools();
+        reply(id, { tools });
         return;
+      }
 
       case "tools/call": {
         const params = request.params ?? {};
@@ -519,18 +637,185 @@ function turnBudget(timeoutMs) {
 // names 600000 against a 10-minute deployment is exactly the drift the audit
 // flagged.
 let bridgeDefaults = null;
+let bridgeMethods = null;
+
+function resetBridgeDefaults() {
+  bridgeDefaults = null;
+  bridgeMethods = null;
+}
 
 async function bridgeSettings() {
   if (bridgeDefaults !== null) return bridgeDefaults;
   try {
     const info = await rpcCall("dsh.discover", {}, { timeoutMs: 5_000 });
     bridgeDefaults = { ...(info?.config ?? {}) };
+    bridgeMethods = Array.isArray(info?.methods) ? info.methods.map((m) => m.name) : null;
   } catch {
     // A bridge that cannot answer now will fail the real call with a better
     // message; the literal default keeps the hint usable meanwhile.
     bridgeDefaults = {};
+    bridgeMethods = null;
   }
   return bridgeDefaults;
+}
+
+// Three outcomes matter, not two (t4 finding D1): "disabled" means the 0.9.0
+// plugin is loaded with the switch off — a config change fixes it; "unsupported"
+// means the plugin predates the task centre, where telling the caller to set
+// `tasksEnabled` is advice that cannot work.
+const TASK_CENTRE_ENABLED = "enabled";
+const TASK_CENTRE_DISABLED = "disabled";
+const TASK_CENTRE_UNSUPPORTED = "unsupported";
+
+async function taskCentreState(callFn = (method, params, options) => rpcCall(method, params, options)) {
+  const defaults = await bridgeSettings();
+  if (defaults.tasksEnabled === false) return TASK_CENTRE_DISABLED;
+  if (defaults.tasksEnabled === true) {
+    if (Array.isArray(bridgeMethods)) {
+      return bridgeMethods.includes("dsh.tasks.list") ? TASK_CENTRE_ENABLED : TASK_CENTRE_UNSUPPORTED;
+    }
+    return TASK_CENTRE_ENABLED;
+  }
+  // 0.8.x plugins publish no `config.tasksEnabled`; a successful probe is the only proof.
+  try {
+    await callFn("dsh.tasks.list", { limit: 1 }, { timeoutMs: 3_000 });
+    return TASK_CENTRE_ENABLED;
+  } catch {
+    return Array.isArray(bridgeMethods) && !bridgeMethods.includes("dsh.tasks.list")
+      ? TASK_CENTRE_UNSUPPORTED
+      : TASK_CENTRE_DISABLED;
+  }
+}
+
+async function isTasksEnabled(callFn = (method, params, options) => rpcCall(method, params, options)) {
+  return (await taskCentreState(callFn)) === TASK_CENTRE_ENABLED;
+}
+
+async function listTools() {
+  const enabled = await isTasksEnabled();
+  return enabled ? [...BASE_TOOLS, ...TASK_TOOLS] : [...BASE_TOOLS];
+}
+
+function formatTaskSummary(task, maxResultChars = DEFAULT_MAX_RESULT_CHARS) {
+  const header = `task ${task.taskId ?? "?"} · ${task.status ?? "unknown"} · ${task.phase ?? "unknown"}`;
+  const bodyLines = [];
+  if (task.agentId) bodyLines.push(`agent: ${task.agentId}`);
+  if (task.workspaceId) bodyLines.push(`workspace: ${task.workspaceId}`);
+  if (task.notice) bodyLines.push(`notice: ${task.notice}`);
+  if (task.result !== undefined && task.result !== null) {
+    bodyLines.push(`result: ${JSON.stringify(task.result)}`);
+  }
+  if (task.error) bodyLines.push(`error: ${JSON.stringify(task.error)}`);
+  const meta = [
+    `v${task.stateVersion ?? "?"}`,
+    task.deduplicated ? "deduplicated" : null,
+    task.requestAccepted ? "requestAccepted" : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const content = capText(
+    [
+      { type: "text", text: header },
+      { type: "text", text: bodyLines.length > 0 ? bodyLines.join("\n") : "(no details)" },
+      { type: "text", text: `— ${meta}` },
+    ],
+    maxResultChars,
+  );
+  return {
+    content,
+    isError: false,
+    structuredContent: task,
+  };
+}
+
+// Keys that would reach Object.prototype if any later code copies arguments
+// with Object.assign or [[Set]]. JSON.parse stores them as own properties, so
+// the danger is downstream, not here — refuse them at the door.
+const PROTO_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+const MAX_SCHEMA_DEPTH = 8;
+
+function validateValue(schema, value, path, depth = 0) {
+  if (!schema || typeof schema !== "object") return null;
+  if (depth > MAX_SCHEMA_DEPTH) {
+    return `invalid arguments: ${path} — nesting deeper than ${MAX_SCHEMA_DEPTH} levels`;
+  }
+
+  if (schema.type === "string" && typeof value !== "string") {
+    return `invalid arguments: ${path} — expected string`;
+  }
+  if (schema.type === "number" && (typeof value !== "number" || !Number.isFinite(value))) {
+    return `invalid arguments: ${path} — expected number`;
+  }
+  if (schema.type === "integer" && !Number.isInteger(value)) {
+    return `invalid arguments: ${path} — expected integer`;
+  }
+  if (schema.type === "boolean" && typeof value !== "boolean") {
+    return `invalid arguments: ${path} — expected boolean`;
+  }
+  if (schema.type === "array" && !Array.isArray(value)) {
+    return `invalid arguments: ${path} — expected array`;
+  }
+  if (schema.type === "object" && (value === null || typeof value !== "object" || Array.isArray(value))) {
+    return `invalid arguments: ${path} — expected object`;
+  }
+
+  if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
+    return `invalid arguments: ${path} — \`${path}\` must be one of ${schema.enum.join(", ")}`;
+  }
+
+  if (typeof value === "number") {
+    if (schema.minimum !== undefined && value < schema.minimum) {
+      return `invalid arguments: ${path} — must be >= ${schema.minimum}`;
+    }
+    if (schema.maximum !== undefined && value > schema.maximum) {
+      return `invalid arguments: ${path} — must be <= ${schema.maximum}`;
+    }
+  }
+
+  if (Array.isArray(value) && schema.items) {
+    for (let i = 0; i < value.length; i += 1) {
+      const err = validateValue(schema.items, value[i], `${path}[${i}]`, depth + 1);
+      if (err) return err;
+    }
+  }
+
+  if (schema.type === "object" && value && typeof value === "object" && !Array.isArray(value)) {
+    if (Array.isArray(schema.required)) {
+      for (const reqKey of schema.required) {
+        if (!Object.hasOwn(value, reqKey) || value[reqKey] === undefined) {
+          const reqPath = path === "arguments" ? reqKey : `${path}.${reqKey}`;
+          return `invalid arguments: ${reqPath} — \`${reqKey}\` is required`;
+        }
+      }
+    }
+    const props = schema.properties && typeof schema.properties === "object" ? schema.properties : null;
+    if (schema.additionalProperties === false && props) {
+      for (const key of Object.keys(value)) {
+        // `key in props` is true for "__proto__" on every plain object, so a
+        // prototype key slipped past additionalProperties:false. hasOwn is the
+        // check that actually means "the schema lists this property".
+        if (PROTO_KEYS.has(key) || !Object.hasOwn(props, key)) {
+          const propPath = path === "arguments" ? key : `${path}.${key}`;
+          return `invalid arguments: ${propPath} — unknown property "${key}"`;
+        }
+      }
+    }
+    if (props) {
+      for (const [key, val] of Object.entries(value)) {
+        if (PROTO_KEYS.has(key) || val === undefined || !Object.hasOwn(props, key)) continue;
+        const propPath = path === "arguments" ? key : `${path}.${key}`;
+        const err = validateValue(props[key], val, propPath, depth + 1);
+        if (err) return err;
+      }
+    }
+  }
+
+  return null;
+}
+
+function validateToolArgs(schema, args) {
+  const normalized = args === undefined ? {} : args;
+  return validateValue(schema, normalized, "arguments", 0);
 }
 
 async function callTool(name, args, signal = undefined) {
@@ -548,6 +833,31 @@ async function callTool(name, args, signal = undefined) {
         : DEFAULT_MAX_RESULT_CHARS;
     const adviceEnabled = typeof defaults.timeoutAdvice === "boolean" ? defaults.timeoutAdvice : true;
     const hintOptions = { defaultTimeoutMs: turnDefault, maxResultChars, adviceEnabled };
+
+    if (TASK_TOOL_NAMES.has(name)) {
+      const centre = await taskCentreState(call);
+      if (centre !== TASK_CENTRE_ENABLED) {
+        const unsupported = centre === TASK_CENTRE_UNSUPPORTED;
+        return formatToolError(
+          unsupported
+            ? "this Harness plugin does not implement the task centre (0.9.0)"
+            : "task centre is disabled: set config.tasksEnabled=true",
+          { tool: name },
+          unsupported
+            ? "upgrade the plugin inside the DSH profile to 0.9.0 — the MCP bridge and the plugin ship together"
+            : "enable config.tasksEnabled on the bridge before calling task tools",
+        );
+      }
+    }
+
+    const toolDef = TOOLS.find((t) => t.name === name);
+    if (toolDef?.inputSchema) {
+      const schemaErr = validateToolArgs(toolDef.inputSchema, args);
+      if (schemaErr) {
+        return formatToolError(schemaErr, undefined, -32602);
+      }
+    }
+
     switch (name) {
       case "dsh_ask": {
         const prompt = typeof args.prompt === "string" ? args.prompt : "";
@@ -555,8 +865,12 @@ async function callTool(name, args, signal = undefined) {
           return formatToolError("`prompt` is required", undefined, "pass the task as a self-contained prompt string");
         }
         const params = { text: prompt };
-        const sessionId = typeof args.session_id === "string" ? args.session_id.trim() : "";
-        if (sessionId) params.sessionId = sessionId;
+        if (args.session_id !== undefined) {
+          if (typeof args.session_id !== "string" || !args.session_id.trim()) {
+            return formatToolError("`session_id` must be a non-empty string", undefined, -32602);
+          }
+          params.sessionId = args.session_id.trim();
+        }
         // Location and preset are creation-only. They are forwarded even when a
         // session was named so the bridge can refuse the contradiction — dropping
         // them here would look like they had been honoured.
@@ -648,7 +962,12 @@ async function callTool(name, args, signal = undefined) {
 
       case "dsh_approvals_pending": {
         const params = {};
-        if (typeof args.session_id === "string" && args.session_id.trim()) params.sessionId = args.session_id.trim();
+        if (args.session_id !== undefined) {
+          if (typeof args.session_id !== "string" || !args.session_id.trim()) {
+            return formatToolError("`session_id` must be a non-empty string", undefined, -32602);
+          }
+          params.sessionId = args.session_id.trim();
+        }
         if (Number.isInteger(args.wait_ms)) params.waitMs = args.wait_ms;
         const result = await call("dsh.approvals.pending", params);
         const pending = Array.isArray(result.pending) ? result.pending : [];
@@ -819,7 +1138,10 @@ async function callTool(name, args, signal = undefined) {
         const params = {};
         if (args.sections !== undefined) params.sections = args.sections;
         if (args.max_chars !== undefined) params.max_chars = args.max_chars;
-        if (typeof args.session_id === "string" && args.session_id.trim()) {
+        if (args.session_id !== undefined) {
+          if (typeof args.session_id !== "string" || !args.session_id.trim()) {
+            return formatToolError("`session_id` must be a non-empty string", undefined, -32602);
+          }
           params.session_id = args.session_id.trim();
         }
         // A newer CLI/MCP bridge can be paired with an older plugin inside the
@@ -858,15 +1180,177 @@ async function callTool(name, args, signal = undefined) {
         };
       }
 
+      case "dsh_tasks_submit": {
+        if (args.input !== undefined) {
+          if (args.input === null || typeof args.input !== "object" || Array.isArray(args.input)) {
+            return formatToolError("`input` must be a plain JSON object", undefined, -32602);
+          }
+        }
+        if (args.preview_id !== undefined && (typeof args.preview_id !== "string" || !args.preview_id.trim())) {
+          return formatToolError("`preview_id` must be a non-empty string", undefined, -32602);
+        }
+        const params = {
+          idempotencyKey:
+            typeof args.idempotency_key === "string" && args.idempotency_key.trim()
+              ? args.idempotency_key.trim()
+              : `mcp_${randomUUID()}`,
+        };
+        if (typeof args.preview_id === "string" && args.preview_id.trim()) params.previewId = args.preview_id.trim();
+        if (typeof args.principal_id === "string" && args.principal_id.trim()) params.principalId = args.principal_id.trim();
+        if (typeof args.workspace_id === "string" && args.workspace_id.trim()) params.workspaceId = args.workspace_id.trim();
+        if (typeof args.agent_id === "string" && args.agent_id.trim()) params.agentId = args.agent_id.trim();
+        if (typeof args.capability_revision_id === "string" && args.capability_revision_id.trim()) {
+          params.capabilityRevisionId = args.capability_revision_id.trim();
+        }
+        if (args.input !== undefined) params.input = args.input;
+        else if (typeof args.prompt === "string" && args.prompt.trim()) params.input = { prompt: args.prompt.trim() };
+        const result = await call("dsh.tasks.submit", params);
+        return formatTaskSummary(result, maxResultChars);
+      }
+
+      case "dsh_tasks_list": {
+        const params = {};
+        if (typeof args.status === "string" && args.status.trim()) params.status = args.status.trim();
+        if (typeof args.workspace_id === "string" && args.workspace_id.trim()) params.workspaceId = args.workspace_id.trim();
+        if (typeof args.principal_id === "string" && args.principal_id.trim()) params.principalId = args.principal_id.trim();
+        if (typeof args.cursor === "string" && args.cursor.trim()) params.cursor = args.cursor.trim();
+        if (args.limit !== undefined) {
+          if (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 200) {
+            return formatToolError("`limit` must be an integer between 1 and 200", undefined, -32602);
+          }
+          params.limit = args.limit;
+        }
+        const result = await call("dsh.tasks.list", params);
+        const items = Array.isArray(result?.items) ? result.items : [];
+        const lines = items.map(
+          (item) => `task ${item.taskId ?? "?"} · ${item.status ?? "unknown"} · ${item.phase ?? "unknown"}`,
+        );
+        const content = capText(
+          [
+            { type: "text", text: `tasks (${items.length})` },
+            { type: "text", text: lines.length > 0 ? lines.join("\n") : "(no tasks)" },
+            { type: "text", text: `— hasMore=${Boolean(result?.hasMore)}` },
+          ],
+          maxResultChars,
+        );
+        return {
+          content,
+          isError: false,
+          structuredContent: result,
+        };
+      }
+
+      case "dsh_tasks_get": {
+        const taskId = typeof args.task_id === "string" ? args.task_id.trim() : "";
+        if (!taskId) return formatToolError("`task_id` is required", undefined, -32602);
+        const params = { taskId };
+        if (typeof args.principal_id === "string" && args.principal_id.trim()) params.principalId = args.principal_id.trim();
+        const result = await call("dsh.tasks.get", params);
+        return formatTaskSummary(result, maxResultChars);
+      }
+
+      case "dsh_tasks_cancel": {
+        const taskId = typeof args.task_id === "string" ? args.task_id.trim() : "";
+        if (!taskId) return formatToolError("`task_id` is required", undefined, -32602);
+        if (!Number.isInteger(args.expected_state_version) || args.expected_state_version < 1) {
+          return formatToolError("`expected_state_version` must be a positive integer", undefined, -32602);
+        }
+        const params = {
+          taskId,
+          expectedStateVersion: args.expected_state_version,
+          idempotencyKey:
+            typeof args.idempotency_key === "string" && args.idempotency_key.trim()
+              ? args.idempotency_key.trim()
+              : `mcp_cancel_${randomUUID()}`,
+        };
+        if (typeof args.reason === "string" && args.reason.trim()) params.reason = args.reason.trim();
+        if (typeof args.principal_id === "string" && args.principal_id.trim()) params.principalId = args.principal_id.trim();
+        const result = await call("dsh.tasks.cancel", params);
+        return formatTaskSummary({ phase: result.status === "needs_reconcile" ? "person/reconcile" : "machine/working", ...result }, maxResultChars);
+      }
+
+      case "dsh_agents_list": {
+        const params = {};
+        if (typeof args.kind === "string" && args.kind.trim()) params.kind = args.kind.trim();
+        if (typeof args.enabled === "boolean") params.enabled = args.enabled;
+        if (typeof args.verified_only === "boolean") params.verifiedOnly = args.verified_only;
+        const result = await call("dsh.agents.list", params);
+        const items = Array.isArray(result?.items) ? result.items : [];
+        const lines = items.map(
+          (a) => `agent ${a.agentId} · ${a.kind} · ${a.probeStatus ?? "unknown"}`,
+        );
+        const content = capText(
+          [
+            { type: "text", text: `agents (${items.length})` },
+            { type: "text", text: lines.length > 0 ? lines.join("\n") : "(no agents registered)" },
+            { type: "text", text: `— total=${result?.total ?? items.length}` },
+          ],
+          maxResultChars,
+        );
+        return {
+          content,
+          isError: false,
+          structuredContent: result,
+        };
+      }
+
+      case "dsh_agents_probe": {
+        const agentId = typeof args.agent_id === "string" ? args.agent_id.trim() : "";
+        if (!agentId) return formatToolError("`agent_id` is required", undefined, -32602);
+        const params = { agentId };
+        if (args.controls !== undefined) {
+          if (!Array.isArray(args.controls) || args.controls.some((c) => typeof c !== "string" || !c.trim())) {
+            return formatToolError("`controls` must be an array of non-empty strings", undefined, -32602);
+          }
+          params.controls = args.controls.map((c) => c.trim());
+        }
+        const result = await call("dsh.agents.probe", params);
+        const header = `agent ${result.agentId} · ${result.probeStatus ?? "unknown"}`;
+        const body = `verified: ${(result.verifiedControls ?? Object.keys(result.verified ?? {})).join(", ") || "(none)"}\nunknown: ${(result.unknown ?? []).map((u) => `${u.control}(${u.reason})`).join(", ") || "(none)"}`;
+        const content = capText(
+          [
+            { type: "text", text: header },
+            { type: "text", text: body },
+            { type: "text", text: `— elapsedMs=${result.elapsedMs ?? 0}` },
+          ],
+          maxResultChars,
+        );
+        return {
+          content,
+          isError: false,
+          structuredContent: result,
+        };
+      }
+
       default:
         return formatToolError(`unknown tool: ${name}`, undefined, "call tools/list for the supported names");
     }
   } catch (error) {
     // `code` is the JSON-RPC code the bridge answered with; toolError turns it
     // into the concrete next step instead of leaving the caller to guess.
+    // Never surface raw adapter/transport/internal exception text to MCP callers.
+    const isAdapterOrInternal =
+      error?.data?.kind === "ADAPTER_UNAVAILABLE" ||
+      error?.taskCode === "ADAPTER_UNAVAILABLE" ||
+      !Number.isInteger(error?.code) ||
+      error.code === -32000 ||
+      error.code === -32603;
+    if (TASK_TOOL_NAMES.has(name) && isAdapterOrInternal) {
+      const safe = sanitizeAdapterFailure(error);
+      return formatToolError(
+        safe.message,
+        safe.code || safe.kind || safe.httpStatus
+          ? { code: safe.code, kind: safe.kind, httpStatus: safe.httpStatus }
+          : undefined,
+        error?.code,
+      );
+    }
     return formatToolError(error instanceof Error ? error.message : String(error), error?.data, error?.code);
   }
 }
 
+if (IS_MAIN) {
+  log(`ready (${SERVER_INFO.name} ${SERVER_INFO.version})`);
+}
 
-log(`ready (${SERVER_INFO.name} ${SERVER_INFO.version})`);
+export { BASE_TOOLS, TASK_TOOLS, TOOLS, callTool, handleLine, isTasksEnabled, listTools, resetBridgeDefaults, validateToolArgs };
