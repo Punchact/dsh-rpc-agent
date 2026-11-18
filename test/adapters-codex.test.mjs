@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
@@ -58,18 +59,21 @@ function makeFakeSpawn() {
 }
 
 test("resolveCodexBinary skips unreadable WindowsApps and falls back to .codex/.sandbox-bin/codex.exe", () => {
+  // Build the expected path with path.join so the assertion holds on every platform:
+  // a literal Windows string silently stops matching when CI runs on Linux.
+  const sandboxBin = join("C:\\Users\\Tester", ".codex", ".sandbox-bin", "codex.exe");
   const res = resolveCodexBinary({
     homedir: "C:\\Users\\Tester",
     fsOps: {
       readdirSync: () => {
         throw new Error("EACCES");
       },
-      existsSync: (p) => p === "C:\\Users\\Tester\\.codex\\.sandbox-bin\\codex.exe",
+      existsSync: (p) => p === sandboxBin,
       accessSync: () => {},
     },
   });
   assert.equal(res.source, "sandboxBin");
-  assert.equal(res.path, "C:\\Users\\Tester\\.codex\\.sandbox-bin\\codex.exe");
+  assert.equal(res.path, sandboxBin);
 
   assert.throws(
     () =>
