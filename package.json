@@ -58,7 +58,7 @@
     }
   },
   "scripts": {
-    "test": "node test/methods.test.mjs && node test/mcp-format.test.mjs && node test/trace-format.test.mjs && node test/history-format.test.mjs && node test/advice.test.mjs && node test/host-facts.test.mjs && node test/capabilities.test.mjs && node test/tasks-store.test.mjs && node test/tasks-state.test.mjs && node test/tasks-engine.test.mjs && node test/registry.test.mjs && node test/pending.test.mjs && node test/approvals.test.mjs && node test/approval-state.test.mjs && node test/wait.test.mjs && node test/abort.test.mjs && node test/client.test.mjs && node test/cli-mcp-regressions.test.mjs && node test/status.test.mjs && node test/catalog.smoke.mjs",
+    "test": "node test/methods.test.mjs && node test/mcp-format.test.mjs && node test/trace-format.test.mjs && node test/history-format.test.mjs && node test/advice.test.mjs && node test/host-facts.test.mjs && node test/capabilities.test.mjs && node test/tasks-store.test.mjs && node test/tasks-state.test.mjs && node test/tasks-engine.test.mjs && node test/agents-card.test.mjs && node test/agents-probe.test.mjs && node test/tasks-preview.test.mjs && node test/tasks-reconcile.test.mjs && node test/registry.test.mjs && node test/pending.test.mjs && node test/approvals.test.mjs && node test/approval-state.test.mjs && node test/wait.test.mjs && node test/abort.test.mjs && node test/client.test.mjs && node test/cli-mcp-regressions.test.mjs && node test/status.test.mjs && node test/catalog.smoke.mjs",
     "test:host": "node test/host.test.mjs",
     "test:e2e": "node test/e2e.mjs",
     "test:edge": "node test/edge.mjs",

@@ -18,6 +18,8 @@ import { createMethods } from "./lib/methods.mjs";
 import { isOwnedSession, useOwnedState } from "./lib/owned.mjs";
 import { createPendingStore } from "./lib/pending.mjs";
 import { createStats } from "./lib/stats.mjs";
+import { seedBaselineEntities } from "./lib/tasks/engine.mjs";
+import { openStore } from "./lib/tasks/store.mjs";
 import { PLUGIN_NAME, PLUGIN_VERSION } from "./lib/version.mjs";
 
 export const name = "dsh-rpc";
@@ -68,8 +70,24 @@ export function apply(ctx, input = {}) {
     approvalState.prune();
   }
 
+  const taskStore = config.tasksDbPath ? openStore({ path: config.tasksDbPath }) : null;
+  if (taskStore) {
+    // A DSH install has exactly one human operator. Seed the identity rows the task
+    // API needs so `tasksDbPath` works without a separate onboarding step; real
+    // accounts and scopes land with the identity layer (W3).
+    seedBaselineEntities(taskStore, {
+      principal: { principalId: "local-operator", kind: "operator" },
+      workspace: { workspaceId: "local", rootPath: config.defaultCwd ?? process.cwd() },
+    }).catch((err) => {
+      ctx.logger?.warn?.(`dsh-rpc: task bootstrap seeding failed: ${err?.message ?? String(err)}`);
+    });
+  }
+  if (taskStore && typeof ctx.effect === "function") {
+    ctx.effect(() => () => taskStore.close(), "dsh-rpc.task-store");
+  }
+
   const methods = createMethods(
-    { sessionController: ctx.sessionController, webServer: ctx.webServer, approvals },
+    { sessionController: ctx.sessionController, webServer: ctx.webServer, approvals, taskStore },
     config,
     ctx,
     state,

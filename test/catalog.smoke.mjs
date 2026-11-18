@@ -51,6 +51,9 @@ const methods = createMethods(
 const info = await methods.discover();
 const names = (info.methods ?? []).map((method) => method.name).sort();
 const expected = [
+  "dsh.agents.list",
+  "dsh.agents.probe",
+  "dsh.agents.register",
   "dsh.approvals.pending",
   "dsh.approvals.resolve",
   "dsh.capabilities",
@@ -69,6 +72,8 @@ const expected = [
   "dsh.tasks.cancel",
   "dsh.tasks.get",
   "dsh.tasks.list",
+  "dsh.tasks.preview",
+  "dsh.tasks.reconcile",
   "dsh.tasks.submit",
   "dsh.workspaces.create",
   "dsh.workspaces.list",
@@ -105,6 +110,11 @@ const handlers = [
   "getTask",
   "listTasks",
   "cancelTask",
+  "previewTask",
+  "reconcileTask",
+  "registerAgent",
+  "listAgents",
+  "probeAgent",
 ];
 for (const name of handlers) {
   check(typeof methods[name] === "function", `handler missing: ${name}`);
