@@ -728,6 +728,84 @@ function formatTaskSummary(task, maxResultChars = DEFAULT_MAX_RESULT_CHARS) {
   };
 }
 
+function validateValue(schema, value, path, depth = 0) {
+  if (!schema || typeof schema !== "object") return null;
+
+  if (schema.type === "string" && typeof value !== "string") {
+    return `invalid arguments: ${path} — expected string`;
+  }
+  if (schema.type === "number" && (typeof value !== "number" || !Number.isFinite(value))) {
+    return `invalid arguments: ${path} — expected number`;
+  }
+  if (schema.type === "integer" && !Number.isInteger(value)) {
+    return `invalid arguments: ${path} — expected integer`;
+  }
+  if (schema.type === "boolean" && typeof value !== "boolean") {
+    return `invalid arguments: ${path} — expected boolean`;
+  }
+  if (schema.type === "array" && !Array.isArray(value)) {
+    return `invalid arguments: ${path} — expected array`;
+  }
+  if (schema.type === "object" && (value === null || typeof value !== "object" || Array.isArray(value))) {
+    return `invalid arguments: ${path} — expected object`;
+  }
+
+  if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
+    return `invalid arguments: ${path} — \`${path}\` must be one of ${schema.enum.join(", ")}`;
+  }
+
+  if (typeof value === "number") {
+    if (schema.minimum !== undefined && value < schema.minimum) {
+      return `invalid arguments: ${path} — must be >= ${schema.minimum}`;
+    }
+    if (schema.maximum !== undefined && value > schema.maximum) {
+      return `invalid arguments: ${path} — must be <= ${schema.maximum}`;
+    }
+  }
+
+  if (Array.isArray(value) && schema.items) {
+    for (let i = 0; i < value.length; i += 1) {
+      const err = validateValue(schema.items, value[i], `${path}[${i}]`, depth + 1);
+      if (err) return err;
+    }
+  }
+
+  if (schema.type === "object" && value && typeof value === "object" && !Array.isArray(value)) {
+    if (Array.isArray(schema.required)) {
+      for (const reqKey of schema.required) {
+        if (!(reqKey in value) || value[reqKey] === undefined) {
+          const reqPath = path === "arguments" ? reqKey : `${path}.${reqKey}`;
+          return `invalid arguments: ${reqPath} — \`${reqKey}\` is required`;
+        }
+      }
+    }
+    const props = schema.properties && typeof schema.properties === "object" ? schema.properties : null;
+    if (schema.additionalProperties === false && props) {
+      for (const key of Object.keys(value)) {
+        if (!(key in props)) {
+          const propPath = path === "arguments" ? key : `${path}.${key}`;
+          return `invalid arguments: ${propPath} — unknown property "${key}"`;
+        }
+      }
+    }
+    if (props && depth < 2) {
+      for (const [key, val] of Object.entries(value)) {
+        if (val === undefined || !(key in props)) continue;
+        const propPath = path === "arguments" ? key : `${path}.${key}`;
+        const err = validateValue(props[key], val, propPath, depth + 1);
+        if (err) return err;
+      }
+    }
+  }
+
+  return null;
+}
+
+function validateToolArgs(schema, args) {
+  const normalized = args === undefined ? {} : args;
+  return validateValue(schema, normalized, "arguments", 0);
+}
+
 async function callTool(name, args, signal = undefined) {
   // Cancellation from the client has to reach the request that is still in flight;
   // these two wrappers are the only places that talk to the bridge from here.
@@ -757,6 +835,14 @@ async function callTool(name, args, signal = undefined) {
             ? "upgrade the plugin inside the DSH profile to 0.9.0 — the MCP bridge and the plugin ship together"
             : "enable config.tasksEnabled on the bridge before calling task tools",
         );
+      }
+    }
+
+    const toolDef = TOOLS.find((t) => t.name === name);
+    if (toolDef?.inputSchema) {
+      const schemaErr = validateToolArgs(toolDef.inputSchema, args);
+      if (schemaErr) {
+        return formatToolError(schemaErr, undefined, -32602);
       }
     }
 
@@ -1255,4 +1341,4 @@ if (IS_MAIN) {
   log(`ready (${SERVER_INFO.name} ${SERVER_INFO.version})`);
 }
 
-export { BASE_TOOLS, TASK_TOOLS, TOOLS, callTool, handleLine, isTasksEnabled, listTools, resetBridgeDefaults };
+export { BASE_TOOLS, TASK_TOOLS, TOOLS, callTool, handleLine, isTasksEnabled, listTools, resetBridgeDefaults, validateToolArgs };

@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   MAX_EVENT_QUEUE,
   MAX_FRAME_CHARS,
+  MAX_PENDING_APPROVALS,
   createCodexAdapter,
   resolveCodexBinary,
 } from "../lib/adapters/codex.mjs";
@@ -214,12 +215,6 @@ test("codex adapter enforces frame limit, non-object filtering, bounded event qu
   });
   const child = fake.getChild();
 
-  // Non-object JSON frames are ignored cleanly without throwing
-  child.stdout.write('"just a string"\n123\n[1,2,3]\nnull\n');
-  await new Promise((r) => setTimeout(r, 10));
-  const afterNonObj = await adapter.events(started.locator, 0);
-  assert.equal(afterNonObj.events.length, 1); // only turn/start
-
   // Drain stderr bursts without blocking or leaking into events
   for (let i = 0; i < 8; i += 1) {
     const okWrite = child.stderr.write(`diag-${i}: ${"e".repeat(2048)}\n`);
@@ -251,4 +246,91 @@ test("codex adapter enforces frame limit, non-object filtering, bounded event qu
   assert.equal(protoEvt.report.state, "failed");
   assert.equal(protoEvt.report.failureClass, "protocol_error");
   assert.equal(afterProto.protocolError, "frame_exceeds_limit");
+});
+
+test("codex adapter enforces strict frame validation, UTF-8 StringDecoder assembly, and MAX_PENDING_APPROVALS cap", async () => {
+  // 1. Strict frame validation cases that must call failProtocol
+  const badCases = [
+    ["null", "invalid_frame"],
+    ["123", "invalid_frame"],
+    ["[1,2,3]", "invalid_frame"],
+    ['{"jsonrpc":"1.0","method":"turn/started"}', "invalid_frame"],
+    ['{"id":{"bad":1},"method":"turn/started"}', "invalid_frame_id"],
+    ['{"id":99,"method":"evil/unknownMethod","params":{}}', "unsupported_method"],
+    ['{"method":"turn/started","params":"not-an-object"}', "invalid_params"],
+  ];
+
+  for (const [badLine, expectedCode] of badCases) {
+    const fake = makeFakeSpawn();
+    const adapter = createCodexAdapter({
+      spawn: fake.spawn,
+      spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
+      binary: "C:\\fake\\codex.exe",
+    });
+    const started = await adapter.start({
+      task: { taskId: `t-bad-${expectedCode}`, requestSummary: { prompt: "hi" } },
+      workspace: { rootPath: "C:\\repo" },
+    });
+    fake.getChild().stdout.write(`${badLine}\n`);
+    await new Promise((r) => setTimeout(r, 10));
+    const ev = await adapter.events(started.locator, 0);
+    assert.equal(ev.protocolError, expectedCode, `expected ${expectedCode} for ${badLine}`);
+    const last = ev.events[ev.events.length - 1];
+    assert.equal(last.report.state, "failed");
+    assert.equal(last.report.failureClass, "protocol_error");
+  }
+
+  // 2. Unknown notification (no id) is ignored without closing, increments unknownMethods;
+  //    split UTF-8 multibyte character across chunks reassembles cleanly;
+  //    pendingApprovals > 200 drops oldest and increments droppedApprovals.
+  const fake = makeFakeSpawn();
+  const adapter = createCodexAdapter({
+    spawn: fake.spawn,
+    spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
+    binary: "C:\\fake\\codex.exe",
+  });
+  const started = await adapter.start({
+    task: { taskId: "t-utf8-apr", requestSummary: { prompt: "hi" } },
+    workspace: { rootPath: "C:\\repo" },
+  });
+  const child = fake.getChild();
+
+  // Unknown notification without id -> ignored, counter incremented, session stays open
+  fake.emitServerLine({ method: "telemetry/heartbeat", params: {} });
+  await new Promise((r) => setTimeout(r, 10));
+
+  // Split 3-byte UTF-8 "汉" (E6 B1 89) across two writes
+  const prefix = Buffer.from('{"method":"item/agentMessage","params":{"text":"', "utf8");
+  const hanBytes = Buffer.from("汉", "utf8"); // 3 bytes
+  const suffix = Buffer.from('"}}\n', "utf8");
+  child.stdout.write(Buffer.concat([prefix, hanBytes.subarray(0, 1)]));
+  child.stdout.write(Buffer.concat([hanBytes.subarray(1), suffix]));
+  await new Promise((r) => setTimeout(r, 10));
+
+  const afterUtf8 = await adapter.events(started.locator, 0);
+  assert.equal(afterUtf8.unknownMethods, 1);
+  assert.equal(afterUtf8.protocolError, undefined);
+  const hanEvent = afterUtf8.events.find((e) => e.report.observedMethod === "item/agentMessage");
+  assert.equal(hanEvent.report.item.text, "汉");
+
+  // Push MAX_PENDING_APPROVALS + 5 approval requests
+  for (let i = 1; i <= MAX_PENDING_APPROVALS + 5; i += 1) {
+    fake.emitServerLine({
+      id: i,
+      method: "item/commandExecution/requestApproval",
+      params: { command: `echo ${i}` },
+    });
+  }
+  await new Promise((r) => setTimeout(r, 15));
+
+  const afterApr = await adapter.events(started.locator, 0);
+  assert.equal(afterApr.droppedApprovals, 5);
+  // Oldest 5 (1..5) were dropped; newest 205 (number id) is still pending and reply preserves numeric id
+  const stale = await adapter.decideApproval(started.locator, { approvalId: "1", decision: "allow-once" });
+  assert.equal(stale.accepted, false);
+  const live = await adapter.decideApproval(started.locator, {
+    approvalId: String(MAX_PENDING_APPROVALS + 5),
+    decision: "allow-once",
+  });
+  assert.equal(live.accepted, true);
 });

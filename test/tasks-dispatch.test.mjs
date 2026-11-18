@@ -430,7 +430,8 @@ test("dispatch, pump, and drainEffects sanitize raw adapter exceptions out of le
     const evts = await s1.engine.events({ taskId: t.taskId, afterSeq: 0 });
     assert.doesNotMatch(JSON.stringify(detail), /4035|csrf_top_secret_99|priv\.key/);
     assert.doesNotMatch(JSON.stringify(evts), /4035|csrf_top_secret_99|priv\.key/);
-    assert.ok(debugLogs.some((d) => String(d.meta?.message).includes("csrf_top_secret_99")));
+    assert.ok(debugLogs.length >= 1);
+    assert.doesNotMatch(JSON.stringify(debugLogs), /csrf_top_secret_99/);
   } finally {
     s1.store.close();
   }
@@ -475,5 +476,119 @@ test("dispatch, pump, and drainEffects sanitize raw adapter exceptions out of le
     assert.doesNotMatch(JSON.stringify(effRows), /4035|csrf_top_secret_99|priv\.key/);
   } finally {
     s2.store.close();
+  }
+});
+
+test("dispatch logger omits raw exception text by default, logs redacted [raw] only when enabled, and applyReport redacts ledger text", async () => {
+  const secretMsg = "Bearer eyJ_secret_abc sk-1234567890abcdef12 " + "z".repeat(700);
+  const makeFailAdapter = () =>
+    makeFakeAdapter({
+      onStart() {
+        const err = new Error(secretMsg);
+        err.code = "ECONNREFUSED";
+        Object.defineProperty(err, "internalDetail", { value: secretMsg, enumerable: false });
+        throw err;
+      },
+    });
+
+  // 1. Default debugRawAdapterErrors=false: logger receives safe fields only, zero raw message
+  const sDefault = await setupWithAdapter(makeFailAdapter());
+  const defaultLogs = [];
+  try {
+    const disp = createDispatcher({
+      store: sDefault.store,
+      engine: sDefault.engine,
+      adapters: { fake: makeFailAdapter() },
+      logger: { debug: (msg, meta) => defaultLogs.push({ msg, meta }) },
+    });
+    const t = await sDefault.engine.submit({
+      idempotencyKey: "w7-log-default",
+      capabilityRevisionId: "cap-1",
+      workspaceId: "ws-1",
+      agentId: "ag-1",
+    });
+    await disp.startTask({ taskId: t.taskId });
+    assert.equal(defaultLogs.length, 1);
+    assert.equal(defaultLogs[0].meta.taskId, t.taskId);
+    assert.equal(defaultLogs[0].meta.code, "ECONNREFUSED");
+    assert.doesNotMatch(JSON.stringify(defaultLogs), /eyJ_secret_abc|sk-1234|\[raw\]|zzz/);
+  } finally {
+    sDefault.store.close();
+  }
+
+  // 2. tasksAdapterDebugDetail config switch + debugRawAdapterErrors=true: logs [raw], redacted, <= 512 chars
+  const cfgDefault = resolveConfig({});
+  assert.equal(cfgDefault.tasksAdapterDebugDetail, false);
+  assert.equal(describeConfig(cfgDefault).tasksAdapterDebugDetail, false);
+  const cfgOn = resolveConfig({ tasksAdapterDebugDetail: true });
+  assert.equal(cfgOn.tasksAdapterDebugDetail, true);
+  assert.throws(() => resolveConfig({ tasksAdapterDebugDetail: "yes" }), ConfigError);
+
+  const sRaw = await setupWithAdapter(makeFailAdapter());
+  const rawLogs = [];
+  try {
+    const disp = createDispatcher({
+      store: sRaw.store,
+      engine: sRaw.engine,
+      adapters: { fake: makeFailAdapter() },
+      logger: { debug: (msg, meta) => rawLogs.push({ msg, meta }) },
+      debugRawAdapterErrors: true,
+    });
+    const t = await sRaw.engine.submit({
+      idempotencyKey: "w7-log-raw",
+      capabilityRevisionId: "cap-1",
+      workspaceId: "ws-1",
+      agentId: "ag-1",
+    });
+    await disp.startTask({ taskId: t.taskId });
+    assert.equal(rawLogs.length, 1);
+    assert.ok(rawLogs[0].msg.startsWith("[raw] "));
+    assert.ok(rawLogs[0].msg.includes("[redacted]"));
+    assert.ok(rawLogs[0].msg.includes("… (truncated)"));
+    assert.doesNotMatch(rawLogs[0].msg, /eyJ_secret_abc|sk-1234/);
+  } finally {
+    sRaw.store.close();
+  }
+
+  // 3. engine.applyReport redacts report.message, report.summary, and report.attention.prompt/summary before DB insert
+  const sEng = await setupWithAdapter(makeFakeAdapter());
+  try {
+    const t = await sEng.engine.submit({
+      idempotencyKey: "w7-engine-redact",
+      capabilityRevisionId: "cap-1",
+      workspaceId: "ws-1",
+      agentId: "ag-1",
+    });
+    const startRes = await sEng.dispatcher.startTask({ taskId: t.taskId });
+    await sEng.engine.applyReport({
+      taskId: t.taskId,
+      attemptId: startRes.attemptId,
+      adapterEventId: "ev-red-1",
+      report: {
+        state: "progress",
+        message: "step Bearer tok_leak_1",
+        summary: "sum ghp_1234567890abcdefghij1234",
+      },
+    });
+    await sEng.engine.applyReport({
+      taskId: t.taskId,
+      attemptId: startRes.attemptId,
+      adapterEventId: "ev-red-2",
+      report: {
+        state: "waiting",
+        attention: {
+          kind: "input",
+          prompt: "enter key (not sk-1234567890abcdef12)",
+          summary: "csrfToken: csrf-secret-xyz",
+        },
+      },
+    });
+    const evRows = sEng.store.read((db) => db.prepare("SELECT payload_json FROM events WHERE task_id = ?").all(t.taskId));
+    const attRows = sEng.store.read((db) => db.prepare("SELECT prompt FROM attention WHERE task_id = ?").all(t.taskId));
+    assert.doesNotMatch(JSON.stringify(evRows), /tok_leak_1|ghp_1234/);
+    assert.doesNotMatch(JSON.stringify(attRows), /sk-1234|csrf-secret-xyz/);
+    assert.ok(attRows[0].prompt.includes("[redacted]"));
+  } finally {
+    sEng.store.close();
   }
 });

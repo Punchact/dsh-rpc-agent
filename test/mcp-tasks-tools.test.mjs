@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { TASK_TOOLS, callTool, listTools, resetBridgeDefaults } from "../bin/dsh-rpc-mcp.mjs";
+import { TASK_TOOLS, callTool, listTools, resetBridgeDefaults, validateToolArgs } from "../bin/dsh-rpc-mcp.mjs";
 
 function withMockRpc(responder, fn) {
   const prevFetch = globalThis.fetch;
@@ -191,6 +191,37 @@ test("MCP validates task/session inputs upfront and sanitizes adapter errors", a
       const probeErr = await callTool("dsh_agents_probe", { agent_id: "ag-ag" });
       assert.equal(probeErr.isError, true);
       assert.doesNotMatch(probeErr.content[0].text, /4035|secret_leak_xyz/);
+
+      // W7 #6: generic schema validation rejects unknown keys, string limit, array for string field
+      const beforeW7 = calls.length;
+      const unknownField = await callTool("dsh_tasks_submit", {
+        workspace_id: "local",
+        unknown_extra: 1,
+      });
+      assert.equal(unknownField.isError, true);
+      assert.match(unknownField.content[0].text, /invalid arguments: unknown_extra/);
+
+      const stringLimit = await callTool("dsh_tasks_list", { limit: "10" });
+      assert.equal(stringLimit.isError, true);
+      assert.match(stringLimit.content[0].text, /invalid arguments: limit/);
+
+      const arrayCwd = await callTool("dsh_sessions", { cwd: ["bad"] });
+      assert.equal(arrayCwd.isError, true);
+      assert.match(arrayCwd.content[0].text, /invalid arguments: cwd/);
+
+      assert.equal(calls.length, beforeW7);
+
+      // Permissive schema without `additionalProperties: false` allows unknown keys
+      const legacySchema = {
+        type: "object",
+        properties: { prompt: { type: "string" } },
+        required: ["prompt"],
+      };
+      assert.equal(validateToolArgs(legacySchema, { prompt: "hello", extraField: true }), null);
+      assert.match(
+        validateToolArgs(legacySchema, { extraField: true }),
+        /invalid arguments: prompt — `prompt` is required/,
+      );
     },
   );
 });

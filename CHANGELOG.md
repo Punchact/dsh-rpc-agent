@@ -25,7 +25,7 @@
 
 ### 修复
 
-- `scripts.test` 新增并接入 19 个任务中心与 CLI/适配器测试套件（全链 35 个测试文件、337 例，本机 337/337 通过；CI 结果见 PR #30），并更新 `catalog.smoke.mjs` 校验 29 个 RPC 方法。
+- `scripts.test` 新增并接入 19 个任务中心与 CLI/适配器测试套件（全链 36 个测试文件、341 例，本机 341/341 通过；CI 结果见 PR #30），并更新 `catalog.smoke.mjs` 校验 29 个 RPC 方法。
 - `dispatch.mjs` 修复了租约到期回收与原子 `maxConcurrent` 门控竞态，防止同一写事务之外并发超发或将任务卡死在 `dispatching` / `in_flight`。
 - **取消确认后立刻收口**：适配器回报 `confirmedStopped: true`（DSH 会话真停了、Antigravity 回执里含该 cascadeId）时，同一次出箱排水内把任务从 `cancel_requested` 推进到 `cancelled` 并写 `cancel.confirmed`；此前只把 effect 标完成，任务会悬在 `cancel_requested` 等一个已停会话永远不会发出的事件。Codex 的 `turn/interrupt` 只算受理，故不设该标志。
 - **幂等键不再掩盖改过的请求**：`cancel` / `resolve` 的重放分支会比较请求意图（取消原因；处置结论 + 证据引用），同键异载荷抛 `STATE_CONFLICT`（`reason: "idempotency_payload_mismatch"`）。`expectedStateVersion` 属并发护栏、重试时本就会变，不参与比较。
@@ -36,7 +36,8 @@
   - 原始适配器异常不再进账本或回执：新增 `sanitizeAdapterFailure`，把任意异常收敛为固定文案 + 短标识码（`code`/`kind`/`phase`/`httpStatus`）并附**白名单 reason**（如 `binary_not_found`、`no_alive_hub`）的可操作文案；未命中白名单的 reason 一律丢弃，原文只进 `logger.debug`。Antigravity 传输加 `redirect: "error"`、请求超时与 1 MB 响应体上限。
   - Codex stdio 加边界：单帧 4 MiB 上限（超限判协议错并关闭）、JSON 帧必须是非数组对象、事件队列上限 500（丢最旧并计 `droppedEvents`，由 `events()` 带出）、stderr 只保留尾部 4096 字符。
   - CLI 与 MCP 入口补齐参数校验：`submit.input` 必须是对象、`list.limit` 1..200、`dispatch`/`pump` 的 `max_steps` 1..1000、标识符必须为非空字符串、数字参数按安全整数与范围校验、JSON 语法失败不进入 RPC。
-- **测试与文档口径校正**：`scripts.test` 全链 35 个测试文件、**337 例**；`docs/design.md` 的 §7 历史快照后补了「现行口径（2026-11-19）」注，注明 `methods 41 → 85`、`client 6 → 8`、`edge 24 项但本机 23/24`（第 21 项 `create without a cwd` 因宿主返回 `cwd: null` 失败，属既有行为，非本 PR 引入）。
+  - **安全复评（t3b）后的二次收口**：适配器失败日志默认只记 `taskId/operationId/attemptId/code/reason/kind`，原始文本要 `tasksAdapterDebugDetail: true` 才输出且先脱敏截断（512 字符）；新增 `lib/adapters/redact.mjs`，`Bearer` / `ghp_` / `sk-` / csrf 形态在适配器输出与账本落库前统一替换为 `[redacted]`；Codex 帧改严格校验（非对象、错误 `jsonrpc`、非法 `id`/`params`、带 `id` 的未知 method 一律 `failProtocol`），stdout/stderr 用 `StringDecoder` 增量解码，待审批 map 上限 200 并暴露 `droppedApprovals`；MCP `callTool` 在分发前按 `inputSchema` 校验必填项/类型/枚举/范围/未知键。
+- **测试与文档口径校正**：`scripts.test` 全链 36 个测试文件、**341 例**；`docs/design.md` 的 §7 历史快照后补了「现行口径（2026-11-19）」注，注明 `methods 41 → 85`、`client 6 → 8`、`edge 24 项但本机 23/24`（第 21 项 `create without a cwd` 因宿主返回 `cwd: null` 失败，属既有行为，非本 PR 引入）。
 
 ### 行为变化
 

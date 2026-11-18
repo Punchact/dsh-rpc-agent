@@ -134,6 +134,9 @@ export function apply(ctx, input = {}) {
         adapters,
         maxConcurrent: config.tasksMaxConcurrent,
         logger: log,
+        // Raw adapter text stays out of the log unless an operator opts in; the
+        // ledger and the tool replies always carry the curated reason instead.
+        debugRawAdapterErrors: config.tasksAdapterDebugDetail === true,
       });
 
       const drainTimer = setInterval(() => {

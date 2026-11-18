@@ -605,3 +605,11 @@ compression: gzip
 2. **失败信息按「固定文案 + 白名单 reason」发布**。直接静默会让排障归零；直接透传异常会泄漏本机信息。折中是 `sanitizeAdapterFailure`：分类文案只有三句（`unavailable` / `timeout` / `rejected`），可操作细节通过 `ADAPTER_REASON_MESSAGES` 的 17 个白名单键发布；未命中白名单的 reason（含任何带路径或空格的 prose）一律丢弃。白名单是代码变更点，因此适配器无法把任意文本塞进回执。
 3. **stdio 必须有界**。Codex 适配器把单帧限制在 4 MiB（超限即判协议错并关闭会话）、要求 JSON 帧是非数组对象、事件队列上限 500（丢最旧并计 `droppedEvents`）、stderr 只保留尾部 4096 字符——否则一个不合作的子进程能把插件的内存与日志撑爆。
 4. **入口校验按声明执行**。CLI 与 MCP 的 schema 声明与运行期校验必须一致：数字走安全整数与范围校验、JSON 语法失败在进入 RPC 前失败、标识符要求非空字符串。校验失败是 `validationFailed`，不是把脏参数交给账本。
+
+## 36. 决策 0.9.0-i：可观测性与净化的边界
+
+- **原始异常不进普通日志**：适配器失败只记录 `taskId / operationId / attemptId / code / reason / kind`。原始文本需要诊断时，由操作者显式打开 `tasksAdapterDebugDetail`，此时才以 `[raw]` 前缀输出，且先经 `redactSecrets` 并截断到 512 字符。理由：日志常被复制到别处，凭据不该跟着走。
+- **正常输出也要净化**：不止异常 —— DSH 适配器的 `status.reason`、`turn/end` 的 `reason.message`、`tool/result` 的 `error/detail`、审批的 `prompt/summary` 在进入账本前都过 `redactSecrets`（上限 2000 字符）；`applyReport` 落库前再兜一次，避免其它适配器绕过。
+- **严格协议比宽容协议安全**：Codex 帧的非对象值、错误 `jsonrpc`、非法 `id`/`params`、带 `id` 的未知 method 一律 `failProtocol` 关会话；无 `id` 的未知通知只计数（`unknownMethods`）。UTF-8 用 `StringDecoder` 增量解码，避免 chunk 边界拆坏多字节字符。
+- **入口自己校验**：MCP 的 `callTool` 在分发前按已发布的 `inputSchema` 校验必填项、类型、枚举、范围与未知键（`additionalProperties: false` 时），不指望客户端替我们守 schema。
+- **已知残留（如实记）**：Antigravity 的 `runtimeLocator` 与 `probe()` 会带本机 `httpPort` 与 hub 版本 —— 这是本地运行标识，不含 CSRF token，但确实暴露端口与主机元数据；「取消成功」必须看状态机证据（`RUNNING → CANCELING → IDLE` + `EXECUTOR_TERMINATION_REASON_USER_CANCELED`），HTTP 200 不算。
