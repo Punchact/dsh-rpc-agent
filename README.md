@@ -151,7 +151,7 @@ Cursor / Codex 用配置文件等价写法（Windows 下 JSON 里的反斜杠要
 
 走本地克隆那条路线时，把路径换成 `<path-to-your-clone>\bin\dsh-rpc-mcp.mjs`。本文余下示例写 `node bin/...`，等价于"当前目录位于包内时执行"。
 
-暴露 **9 个工具**：
+暴露 **10 个工具**：
 
 | 工具 | 用途 |
 | --- | --- |
@@ -159,6 +159,7 @@ Cursor / Codex 用配置文件等价写法（Windows 下 JSON 里的反斜杠要
 | `dsh_wait` | 等该会话这一轮结束并取结果 |
 | `dsh_cancel` | 中断正在跑的轮次 |
 | `dsh_sessions` | 列会话（可按目录过滤、按时间排序） |
+| `dsh_history` | 只读查看会话最近的事件窗口（工具调用、结果、轮次结束等），不激活 agent |
 | `dsh_workspaces` | 列工作区，或登记一个新工作区 |
 | `dsh_permissions` | 列权限预设（沙箱模式 + 审批策略） |
 | `dsh_status` | 确认端点与 token 可读 |
@@ -181,6 +182,15 @@ Cursor / Codex 用配置文件等价写法（Windows 下 JSON 里的反斜杠要
 `dsh_ask` 的结果第一行固定是 `session <id>`，随后是正文与一行 `— outcome: … · turn … · 5.2s` 元信息。参数名写错时报文很直接：给 `dsh_ask` 传 `text` 会得到 `` `prompt` is required ``，且 `isError: true`。
 
 MCP 服务器与被调用的 Harness 会话**不共享上下文**——给 `dsh_ask` 的 prompt 要自包含。
+
+当 `dsh_wait` 的回答不够看清 Harness 到底做了什么时，用只读的 `dsh_history` 回看最近执行过的工具和事件（不会激活会话 agent）：
+
+```js
+// 默认只看 tool/call、tool/result、turn/end；增量过大时把 limit 调高到最多 500
+dsh_history({ session_id: "session-xxxx", since: 42, limit: 100 })
+// 传 kinds: ["*"] 查看全部事件类型
+dsh_history({ session_id: "session-xxxx", kinds: ["*"] })
+```
 
 ### 粘性会话
 

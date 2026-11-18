@@ -7,7 +7,12 @@
 ### 新增
 
 - A trace 投影：`dsh_ask`、`dsh_wait` 与 CLI `ask`/`wait`（`--trace`）新增四档工具调用轨迹渲染（`none` / `errors` / `summary` / `full`，默认 `errors`，可通过 `config.traceDefault` 配置）；元信息行在非 `none` 且存在失败调用时附带 `(${m} errors)` 后缀；`trace: "full"` 附带结构化 `structuredContent`（含工具明细与 `outputTruncated`）；传入 `none` 可逐字节恢复既有输出。
-- B `dsh_history`：- TODO(S2..S6)
+- B `dsh_history`：
+  - 新增第 10 个 MCP 工具 `dsh_history`（配套纯格式化模块 `lib/history-format.mjs`），用于只读查看指定会话最近的事件窗口（工具调用、工具结果、轮次结束、审批与沙箱变化等），**不会激活**会话的 agent。
+  - 支持参数 `session_id`（必填）、`limit`（默认 40，上限 500）、`kinds`（默认 `["tool/call","tool/result","turn/end"]`，传 `["*"]` 取全部类型）、`since`（只保留 `seq > since`）、`max_chars`（`0` 表示不限，正数从最新记录起截断并置 `truncated: true`）。
+  - 输出包含摘要头、受展示预算约束的逐条事件文本（超预算时末尾提示 `… +N more (raise limit or max_chars)`）以及始终附带的 `structuredContent`。
+  - 增量边界：`since` 与 `kinds` 是在"最新 `limit` 条事件"的窗口内过滤，若增量超过 `limit` 条会静默不完整，需要大增量时须调高 `limit`（最高 500）；摘要头里的 `turn` 与 `running` 始终反映未过滤的整段窗口。`limit` 本身只是传给会话存储的窗口提示，不是硬上限——摘要头一律报告实际到达的事件条数。
+  - 混版诚实性：当桥连着的插件早于 0.8.1（不认 `since`/`kinds`/`max_chars`）时，回答不再打印 `filtered:` 行，而是改印 `note:` 说明"这些记录是未过滤、未截断的整段窗口，请升级插件或自行过滤"，并在 `structuredContent.note` 中同步同一句话。
 - C `structuredContent`：- TODO(S2..S6)
 - D `dsh_capabilities`：- TODO(S2..S6)
 - E 超时契约：- TODO(S2..S6)

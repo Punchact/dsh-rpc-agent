@@ -15,6 +15,7 @@ import { PLUGIN_VERSION } from "../lib/version.mjs";
 import { formatToolResult, formatToolError } from "../lib/mcp-format.mjs";
 import { createInflight } from "../lib/inflight.mjs";
 import { normalizeTraceLevel } from "../lib/trace-format.mjs";
+import { DEFAULT_HISTORY_KINDS, formatHistory } from "../lib/history-format.mjs";
 
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_INFO = { name: "dsh-rpc", version: PLUGIN_VERSION, title: "DeepSeek Harness bridge" };
@@ -36,7 +37,7 @@ const TOOLS = [
       "wait defaults to false: the call returns a handle (session_id + request_id) in milliseconds, and you collect the answer with " +
       'dsh_wait. Pass wait:true only when the task is known to finish quickly. The answer line starts with "outcome:" — read that, not ' +
       "the tool error flag, to learn what happened. A turn that is still running is NOT a failure: collect it with dsh_wait and never " +
-      "resend the prompt.",
+      "resend the prompt. Use dsh_history to inspect what tools and events actually ran in a session (read-only).",
     inputSchema: {
       type: "object",
       properties: {
@@ -210,12 +211,35 @@ const TOOLS = [
     },
   },
   {
+    name: "dsh_history",
+    title: "Read Harness session history",
+    description:
+      "Read the recent event window of a session: tool calls, tool results, turn ends, approvals and sandbox changes. " +
+      "Read-only — it never activates the session's agent. Use it when dsh_wait's answer is not enough to see what the " +
+      "Harness actually did. `limit` (default 40, max 500) is the window hint passed to the session store — it is " +
+      "not a hard cap, and the header always reports the window size that actually arrived. since/kinds filter " +
+      "inside that window, so a delta larger than the window is silently incomplete; raise `limit` when needed. " +
+      "`turn` and `running` describe the whole window, not the filtered subset; `max_chars: 0` is unlimited and a positive cap keeps the newest records that fit with `truncated: true`.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: { type: "string", description: "Session id, as printed by dsh_ask/dsh_wait ('session <id>')." },
+        limit: { type: "integer", minimum: 1, maximum: 500, description: "Window hint: how many of the newest events to ask the session store for (default 40). Not a hard cap — read the header for the size that arrived." },
+        kinds: { type: "array", items: { type: "string" }, description: 'Event types to keep (default ["tool/call","tool/result","turn/end"]); pass ["*"] for every type.' },
+        since: { type: "integer", minimum: 0, description: "Only events with seq > since (the cursor printed by dsh_ask/dsh_wait)." },
+        max_chars: { type: "integer", minimum: 0, maximum: 200000, description: "Cap the serialized records (0 = unlimited)." },
+      },
+      required: ["session_id"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "dsh_wait",
     title: "Wait for a Harness turn",
     description:
       "Block until the turn currently running on a session finishes, then return its text. This is the supported way to collect work after " +
       "a timeout or after dsh_ask with wait:false — do not resend the prompt. Pass the `since` cursor from the previous answer to get only " +
-      "what happened afterwards.",
+      "what happened afterwards. Use dsh_history to inspect the recent event window when the answer is not enough.",
     inputSchema: {
       type: "object",
       properties: {
@@ -252,7 +276,9 @@ const TOOLS = [
   {
     name: "dsh_status",
     title: "Harness bridge status",
-    description: "Report the bridge version, mounted endpoint, token source and any active runs.",
+    description:
+      "Report the bridge version, mounted endpoint, token source and any active runs. " +
+      "Use dsh_sessions and dsh_history to inspect sessions and their recent events.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
 ];
@@ -626,6 +652,45 @@ async function callTool(name, args, signal = undefined) {
             `${item.sessionId}  ${item.running ? "running" : "idle"}${item.blank ? ",blank" : ""}  ${item.cwd ?? ""}`,
         );
         return { content: [{ type: "text", text: lines.length > 0 ? lines.join("\n") : "(no sessions)" }] };
+      }
+
+      case "dsh_history": {
+        const sessionId = typeof args.session_id === "string" ? args.session_id.trim() : "";
+        if (!sessionId) {
+          return formatToolError("`session_id` is required", undefined, "call dsh_sessions() to find the session id");
+        }
+        const params = { sessionId };
+        if (args.limit !== undefined) params.limit = args.limit;
+        if (args.since !== undefined) params.since = args.since;
+        if (args.max_chars !== undefined) params.maxChars = args.max_chars;
+
+        let kinds;
+        if (args.kinds === undefined) {
+          kinds = DEFAULT_HISTORY_KINDS;
+        } else if (Array.isArray(args.kinds) && args.kinds.length === 1 && args.kinds[0] === "*") {
+          kinds = "*";
+        } else {
+          kinds = args.kinds;
+        }
+        params.kinds = kinds;
+
+        const payload = await call("dsh.sessions.history", params);
+        const since = Number.isInteger(args.since) ? args.since : null;
+        const formatted = formatHistory(payload, { since, kinds, requestedMaxChars: args.max_chars });
+        const parts = [formatted.header];
+        // A note means the plugin answered without honouring since/kinds: say so
+        // instead of printing a delta the caller would trust and be wrong about.
+        if (formatted.note) parts.push(`note: ${formatted.note}`);
+        if (formatted.empty) {
+          parts.push("records: 0 events in this window — the session may be new, or the filters dropped everything.");
+        } else {
+          parts.push(...formatted.lines);
+        }
+        return {
+          content: [{ type: "text", text: parts.join("\n") }],
+          isError: false,
+          structuredContent: formatted.structured,
+        };
       }
 
       case "dsh_wait": {

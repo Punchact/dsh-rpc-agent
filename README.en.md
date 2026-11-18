@@ -151,7 +151,7 @@ Cursor / Codex use the equivalent config form (backslashes in JSON must be escap
 
 On the local-checkout route, replace the path with `<path-to-your-clone>\bin\dsh-rpc-mcp.mjs`. The rest of this document writes `node bin/...`, which means "run from inside the package".
 
-**Nine tools** are exposed:
+**Ten tools** are exposed:
 
 | Tool | Purpose |
 | --- | --- |
@@ -159,6 +159,7 @@ On the local-checkout route, replace the path with `<path-to-your-clone>\bin\dsh
 | `dsh_wait` | Wait for this session's current turn and collect the result |
 | `dsh_cancel` | Cancel the turn that is running |
 | `dsh_sessions` | List sessions (filter by directory, sort by time) |
+| `dsh_history` | Read the recent event window of a session (tool calls, results, turn ends) without activating its agent |
 | `dsh_workspaces` | List workspaces, or register a new one |
 | `dsh_permissions` | List permission presets (sandbox mode + approval policy) |
 | `dsh_status` | Confirm the endpoint and token are readable |
@@ -181,6 +182,15 @@ Parameters are snake_case (the MCP convention), unlike the HTTP layer. Common `d
 The first line of a `dsh_ask` result is always `session <id>`, followed by the body and one `— outcome: … · turn … · 5.2s` meta line. Misspelled parameters produce a blunt message: passing `text` to `dsh_ask` yields `` `prompt` is required `` with `isError: true`.
 
 The MCP server and the Harness session it drives **do not share context** — a `dsh_ask` prompt must be self-contained.
+
+When `dsh_wait`'s answer is not enough to see what the Harness actually ran, use the read-only `dsh_history` tool to inspect recent tool calls and events without activating the session's agent:
+
+```js
+// Defaults to tool/call, tool/result, turn/end; raise limit (up to 500) for larger deltas
+dsh_history({ session_id: "session-xxxx", since: 42, limit: 100 })
+// Pass kinds: ["*"] for every event type
+dsh_history({ session_id: "session-xxxx", kinds: ["*"] })
+```
 
 ### Sticky sessions
 

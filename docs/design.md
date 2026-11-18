@@ -517,3 +517,14 @@ compression: gzip
 
 6. **为什么 `endedAt` 缺失时按轮次状态区分 `(running, Ns)` 与 `(unfinished)`**：0.8.1 之前写入的记录没有 `at`/`endedAt`（老插件、或本地 CLI 连旧插件），此时一律渲染成 `running` 会把「已经跑完但没有计时」谎报成「还在跑」。因此渲染器接收轮次 `status`：`completed` / `idle` 的轮次里，缺 `endedAt` 的工具标注 `(unfinished)`，且 `errors` 档在轮次已结束时不输出 `last:` 在途行；只有轮次未结束（`timeout` / `waiting-approval` 等）才给出 `(running, Ns)` 或（连 `at` 都缺时）`(running)`。
 
+## 26. 决策 0.8.1-g：dsh_history 只读窗口与三段语义
+
+> 2026-11-18 S3 实现决定（`lib/history-format.mjs`、`bin/dsh-rpc-mcp.mjs`）。
+
+1. **为什么 `dsh_history` 严格只读且不激活 agent**：查看"DSH 刚才到底执行了哪些工具、为什么停住或是否被沙箱挡住"是典型的事后排障或旁路观察需求；如果走 `prompt` 或任何会 `resolveAgent` 的路径，不仅会唤醒冷会话、占用写槽或污染上下文，还可能与正在运行的轮次竞争。底层 `dsh.sessions.history` 只拉取 `sessionController.follow` 的首帧快照并立即关闭迭代器，完全不触发 agent admission，因此可以安全地在任意时刻反复调用。
+2. **为什么 `since` 与 `kinds` 在"最新 `limit` 条"窗口内过滤（以及为什么增量可能不完整）**：宿主的 `follow` 接口只接受 `maxMessages: limit` 作为窗口**提示**，不提供按历史 seq 向后翻页的随机读接口。因此 `since` / `kinds` 只能对这最新 `limit` 条做窗口内过滤；若某次调用之后新产生了超过 `limit` 条事件（例如默认 40 条而一轮执行了 80 次工具调用），旧的那一段增量就会落在窗口之外而**静默缺失**——文档与工具说明明确要求大增量时将 `limit` 调高（上限 500），不假装拥有全量游标分页。**实测修正（2026-11-18）**：连本机运行的 0.7.7 插件实测（33 条事件、`limit: 20`）仍返回整个缓冲，证明 `maxMessages` 只是提示、不是硬上限；因此工具说明写明"`limit` 不是硬上限，摘要头一律报告实际到达的条数"，不给调用方一个它并不拥有的保证。
+3. **为什么 `turn` 与 `running` 来自未过滤窗口**：如果 `turn` 和 `running` 只按过滤后的 `records` 计算，当用户只请求 `kinds: ["tool/call"]` 或 `since` 之后暂时没有新 `turn/start` 时，正在运行中的会话就会被错判成 `turn 0 · idle`，从而误导上层重新派发或停止等待。因此摘要头里的 `turn`、`running` 与 `window <count> events` 永远描述整个未过滤窗口，第二行 `filtered: <K> of <count> kept (...)` 单独交代过滤缩减了多少条。
+4. **为什么 `structuredContent` 始终附带**：与 `dsh_ask` / `dsh_wait` 在长答案之外按 `trace: "full"` 才附带结构化工具列表不同，`dsh_history` 本身就是结构化事件检查工具——调用它的目的往往就是精确比对 `seq`、`cursor`、`hasMore`、`truncated` 或工具调用的原始参数/结果。保持文本投影受 `maxLines` / `maxChars` 行字双预算约束以保护上下文窗口，同时在 `structuredContent` 中始终透传完整的 `{ sessionId, cursor, turn, running, hasMore, messageCount, records, truncated? }`（不受渲染预算裁切，仅受 RPC `max_chars` 约束），让机器消费与人眼阅读各自拿到最合适的形态。
+5. **为什么它要自己检测"插件没听我的"**：桥与插件是两个可独立升级的包——MCP 侧的 0.8.1 完全可以连着一个 0.7.x 插件（本机正是如此）。老插件的 `dsh.sessions.history` 忽略 `since`/`kinds`/`maxChars`，但返回结构一模一样、也没有版本字段可读。若照常打印 `filtered: …`，调用方会以为拿到的是增量，实际拿到的是整段窗口——这是把所有调试建立在错误前提上的那类错误。因此格式化器在数据里自证过滤是否生效：出现 `seq <= since` 的记录即说明 `since` 没生效，出现 `kinds` 之外的记录即说明 `kinds` 没生效，未带 `truncated` 且记录序列化长度已超过请求的 `max_chars` 即说明上限没生效；三者任一成立就**撤掉过滤行、改印 `note:`**，并把这些记录照常显示（掩盖它们只是在另一个方向上撒谎）。`structuredContent.note` 同步给出同一句话，供机器消费方判断。
+
+
