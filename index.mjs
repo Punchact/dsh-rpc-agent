@@ -9,7 +9,11 @@
 //    posture.
 //  * Fail loud on a bad config, stay inert (but loaded) when disabled.
 
-import { endpointPath, loadOrCreateToken, tokenPath, writeEndpoint } from "./lib/auth.mjs";
+import { join } from "node:path";
+
+import { createAntigravityAdapter } from "./lib/adapters/antigravity.mjs";
+import { createCodexAdapter } from "./lib/adapters/codex.mjs";
+import { dshHome, endpointPath, loadOrCreateToken, tokenPath, writeEndpoint } from "./lib/auth.mjs";
 import { createApprovalState } from "./lib/approval-state.mjs";
 import { createApprovalGate } from "./lib/approvals.mjs";
 import { MAX_WAIT_SLICE_MS, MIN_WAIT_SLICE_MS, resolveConfig } from "./lib/config.mjs";
@@ -18,7 +22,8 @@ import { createMethods } from "./lib/methods.mjs";
 import { isOwnedSession, useOwnedState } from "./lib/owned.mjs";
 import { createPendingStore } from "./lib/pending.mjs";
 import { createStats } from "./lib/stats.mjs";
-import { seedBaselineEntities } from "./lib/tasks/engine.mjs";
+import { createDispatcher } from "./lib/tasks/dispatch.mjs";
+import { createTaskEngine, seedBaselineEntities } from "./lib/tasks/engine.mjs";
 import { openStore } from "./lib/tasks/store.mjs";
 import { PLUGIN_NAME, PLUGIN_VERSION } from "./lib/version.mjs";
 
@@ -70,24 +75,101 @@ export function apply(ctx, input = {}) {
     approvalState.prune();
   }
 
-  const taskStore = config.tasksDbPath ? openStore({ path: config.tasksDbPath }) : null;
-  if (taskStore) {
-    // A DSH install has exactly one human operator. Seed the identity rows the task
-    // API needs so `tasksDbPath` works without a separate onboarding step; real
-    // accounts and scopes land with the identity layer (W3).
-    seedBaselineEntities(taskStore, {
-      principal: { principalId: "local-operator", kind: "operator" },
-      workspace: { workspaceId: "local", rootPath: config.defaultCwd ?? process.cwd() },
-    }).catch((err) => {
-      ctx.logger?.warn?.(`dsh-rpc: task bootstrap seeding failed: ${err?.message ?? String(err)}`);
-    });
-  }
-  if (taskStore && typeof ctx.effect === "function") {
-    ctx.effect(() => () => taskStore.close(), "dsh-rpc.task-store");
+  let taskStore = null;
+  let taskEngine = null;
+  let taskDispatcher = null;
+  let adapters = null;
+
+  if (config.tasksEnabled) {
+    try {
+      const dbPath = config.tasksDbPath || join(dshHome(), "storages", "task-center", "tasks.db");
+      taskStore = openStore({ path: dbPath });
+
+      // A DSH install has one human operator; seed baseline identity + local workspace
+      // so preview/submit work immediately without a separate onboarding step.
+      seedBaselineEntities(taskStore, {
+        principal: { principalId: "local-operator", kind: "operator" },
+        workspace: { workspaceId: "local", rootPath: config.defaultCwd || process.cwd() },
+      }).catch((err) => {
+        ctx.logger?.warn?.(`[dsh-rpc] task bootstrap seeding failed: ${err?.message ?? String(err)}`);
+      });
+
+      const factories = ctx?.taskAdapterFactories ??
+        ctx?.get?.("taskAdapterFactories") ?? {
+          antigravity: createAntigravityAdapter,
+          codex: createCodexAdapter,
+        };
+      adapters = {};
+      const extKind = config.tasksExternalAdapter;
+      const extCfg = extKind !== "none" ? config.tasksAdapters?.[extKind] : null;
+      if (extKind !== "none" && extCfg && extCfg.enabled !== false) {
+        try {
+          const makeAdapter = factories?.[extKind];
+          if (typeof makeAdapter !== "function") {
+            throw new Error(`no adapter factory for "${extKind}"`);
+          }
+          adapters[extKind] = makeAdapter(extCfg);
+        } catch (err) {
+          log.warn?.(`[dsh-rpc] failed to initialize ${extKind} adapter: ${err?.message ?? String(err)}`);
+          adapters = {};
+        }
+      }
+
+      taskEngine = createTaskEngine(taskStore);
+      taskDispatcher = createDispatcher({
+        store: taskStore,
+        engine: taskEngine,
+        adapters,
+        maxConcurrent: config.tasksMaxConcurrent,
+      });
+
+      const drainTimer = setInterval(() => {
+        taskDispatcher.drainEffects({ limit: 50 }).catch(() => {});
+      }, 5_000);
+      drainTimer.unref?.();
+
+      const cleanupTasks = () => {
+        try {
+          clearInterval(drainTimer);
+        } catch {
+          // ignore timer cleanup errors
+        }
+        try {
+          taskStore?.close?.();
+        } catch {
+          // ignore store close errors
+        }
+      };
+
+      if (typeof ctx.effect === "function") {
+        ctx.effect(() => cleanupTasks, "dsh-rpc.task-hub");
+      } else if (typeof ctx.on === "function") {
+        ctx.on("dispose", cleanupTasks);
+      }
+    } catch (err) {
+      log.warn?.(`[dsh-rpc] task center disabled due to startup error: ${err?.message ?? String(err)}`);
+      try {
+        taskStore?.close?.();
+      } catch {
+        // best effort
+      }
+      taskStore = null;
+      taskEngine = null;
+      taskDispatcher = null;
+      adapters = null;
+    }
   }
 
   const methods = createMethods(
-    { sessionController: ctx.sessionController, webServer: ctx.webServer, approvals, taskStore },
+    {
+      sessionController: ctx.sessionController,
+      webServer: ctx.webServer,
+      approvals,
+      taskStore,
+      taskEngine,
+      taskDispatcher,
+      adapters,
+    },
     config,
     ctx,
     state,

@@ -346,3 +346,51 @@ test("RPC wiring exposes dsh.tasks.dispatch/pump and config validates tasksAdapt
     store.close();
   }
 });
+
+test("startTask enforces the maxConcurrent gate without leaving tasks in dispatching", async () => {
+  const adapter = makeFakeAdapter();
+  const s1 = await setupWithAdapter(adapter);
+  try {
+    const capped = createDispatcher({
+      store: s1.store,
+      engine: s1.engine,
+      adapters: { fake: adapter },
+      maxConcurrent: 1,
+    });
+    const t1 = await s1.engine.submit({
+      idempotencyKey: "gate-1",
+      capabilityRevisionId: "cap-1",
+      workspaceId: "ws-1",
+      agentId: "ag-1",
+    });
+    const t2 = await s1.engine.submit({
+      idempotencyKey: "gate-2",
+      capabilityRevisionId: "cap-1",
+      workspaceId: "ws-1",
+      agentId: "ag-1",
+    });
+
+    await capped.startTask({ taskId: t1.taskId });
+    await assert.rejects(
+      () => capped.startTask({ taskId: t2.taskId }),
+      (err) => err?.data?.reason === "max_concurrent" && err?.data?.maxConcurrent === 1,
+    );
+
+    const t2Detail = await s1.engine.get({ taskId: t2.taskId });
+    assert.equal(t2Detail.status, "queued");
+    assert.equal(t2Detail.stateVersion, 1);
+    assert.equal(adapter.calls.start, 1);
+
+    const wider = createDispatcher({
+      store: s1.store,
+      engine: s1.engine,
+      adapters: { fake: adapter },
+      maxConcurrent: 2,
+    });
+    const started2 = await wider.startTask({ taskId: t2.taskId });
+    assert.equal(started2.status, "running");
+    assert.equal(adapter.calls.start, 2);
+  } finally {
+    s1.store.close();
+  }
+});
