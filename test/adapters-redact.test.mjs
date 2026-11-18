@@ -71,6 +71,22 @@ test("redactSecrets covers Basic auth, cookies, URL userinfo, GitHub PATs and AW
   assert.ok(redacted.includes("registry.example/v1"));
 });
 
+test("redactSecrets masks every cookie pair without breaking the surrounding JSON", () => {
+  // The t3e review caught this: masking pairs used to rebuild the header from
+  // captured groups, which dropped the opening quote of a JSON key and left
+  // {"Cookie":"a=[redacted]... unparseable. Only values may change.
+  const input = JSON.stringify({ Cookie: "a=1; b=2", next: "ok" });
+  const redacted = redactSecrets(input);
+  const parsed = JSON.parse(redacted);
+  assert.equal(parsed.next, "ok");
+  assert.doesNotMatch(redacted, /a=1|b=2/);
+  assert.match(parsed.Cookie, /^a=\[redacted\]; b=\[redacted\]$/);
+
+  const quoted = redactSecrets('Cookie: "sid=deadbeef; theme=dark"');
+  assert.doesNotMatch(quoted, /deadbeef|theme=dark/);
+  assert.ok(quoted.includes('"'), "the quoting of the header value survives");
+});
+
 test("redactDeep leaves token budgets alone and only redacts string credentials", () => {
   const out = redactDeep({
     maxTokens: 4096,

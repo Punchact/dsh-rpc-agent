@@ -76,7 +76,7 @@ http://127.0.0.1:<port>/dsh-rpc   ->   DSH agent
 - **会自述**：`dsh_capabilities` 给出八节能力快照（运行时、权限档位、可调工具、MCP 前缀、会话、工作区、插件），做计划前不必猜本机有什么。
 - **不假装知道**：外层客户端有更短的超时上限时，本桥只如实说明并建议分段轮询，不让长任务看起来像失败。
 - **可托管外部 agent 任务（任务中心，`tasksEnabled` 默认关闭）**：内置 15 表 SQLite 账本、11 态状态机与能力卡/只读探测，统一调度 DSH 自身、Antigravity 与 Codex App Server，详情见 [任务中心手册](./docs/task-center.md)。
-- **关键行为有回归用例守着**：36 个测试文件共 345 例 + catalog smoke（本机实测 345/345 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
+- **关键行为有回归用例守着**：36 个测试文件共 346 例 + catalog smoke（本机实测 346/346 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
 
 ## 安装与更新
 
@@ -749,7 +749,7 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 36 个测试文件，共 345 例，另有 catalog smoke；无需运行中的 Harness
+npm test                       # 36 个测试文件，共 346 例，另有 catalog smoke；无需运行中的 Harness
 node test/host.test.mjs        # 1 例：真实 WebServer 集成（需先 npm ci）
 node test/e2e.mjs              # 14 例：端到端，打真实 Harness（--cwd 只接受绝对路径）
 node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harness
@@ -776,7 +776,7 @@ node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harnes
 | `tasks-preview` | 3 | 一次性预览绑定、摘要校验、TTL 过期、主体隔离，以及按能力卡形状给出 `degraded[]` |
 | `tasks-reconcile` | 4 | `needs_reconcile` 收口、未结副作用关闭、requeue 解锁 |
 | `adapters-base` | 4 | 七操作契约校验、六态上报校验、失败净化与白名单 reason |
-| `adapters-redact` | 4 | 凭据形态脱敏（Bearer/Basic/Cookie/userinfo/PAT/AK）、截断、深度上限与预算数字不误伤 |
+| `adapters-redact` | 5 | 凭据形态脱敏（Bearer/Basic/Cookie/userinfo/PAT/AK）、Cookie 逐对且不破坏 JSON、截断、深度上限与预算数字不误伤 |
 | `adapters-antigravity` | 3 | 项目归属、模型占位符、`ForceStopCascadeTree`、响应上限与不可用失败 |
 | `adapters-codex` | 5 | `codex.exe` 发现、`stdio://` 握手、帧形状与上限、事件队列与 `turn/interrupt` |
 | `adapters-dsh` | 7 | DSH 基准适配器七操作映射、诚实停机、`resultValid: false` 与派发联调 |
@@ -811,7 +811,7 @@ node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harnes
 - **边界**检查协议层：batch、通知、id 形态、鉴权头、超大 body（应得真正的 413 而不是断连）、参数注入防护、超时钳制、并发 ask、`limit` 语义。
 - **端口漂移**（手工）：把 `endpoint.json` 的 url 改成死端口再跑 `dsh-rpc ping`，应得退出码 3 与含 `nothing is listening`、`pid`、`health --wait` 的可读报错。
 
-本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 36 个测试文件 **345/345** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.mjs` 输出 `methods: 29` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
+本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 36 个测试文件 **346/346** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.mjs` 输出 `methods: 29` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
 
 ## 许可证
 
