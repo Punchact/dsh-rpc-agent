@@ -504,3 +504,16 @@ compression: gzip
 3. **③ 对 D（`dsh_capabilities`）的建议**：
    - **保留全节结构（`plugin` / `model` / `permissions` / `tools` / `mcp` / `plugins` / `env` / `workspaces`），每节独立按上述阶梯探测并在不可达时输出 `unavailable` + `reason`**，不要在设计期直接砍成三节。
    - 理由：静态源码确认 `ctx.get("tools")?.schemas(agent?)` 与 `ctx.get("agents")` 均在 Host 存在，且 `dsh-skill-mcp-panel` 已验证了 `tools.schemas()` 模式；按节独立降级意味着即便在精简 Host 或沙箱环境下 `tools` 不可达，也会自动呈现出「核心节正常 + `tools`/`mcp`/`plugins` 为 `unavailable`」的诚实形态，兼顾上限与兜底。S5 阶段需在预演安装时对 `ctx.get("tools")?.schemas(agent)` 与 `ctx.get("mcpManager")` 做一次 live Host 运行验证。
+
+## 25. 决策 0.8.1-f：trace 三档渲染 + since 的双计数
+
+> 2026-11-18 S2 实现决定（`lib/trace-format.mjs`、`lib/mcp-format.mjs`、`lib/config.mjs`、`bin/dsh-rpc-mcp.mjs`、`bin/dsh-rpc.mjs`）。
+
+1. **为什么默认档是 `errors` 而不是 `summary` 或 `none`**：一轮成功跑完十几次工具调用时，全部回显只会平白膨胀上层代理的上下文窗口（token 成本与噪音），`none` 又会让工具悄悄失败或卡在某个耗时工具上时上层毫不知情。`errors` 在「全成功时不加一行、有失败时立刻浮出最近 3 条报错（`errors: M of N tool calls`）、无失败但仍在跑时给出最后一条在途工具及已跑秒数」之间取得最低成本的可见性平衡。
+2. **为什么 `since` 增量下仍保留整轮总计数**：当调用方用 `since` 游标轮询 `dsh_wait` 时，若 `total` 与 `errors` 也跟着切片只算增量，调用方很容易把"这一片没有报错"误认为"整轮没有报错"，或者把局部计数当成总工具调用数。因此 `lines` 与 `structured` 只投影 `seq > since` 的新增工具调用（并附上 `+<count> since cursor <cursor>` 标明切片范围），而 `total`、`errors`、`running` 与 meta 行的 `${n} tool calls (${m} errors)` 始终统计整轮。
+3. **为什么 `summary` 预算定在 20 行 / 1200 字符**：单行摘要约 40–60 字符，20 行恰好覆盖常见轮次并保留大约半屏的扫描密度；1200 字符上限（约 300–400 tokens）防止异常长的参数/报错细节在大量调用时把回答正文淹没，超限后截断并提示调用 `dsh_history` 取完整窗口。
+4. **为什么只在 `full` 档输出 `structuredContent`**：`structuredContent` 会把每条工具的完整参数对象与截断后输出以结构化 JSON 随 MCP 响应发往客户端，载荷显著高于纯文本摘要；只在显式请求 `trace: "full"`（或配置 `traceDefault: "full"`）时才附带它，且显式构造白名单字段（省略 `undefined` 键，不 spread `result`），避免在默认路径上向不消费结构化载荷的客户端发送冗余字节。
+5. **为什么所有档位都允许切回 `none`**：无论是按请求传 `trace: "none"` / `--trace none`，还是通过配置 `traceDefault: "none"` 全局关闭，都能在发现对端 MCP 客户端或既有流水线对新增文本块敏感时零代价退回 0.8.1 之前的字节级一致输出。
+
+6. **为什么 `endedAt` 缺失时按轮次状态区分 `(running, Ns)` 与 `(unfinished)`**：0.8.1 之前写入的记录没有 `at`/`endedAt`（老插件、或本地 CLI 连旧插件），此时一律渲染成 `running` 会把「已经跑完但没有计时」谎报成「还在跑」。因此渲染器接收轮次 `status`：`completed` / `idle` 的轮次里，缺 `endedAt` 的工具标注 `(unfinished)`，且 `errors` 档在轮次已结束时不输出 `last:` 在途行；只有轮次未结束（`timeout` / `waiting-approval` 等）才给出 `(running, Ns)` 或（连 `at` 都缺时）`(running)`。
+

@@ -319,3 +319,120 @@ test("a turn waiting for an approval hands the caller the approval, not a timeou
   assert.match(text, /command: Set-Content -Path C:\/Users\/Andy\/proof\.txt/);
   assert.match(text, /next: answer it with dsh_approvals_resolve\(/);
 });
+
+test("default errors trace adds (M errors) suffix and trace block before note/reason, while trace: none is byte-identical", () => {
+  const input = {
+    sessionId: "session-t",
+    turn: 4,
+    status: "aborted",
+    text: "partial answer",
+    reason: { kind: "aborted", reason: { kind: "user" } },
+    durationMs: 2500,
+    cursor: 18,
+    tools: [
+      { callId: "c1", name: "read", arguments: { path: "a.ts" }, ok: true, seq: 10, at: 100, endedAt: 105 },
+      {
+        callId: "c2",
+        name: "pwsh",
+        arguments: { command: "npm test" },
+        ok: false,
+        error: "exit 1",
+        output: "test failed",
+        seq: 12,
+        at: 200,
+        endedAt: 1700,
+      },
+    ],
+  };
+
+  const defaultResult = formatToolResult(input);
+  assert.equal(defaultResult.isError, false);
+  assert.equal("structuredContent" in defaultResult, false);
+  assert.deepEqual(
+    defaultResult.content.map((part) => part.text),
+    [
+      "session session-t",
+      "partial answer",
+      "— outcome: aborted · turn 4 · 2.5s · 2 tool calls (1 errors) · cursor 18",
+      'trace:\nerrors: 1 of 2 tool calls\n✗ pwsh "npm test" — exit 1',
+      "note: the turn was stopped (cause: user — the Host cannot tell a bridge cancel from someone pressing stop)",
+      'reason: {"kind":"aborted","reason":{"kind":"user"}}',
+      "next: do not resend blindly: ask the human whether to continue, then resend with the same session_id",
+    ],
+  );
+
+  const noneResult = formatToolResult(input, { trace: "none" });
+  assert.equal("structuredContent" in noneResult, false);
+  assert.deepEqual(noneResult, {
+    content: [
+      { type: "text", text: "session session-t" },
+      { type: "text", text: "partial answer" },
+      { type: "text", text: "— outcome: aborted · turn 4 · 2.5s · 2 tool calls · cursor 18" },
+      {
+        type: "text",
+        text: "note: the turn was stopped (cause: user — the Host cannot tell a bridge cancel from someone pressing stop)",
+      },
+      { type: "text", text: 'reason: {"kind":"aborted","reason":{"kind":"user"}}' },
+      {
+        type: "text",
+        text: "next: do not resend blindly: ask the human whether to continue, then resend with the same session_id",
+      },
+    ],
+    isError: false,
+  });
+});
+
+test("structuredContent is emitted only for trace: full and omits undefined/unknown keys", () => {
+  const resultInput = {
+    sessionId: "session-full",
+    turn: 2,
+    status: "completed",
+    text: "done",
+    cursor: 20,
+    extraField: "must-not-leak",
+    tools: [
+      {
+        callId: "c1",
+        name: "read",
+        arguments: { path: "README.md" },
+        output: "hello",
+        ok: true,
+        seq: 19,
+        at: 1000,
+        endedAt: 1003,
+      },
+    ],
+  };
+
+  const summary = formatToolResult(resultInput, { trace: "summary" });
+  assert.equal("structuredContent" in summary, false);
+  assert.match(textOf(summary), /trace:\n✓ read "README\.md" 3ms/);
+
+  const full = formatToolResult(resultInput, { trace: "full" });
+  assert.deepEqual(full.structuredContent, {
+    sessionId: "session-full",
+    turn: 2,
+    outcome: "completed",
+    cursor: 20,
+    tools: [
+      {
+        index: 0,
+        callId: "c1",
+        name: "read",
+        ok: true,
+        arguments: { path: "README.md" },
+        output: "hello",
+        outputTruncated: false,
+        isError: false,
+        error: null,
+        seq: 19,
+        at: 1000,
+        endedAt: 1003,
+        elapsedMs: 3,
+      },
+    ],
+  });
+  assert.equal("sliceMs" in full.structuredContent, false);
+  assert.equal("requestedMs" in full.structuredContent, false);
+  assert.equal("extraField" in full.structuredContent, false);
+});

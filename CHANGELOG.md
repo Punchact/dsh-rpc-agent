@@ -6,7 +6,7 @@
 
 ### 新增
 
-- A trace 投影：- TODO(S2..S6)
+- A trace 投影：`dsh_ask`、`dsh_wait` 与 CLI `ask`/`wait`（`--trace`）新增四档工具调用轨迹渲染（`none` / `errors` / `summary` / `full`，默认 `errors`，可通过 `config.traceDefault` 配置）；元信息行在非 `none` 且存在失败调用时附带 `(${m} errors)` 后缀；`trace: "full"` 附带结构化 `structuredContent`（含工具明细与 `outputTruncated`）；传入 `none` 可逐字节恢复既有输出。
 - B `dsh_history`：- TODO(S2..S6)
 - C `structuredContent`：- TODO(S2..S6)
 - D `dsh_capabilities`：- TODO(S2..S6)

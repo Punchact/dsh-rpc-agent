@@ -14,6 +14,7 @@ import { rpcCall, waitForTurn, WAIT_SLICE_MS } from "../lib/client.mjs";
 import { PLUGIN_VERSION } from "../lib/version.mjs";
 import { formatToolResult, formatToolError } from "../lib/mcp-format.mjs";
 import { createInflight } from "../lib/inflight.mjs";
+import { normalizeTraceLevel } from "../lib/trace-format.mjs";
 
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_INFO = { name: "dsh-rpc", version: PLUGIN_VERSION, title: "DeepSeek Harness bridge" };
@@ -111,6 +112,12 @@ const TOOLS = [
           minimum: 1000,
           maximum: 3600000,
           description: "How long to wait for the turn to finish. Defaults to the bridge's configured value (600000).",
+        },
+        trace: {
+          type: "string",
+          enum: ["none", "errors", "summary", "full"],
+          description:
+            "How much tool-call trace to render alongside the answer. Defaults to the bridge's traceDefault (errors). 'none' restores the pre-0.8.1 output.",
         },
       },
       required: ["prompt"],
@@ -220,6 +227,12 @@ const TOOLS = [
             "Return only what happened after this cursor (the `cursor` value from a previous result). Omit for the whole turn.",
         },
         timeout_ms: { type: "integer", minimum: 1000, maximum: 3600000 },
+        trace: {
+          type: "string",
+          enum: ["none", "errors", "summary", "full"],
+          description:
+            "How much tool-call trace to render alongside the answer. Defaults to the bridge's traceDefault (errors). 'none' restores the pre-0.8.1 output.",
+        },
       },
       required: ["session_id"],
       additionalProperties: false,
@@ -429,6 +442,7 @@ async function callTool(name, args, signal = undefined) {
   try {
     const defaults = await bridgeSettings();
     const turnDefault = Number.isInteger(defaults.defaultTimeoutMs) ? defaults.defaultTimeoutMs : DEFAULT_TURN_TIMEOUT_MS;
+    const traceDefault = normalizeTraceLevel(defaults.traceDefault, "errors");
     const hintOptions = { defaultTimeoutMs: turnDefault };
     switch (name) {
       case "dsh_ask": {
@@ -468,10 +482,15 @@ async function callTool(name, args, signal = undefined) {
         // The sticky registry is namespaced per client so two agents that happen to
         // work in the same directory do not inherit each other's session.
         params.namespace = clientNamespace;
+        const askFormatOptions = {
+          ...hintOptions,
+          trace: normalizeTraceLevel(args.trace, traceDefault),
+          since: null,
+        };
 
         if (params.wait === false) {
           const result = await call("dsh.sessions.ask", params, { timeoutMs: turnBudget(args.timeout_ms ?? turnDefault) });
-          return formatToolResult(result, hintOptions);
+          return formatToolResult(result, askFormatOptions);
         }
         // Blocking: ask for one slice, then keep waiting in slices. A single
         // request that stayed quiet past ~300 s would be cut by the transport.
@@ -492,10 +511,10 @@ async function callTool(name, args, signal = undefined) {
               text: waited.text || first.text,
               tools: waited.tools?.length > 0 ? waited.tools : first.tools,
               durationMs: (first.durationMs ?? 0) + (waited.waitedMs ?? 0),
-            }, hintOptions);
+            }, askFormatOptions);
           }
         }
-        return formatToolResult(first, hintOptions);
+        return formatToolResult(first, askFormatOptions);
       }
 
       case "dsh_workspaces": {
@@ -612,13 +631,18 @@ async function callTool(name, args, signal = undefined) {
       case "dsh_wait": {
         const sessionId = typeof args.session_id === "string" ? args.session_id.trim() : "";
         if (!sessionId) return formatToolError("`session_id` is required", undefined, "call dsh_sessions() to find the session id");
+        const since = Number.isInteger(args.since) ? args.since : null;
         // Sliced on purpose: see waitTurn(). One long request cannot survive
         // the transport's 300 s ceiling, and the answer would be lost with it.
         const result = await waitTurn(sessionId, {
           timeoutMs: Number.isInteger(args.timeout_ms) ? args.timeout_ms : turnDefault,
-          since: Number.isInteger(args.since) ? args.since : undefined,
+          since: since ?? undefined,
         });
-        return formatToolResult(result, hintOptions);
+        return formatToolResult(result, {
+          ...hintOptions,
+          trace: normalizeTraceLevel(args.trace, traceDefault),
+          since,
+        });
       }
 
       case "dsh_cancel": {
