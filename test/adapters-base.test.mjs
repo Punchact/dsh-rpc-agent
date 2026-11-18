@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   ADAPTER_FAILURE_MESSAGES,
   ADAPTER_OPERATIONS,
+  ADAPTER_REASON_MESSAGES,
   REPORT_STATES,
   reportOf,
   sanitizeAdapterFailure,
@@ -98,4 +99,35 @@ test("sanitizeAdapterFailure strips raw text, paths, URLs, and oversized/invalid
   assert.equal(dirtyIds.httpStatus, null);
   assert.equal(dirtyIds.message, ADAPTER_FAILURE_MESSAGES.rejected);
   assert.doesNotMatch(JSON.stringify(dirtyIds), /secret\.key|evil|Users/);
+});
+
+test("sanitizeAdapterFailure publishes an actionable whitelisted reason without transport detail", () => {
+  const missingBinary = sanitizeAdapterFailure({
+    code: "ADAPTER_UNAVAILABLE",
+    data: { reason: "binary_not_found", path: "C:\\Users\\Andy\\.codex\\.sandbox-bin\\codex.exe" },
+    message: "no readable codex.exe binary found at C:\\Users\\Andy\\.codex\\.sandbox-bin\\codex.exe",
+  });
+  assert.equal(missingBinary.reason, "binary_not_found");
+  assert.equal(missingBinary.code, "ADAPTER_UNAVAILABLE");
+  assert.equal(missingBinary.message, ADAPTER_REASON_MESSAGES.binary_not_found);
+  assert.match(missingBinary.message, /tasksAdapters\.<kind>\.binary/);
+  assert.doesNotMatch(JSON.stringify(missingBinary), /Users|codex\.exe|sandbox-bin/);
+
+  const noHub = sanitizeAdapterFailure({ code: "ADAPTER_UNAVAILABLE", data: { reason: "no_alive_hub" } });
+  assert.equal(noHub.reason, "no_alive_hub");
+  assert.equal(noHub.message, ADAPTER_REASON_MESSAGES.no_alive_hub);
+
+  // Unknown reasons stay dropped: a caller cannot smuggle prose (or a path) into a receipt.
+  const unknown = sanitizeAdapterFailure({
+    code: "ADAPTER_UNAVAILABLE",
+    data: { reason: "no_alive_hub at C:\\Users\\Andy\\.gemini" },
+  });
+  assert.equal(unknown.reason, null);
+  assert.equal(unknown.message, ADAPTER_FAILURE_MESSAGES.unavailable);
+
+  const prose = sanitizeAdapterFailure({
+    code: "REPORT_INVALID",
+    data: { reason: "locator.cascadeId is required for Antigravity inspect" },
+  });
+  assert.equal(prose.reason, null);
 });
