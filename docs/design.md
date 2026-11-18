@@ -478,3 +478,74 @@ compression: gzip
 **决策五十三：闸门关闭要等下游走完，关闭之后不再放行。** 已批准的 `pass()` 正在跑时 `dispose()` 到达，若当场还原 preset，下游就踩在还原后的权限上执行。现在关闭流程等这次 continuation 结束；若它结束时闸门已经关了，返回 hold 决策而不是 allow（`lib/approvals.mjs:546`，理由串是 "The approval gate closed while the downstream listener was running."）。
 
 **决策五十四：粘性会话按 key 排队，选项只在自己的 turn 之前应用。** 并发 `ask` 复用同一会话时，后一个请求若先应用模型/权限设置，会污染前一个尚未提交的 turn。现在同一 key 的获取与注册表更新串行化，各自选项只在自己的 prompt 提交前生效；上一个桥请求已超时但 Host turn 还活着时，直接返回 busy，既不改选项也不再提交。
+
+## 24. 决策 0.8.1-e：capabilities 可达性（SPIKE）
+
+> 2026-11-18 S0 勘探结论。本次仅做只读源码静态勘探（`C:\Users\Andy\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\lib\*.mjs`、`C:\Users\Andy\.dsh\profiles\desktop\node_modules\dsh-skill-mcp-panel\lib\*`、`C:\Users\Andy\AppData\Local\Programs\DeepSeek Harness\resources\app.asar` 内 `@deepseek-ai/*` 源码，以及 `C:\Users\Andy\.dsh\profiles\desktop\cordis.patch.yml` 对照）。除 `permissionPresets` 与 `sessions` 已在现网运行外，其余路径均属**静态推断，尚未在 live Host 内运行验证（未验证）**。
+
+1. **① 哪条路径能拿到工具清单与 MCP server**：
+   - **唯一直接路径：`ctx.get("tools")`（`ToolsService`）**。Cordis 的 `ctx.get(name, strict = true)` 允许在不声明 `inject` 的情况下读取已激活服务（`app.asar/dsh/node_modules/@deepseek-ai/cordis/lib/index.js:1348-1357`）。`ToolsService` 暴露 `schemas(scope?: ScopeKey, toolSet?: ResolvedToolSet)` 与 `definitions(scope?, toolSet?)`（`app.asar/dsh/node_modules/@deepseek-ai/dsh-tools/src/index.ts:101, 114, 307-320`）。同目录插件 `dsh-skill-mcp-panel` 已在生产中使用 `ctx.tools.schemas()` 与 `ctx.tools.view(undefined)` 读取 MCP 工具（`dsh-skill-mcp-panel/lib/mcp/status.js:34-41`、`gateway.js:287-298`）；但本桥未把 `"tools"` 写进 `inject`，改用 `ctx.get("tools")` 读取的运行时表现**未验证**。
+   - **全局 vs 按 Agent 作用域**：不传 `scope` 调用 `ctx.get("tools")?.schemas()` 走 `this.view(undefined)`（`dsh-tools/src/index.ts:201-229`），只返回全局层注册的工具（包含以独立行挂载的 `dsh-mcp-client` 注册的 `mcp__<serverName>__<rawName>` 工具，见 `app.asar/.../dsh-mcp-client/src/tools.ts:93-95, 179`），不含 `agentPreset` 隔离工具与每 agent 的 `tools.restrict()` 限制（`dsh-skill-mcp-panel/lib/tool-filter.js:110-120`）。若要取特定会话 Agent 的可见工具，需先通过 **`ctx.get("agents")?.get(sessionId)`**（或 `.list()`，`app.asar/.../dsh-agent/src/index.ts:582-592`）获取 `ReactLoopAgent` 实例——该实例自身即是 `ScopeKey`（`this.scope = createScope(loopCtx, this)`，`app.asar/.../dsh-agent-loop/src/agent.ts:113, 149`），再传给 `ctx.get("tools")?.schemas(agent)`，即可得到经过 preset 继承与 `restrict()` 过滤后的可见工具集（注意未传 `toolSet` 时不求值动态 `when` 条件，见 `dsh-tools/src/index.ts:275, 318`；**未运行验证**）。
+   - **MCP server**：优先从上述可见工具名按 `mcp__<serverName>__` 前缀归并（`dsh-mcp-client/src/tools.ts:93-95`；仅反映当前已连接且可见的 server，不含连接失败/禁用项）。另存在 `ctx.get("mcpManager")?.list()`（`app.asar/.../dsh-mcp-manager/src/index.ts:222, 270-278`；`api-catalog.ts:2230-2239`），但 `dsh-mcp-manager` 仅由 `dsh-web-app` 挂载（`dsh-desktop-host` / `dsh-base` 未直接依赖），而本机 `cordis.patch.yml:41-63, 400-514` 是用独立 `@deepseek-ai/dsh-mcp-client` 行挂载的，因此 `mcpManager` 在桌面端是否覆盖所有 server **未验证**。
+   - **其余候选路径判定**：
+     - `ctx.get("sessions")?.get(id)?.agent?.tools`：**不可达（不存在）**。`Session`（`app.asar/.../dsh-session/src/index.ts:557-585`）只有 `header`/`surface`/`id`，无 `.agent` 也无 `.tools`；`ReactLoopAgent`（`dsh-agent-loop/src/agent.ts:113-156`）也无 `.tools` 属性。
+     - `ctx.get("agents")`：`dsh-agent/src/index.ts:582-592` **可达**（静态推断），只作 `ScopeKey` 载体配合 `tools.schemas(agent)` 使用。
+     - `ctx.get("agentPresets")`：`app.asar/.../dsh-agent-preset-registry/src/index.ts:182-200` **可达**（静态推断），可查预设列表与 composition 模块名（`list()` / `inspectCompositions()`），不直接返回工具清单。
+     - `ctx.get("permissionPresets")`：**已运行验证可达**（`dsh-rpc-agent/index.mjs:107, 115`、`lib/methods.mjs:561`），提供 `catalog()` 与 `current(session)`。
+     - `ctx.get("mcp")`：**不可达（不存在该服务名）**。`app.asar/.../dsh-tool-cordis/src/api-catalog.ts:84-4952` 中无 `mcp` 键（仅有 `mcpManager` 与 `mcpResources`）。
+     - 插件清单（`plugins`）：`ctx.get("plugins")` 不存在；宿主 `dsh-host-plugin-inventory/src/index.ts:86` 直接读 `ctx.loader.entries()`，第三方非 `inject` 插件通过 `ctx.loader` 读取的权限与稳定性**未验证**，且**严禁**读 `cordis.patch.yml` 冒充运行时状态。
+
+2. **② 拿不到时的降级形态**：
+   - 每节独立降级并标注 `source`：
+     - `tools`：优先 `ctx.get("tools")?.schemas(agent)`（`source: "agent-tools-scoped"`）→ 无活跃 agent 时退回 `ctx.get("tools")?.schemas()`（`source: "tools-global"`，注明不含 per-agent `restrict`/preset 隔离工具）→ 仍不可用或抛错时降级为 `{ status: "unavailable", source: "none", reason }`。
+     - `mcp`：基于 `tools` 可见工具名按 `mcp__<server>__` 归并（`status: "partial"`，注明仅含已连接且可见的工具；若 `ctx.get("mcpManager")?.list()` 可用再合并状态）；两者皆不可用时降级为 `{ status: "unavailable", source: "none", reason }`。
+     - `plugins`：默认保守返回 `{ status: "unavailable", source: "none", reason: "no plugin registry service exposed via ctx.get" }`（不读 YAML 兜底）。
+
+3. **③ 对 D（`dsh_capabilities`）的建议**：
+   - **保留全节结构（`plugin` / `model` / `permissions` / `tools` / `mcp` / `plugins` / `env` / `workspaces`），每节独立按上述阶梯探测并在不可达时输出 `unavailable` + `reason`**，不要在设计期直接砍成三节。
+   - 理由：静态源码确认 `ctx.get("tools")?.schemas(agent?)` 与 `ctx.get("agents")` 均在 Host 存在，且 `dsh-skill-mcp-panel` 已验证了 `tools.schemas()` 模式；按节独立降级意味着即便在精简 Host 或沙箱环境下 `tools` 不可达，也会自动呈现出「核心节正常 + `tools`/`mcp`/`plugins` 为 `unavailable`」的诚实形态，兼顾上限与兜底。S5 阶段需在预演安装时对 `ctx.get("tools")?.schemas(agent)` 与 `ctx.get("mcpManager")` 做一次 live Host 运行验证。
+
+## 25. 决策 0.8.1-f：trace 三档渲染 + since 的双计数
+
+> 2026-11-18 S2 实现决定（`lib/trace-format.mjs`、`lib/mcp-format.mjs`、`lib/config.mjs`、`bin/dsh-rpc-mcp.mjs`、`bin/dsh-rpc.mjs`）。
+
+1. **为什么默认档是 `errors` 而不是 `summary` 或 `none`**：一轮成功跑完十几次工具调用时，全部回显只会平白膨胀上层代理的上下文窗口（token 成本与噪音），`none` 又会让工具悄悄失败或卡在某个耗时工具上时上层毫不知情。`errors` 在「全成功时不加一行、有失败时立刻浮出最近 3 条报错（`errors: M of N tool calls`）、无失败但仍在跑时给出最后一条在途工具及已跑秒数」之间取得最低成本的可见性平衡。
+2. **为什么 `since` 增量下仍保留整轮总计数**：当调用方用 `since` 游标轮询 `dsh_wait` 时，若 `total` 与 `errors` 也跟着切片只算增量，调用方很容易把"这一片没有报错"误认为"整轮没有报错"，或者把局部计数当成总工具调用数。因此 `lines` 与 `structured` 只投影 `seq > since` 的新增工具调用（并附上 `+<count> since cursor <cursor>` 标明切片范围），而 `total`、`errors`、`running` 与 meta 行的 `${n} tool calls (${m} errors)` 始终统计整轮。
+3. **为什么 `summary` 预算定在 20 行 / 1200 字符**：单行摘要约 40–60 字符，20 行恰好覆盖常见轮次并保留大约半屏的扫描密度；1200 字符上限（约 300–400 tokens）防止异常长的参数/报错细节在大量调用时把回答正文淹没，超限后截断并提示调用 `dsh_history` 取完整窗口。
+4. **为什么只在 `full` 档输出 `structuredContent`**：`structuredContent` 会把每条工具的完整参数对象与截断后输出以结构化 JSON 随 MCP 响应发往客户端，载荷显著高于纯文本摘要；只在显式请求 `trace: "full"`（或配置 `traceDefault: "full"`）时才附带它，且显式构造白名单字段（省略 `undefined` 键，不 spread `result`），避免在默认路径上向不消费结构化载荷的客户端发送冗余字节。
+5. **为什么所有档位都允许切回 `none`**：无论是按请求传 `trace: "none"` / `--trace none`，还是通过配置 `traceDefault: "none"` 全局关闭，都能在发现对端 MCP 客户端或既有流水线对新增文本块敏感时零代价退回 0.8.1 之前的字节级一致输出。
+
+6. **为什么 `endedAt` 缺失时按轮次状态区分 `(running, Ns)` 与 `(unfinished)`**：0.8.1 之前写入的记录没有 `at`/`endedAt`（老插件、或本地 CLI 连旧插件），此时一律渲染成 `running` 会把「已经跑完但没有计时」谎报成「还在跑」。因此渲染器接收轮次 `status`：`completed` / `idle` 的轮次里，缺 `endedAt` 的工具标注 `(unfinished)`，且 `errors` 档在轮次已结束时不输出 `last:` 在途行；只有轮次未结束（`timeout` / `waiting-approval` 等）才给出 `(running, Ns)` 或（连 `at` 都缺时）`(running)`。
+
+## 26. 决策 0.8.1-g：dsh_history 只读窗口与三段语义
+
+> 2026-11-18 S3 实现决定（`lib/history-format.mjs`、`bin/dsh-rpc-mcp.mjs`）。
+
+1. **为什么 `dsh_history` 严格只读且不激活 agent**：查看"DSH 刚才到底执行了哪些工具、为什么停住或是否被沙箱挡住"是典型的事后排障或旁路观察需求；如果走 `prompt` 或任何会 `resolveAgent` 的路径，不仅会唤醒冷会话、占用写槽或污染上下文，还可能与正在运行的轮次竞争。底层 `dsh.sessions.history` 只拉取 `sessionController.follow` 的首帧快照并立即关闭迭代器，完全不触发 agent admission，因此可以安全地在任意时刻反复调用。
+2. **为什么 `since` 与 `kinds` 在"最新 `limit` 条"窗口内过滤（以及为什么增量可能不完整）**：宿主的 `follow` 接口只接受 `maxMessages: limit` 作为窗口**提示**，不提供按历史 seq 向后翻页的随机读接口。因此 `since` / `kinds` 只能对这最新 `limit` 条做窗口内过滤；若某次调用之后新产生了超过 `limit` 条事件（例如默认 40 条而一轮执行了 80 次工具调用），旧的那一段增量就会落在窗口之外而**静默缺失**——文档与工具说明明确要求大增量时将 `limit` 调高（上限 500），不假装拥有全量游标分页。**实测修正（2026-11-18）**：连本机运行的 0.7.7 插件实测（33 条事件、`limit: 20`）仍返回整个缓冲，证明 `maxMessages` 只是提示、不是硬上限；因此工具说明写明"`limit` 不是硬上限，摘要头一律报告实际到达的条数"，不给调用方一个它并不拥有的保证。
+3. **为什么 `turn` 与 `running` 来自未过滤窗口**：如果 `turn` 和 `running` 只按过滤后的 `records` 计算，当用户只请求 `kinds: ["tool/call"]` 或 `since` 之后暂时没有新 `turn/start` 时，正在运行中的会话就会被错判成 `turn 0 · idle`，从而误导上层重新派发或停止等待。因此摘要头里的 `turn`、`running` 与 `window <count> events` 永远描述整个未过滤窗口，第二行 `filtered: <K> of <count> kept (...)` 单独交代过滤缩减了多少条。
+4. **为什么 `structuredContent` 始终附带**：与 `dsh_ask` / `dsh_wait` 在长答案之外按 `trace: "full"` 才附带结构化工具列表不同，`dsh_history` 本身就是结构化事件检查工具——调用它的目的往往就是精确比对 `seq`、`cursor`、`hasMore`、`truncated` 或工具调用的原始参数/结果。保持文本投影受 `maxLines` / `maxChars` 行字双预算约束以保护上下文窗口，同时在 `structuredContent` 中始终透传完整的 `{ sessionId, cursor, turn, running, hasMore, messageCount, records, truncated? }`（不受渲染预算裁切，仅受 RPC `max_chars` 约束），让机器消费与人眼阅读各自拿到最合适的形态。
+5. **为什么它要自己检测"插件没听我的"**：桥与插件是两个可独立升级的包——MCP 侧的 0.8.1 完全可以连着一个 0.7.x 插件（本机正是如此）。老插件的 `dsh.sessions.history` 忽略 `since`/`kinds`/`maxChars`，但返回结构一模一样、也没有版本字段可读。若照常打印 `filtered: …`，调用方会以为拿到的是增量，实际拿到的是整段窗口——这是把所有调试建立在错误前提上的那类错误。因此格式化器在数据里自证过滤是否生效：出现 `seq <= since` 的记录即说明 `since` 没生效，出现 `kinds` 之外的记录即说明 `kinds` 没生效，未带 `truncated` 且记录序列化长度已超过请求的 `max_chars` 即说明上限没生效；三者任一成立就**撤掉过滤行、改印 `note:`**，并把这些记录照常显示（掩盖它们只是在另一个方向上撒谎）。`structuredContent.note` 同步给出同一句话，供机器消费方判断。
+
+## 26. 决策 0.8.1-h：超时契约的对外诚实与结果体积护栏
+
+> 2026-11-18 S4 实现决定（`lib/advice.mjs`、`lib/config.mjs`、`lib/mcp-format.mjs`、`bin/dsh-rpc-mcp.mjs`）。
+
+1. **为什么 schema 的 `timeout_ms` 上限仍保持 `3600000`**：`3600000`（1 小时）是本桥自己允许的最长等待预算（由 CLI、HTTP 端与分片等待共同支持）；把它砍小会破坏本来能跨多片等完的 CLI / 直连客户端，而且无论改成 900000 还是 300000，都依然无法准确描述每个外层 MCP 客户端各自的调用上限（Codex 默认 `tool_timeout_sec = 900` 秒，其它宿主可能更短或可配），只会制造新的错觉。
+2. **为什么诚实的做法是 schema 描述加“每会话一次性运行时提示行”**：外层客户端的调用上限由外层控制，桥既改不了也探测不到；因此先在 `dsh_ask.timeout_ms` 与 `dsh_wait.timeout_ms` 的 schema 描述中直接写明外层上限通常低于桥上限、长任务应走 `wait:false` + `dsh_wait({ session_id, since })`，再在运行时仅当阻塞等待（`dsh_ask(wait:true)` 或 `dsh_wait`）实际超时且请求预算 `>= 600000` ms 时，通过独立模块 `lib/advice.mjs` 在结果末尾追加一条 `advice:` 块；并用有界（200 项）的每会话 `Set` 去重——连续轮询时每次都重复同一句劝告只是噪音，可用 `config.timeoutAdvice: false` 全局关闭。
+3. **为什么 `maxResultChars` 只截断轮次回答正文（`content[1]`）**：必须直说——实测遇到的 413 属于多轮调用累积造成的上下文增长，而非单次回答过大；因此 `maxResultChars` 只是防止病态超长输出一次打爆客户端的护栏，**不是**解决累积上下文 413 的方案。正因如此，截断只作用于正文块（保证 `session`、`— meta`、`trace:`、`note:`、`reason:`、`next:`、`advice:` 块绝不被砍掉，否则丢失会话 id 或下一步提示会诱发重试），截断时在 `\r\n` 与空白边界对齐，并保留明确提示说明如何通过配置放宽。
+4. **为什么默认上限取 `20000` 字符**：正常一轮回答的正文通常只有几 KB；`20000` 字符足以完整容纳长分析报告而不误伤常规输出，同时又把单条 tool result 的正文体量远远压在各类客户端的单次响应上限之下，并允许通过 `config.maxResultChars`（范围 `0..200000`，`0` 为关闭）按需调整。
+
+## 27. 决策 0.8.1-i：能力自述的分节契约与“不可用也是答案”
+
+> 2026-11-18 S5 实现决定（`lib/host-facts.mjs`、`lib/capabilities.mjs`、`lib/methods.mjs`、`lib/http.mjs`、`bin/dsh-rpc-mcp.mjs`、`bin/dsh-rpc.mjs`、`index.mjs`）。
+
+1. **为什么每节都带 `status` 与 `source`（或 `— <reason>`）**：规划器在写计划前真正要问的是"这个 Harness 此刻在这里能做什么、不能观测到什么"，而不是一份由配置文件拼出的乐观清单。因此八个合同节（`identity`、`runtime`、`permissions`、`tools`、`mcp`、`sessions`、`workspace`、`plugins`）各自独立给出 `ok` / `partial` / `unavailable` 状态与来源标签 `source`；当宿主不暴露某项服务（或该服务抛错）时，该节直接输出单行 `<id> [unavailable] — <reason>`，把"不可观测"作为明确结论交还给调用方，而不是退回空白或抛异常打断整个调用。
+2. **为什么采集（`lib/host-facts.mjs`）与投影（`lib/capabilities.mjs`）分层**：把所有 `ctx.get(...)`（且白名单仅限 `permissionPresets`、`tools`、`sessions`、`workspaceRegistry`、`loader` 五个服务名）收口到 `lib/host-facts.mjs` 并逐项包裹容错，使 `lib/capabilities.mjs` 保持零宿主依赖的纯函数——可以在没有运行态 Host 的单测里直接锁定节序、状态计数、单行 `unavailable`、未知 id 归入 `missing` 与 `max_chars` 截断线，同时把"不创会话、不唤醒冷会话"的只读边界固化在采集层。
+3. **为什么不读 profile 配置文件，也不调用 `which`**：读取 `~/.dsh/profiles/*/cordis.patch.yml` 或在子进程里跑 `which` 只能证明"磁盘上写过什么"或"某条路径恰好存在某可执行文件"，既不能说明当前活着的 agent 作用域里实际挂上了哪些服务，还会在宿主未加载、配置漂移或沙箱隔离时撒谎。桥只报告自己能通过运行时进程与 `ctx.get(...)` 直接观察到的事实。
+4. **为什么 `mcp` 统计可调用工具而不是配置里的 server 列表**：从可见工具名按 `^mcp__([^_]+(?:_[^_]+)*?)__` 归并，只能反映当前 agent 实际上能调得到的 `mcp__*` 工具前缀，不等于 profile 里配置了哪些 MCP server（连接失败、被禁用或未注册工具的 server 不会出现在工具表里）。因此该节明确标注 `source: tools(mcp__)` 并附固定声明（`these are the MCP tools exposed to this agent, not the servers in the profile`），工具名每节最多展示 40 个并在末尾标 `+N more`。
+5. **未来读者凭什么相信某一节**：每节先看状态再看来源：`ok` 表示该 `source` 完整返回了契约所需的数据；`partial` 表示 `source` 应答但缺失部分维度（首行明示缺口，如 `tools` 仅有名称没有 schema、`sessions` 无总数仅支持按 id 查询）；`unavailable` 只意味着"当前宿主环境未向本桥暴露该事实"，不代表该能力不存在。此外，`tools` 与 `loader` 两条路径在 S5 阶段已由假 `ctx` 桩单测覆盖，**尚未在 live Harness Host 内实测**，上线实机验证后需补充运行期观测记录。
+
+
+
+

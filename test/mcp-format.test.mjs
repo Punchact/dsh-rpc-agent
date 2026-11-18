@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { describeEnd, formatToolError, formatToolResult } from "../lib/mcp-format.mjs";
+import { capText, describeEnd, formatToolError, formatToolResult } from "../lib/mcp-format.mjs";
 
 const textOf = (result) => result.content.map((part) => part.text).join("\n");
 
@@ -318,4 +318,253 @@ test("a turn waiting for an approval hands the caller the approval, not a timeou
   assert.match(text, /approval: apv-9d0c asks to widen this session to danger-full-access for bash/);
   assert.match(text, /command: Set-Content -Path C:\/Users\/Andy\/proof\.txt/);
   assert.match(text, /next: answer it with dsh_approvals_resolve\(/);
+});
+
+test("default errors trace adds (M errors) suffix and trace block before note/reason, while trace: none is byte-identical", () => {
+  const input = {
+    sessionId: "session-t",
+    turn: 4,
+    status: "aborted",
+    text: "partial answer",
+    reason: { kind: "aborted", reason: { kind: "user" } },
+    durationMs: 2500,
+    cursor: 18,
+    tools: [
+      { callId: "c1", name: "read", arguments: { path: "a.ts" }, ok: true, seq: 10, at: 100, endedAt: 105 },
+      {
+        callId: "c2",
+        name: "pwsh",
+        arguments: { command: "npm test" },
+        ok: false,
+        error: "exit 1",
+        output: "test failed",
+        seq: 12,
+        at: 200,
+        endedAt: 1700,
+      },
+    ],
+  };
+
+  const defaultResult = formatToolResult(input);
+  assert.equal(defaultResult.isError, false);
+  assert.equal("structuredContent" in defaultResult, false);
+  assert.deepEqual(
+    defaultResult.content.map((part) => part.text),
+    [
+      "session session-t",
+      "partial answer",
+      "— outcome: aborted · turn 4 · 2.5s · 2 tool calls (1 errors) · cursor 18",
+      'trace:\nerrors: 1 of 2 tool calls\n✗ pwsh "npm test" — exit 1',
+      "note: the turn was stopped (cause: user — the Host cannot tell a bridge cancel from someone pressing stop)",
+      'reason: {"kind":"aborted","reason":{"kind":"user"}}',
+      "next: do not resend blindly: ask the human whether to continue, then resend with the same session_id",
+    ],
+  );
+
+  const noneResult = formatToolResult(input, { trace: "none" });
+  assert.equal("structuredContent" in noneResult, false);
+  assert.deepEqual(noneResult, {
+    content: [
+      { type: "text", text: "session session-t" },
+      { type: "text", text: "partial answer" },
+      { type: "text", text: "— outcome: aborted · turn 4 · 2.5s · 2 tool calls · cursor 18" },
+      {
+        type: "text",
+        text: "note: the turn was stopped (cause: user — the Host cannot tell a bridge cancel from someone pressing stop)",
+      },
+      { type: "text", text: 'reason: {"kind":"aborted","reason":{"kind":"user"}}' },
+      {
+        type: "text",
+        text: "next: do not resend blindly: ask the human whether to continue, then resend with the same session_id",
+      },
+    ],
+    isError: false,
+  });
+});
+
+test("structuredContent is emitted only for trace: full and omits undefined/unknown keys", () => {
+  const resultInput = {
+    sessionId: "session-full",
+    turn: 2,
+    status: "completed",
+    text: "done",
+    cursor: 20,
+    extraField: "must-not-leak",
+    tools: [
+      {
+        callId: "c1",
+        name: "read",
+        arguments: { path: "README.md" },
+        output: "hello",
+        ok: true,
+        seq: 19,
+        at: 1000,
+        endedAt: 1003,
+      },
+    ],
+  };
+
+  const summary = formatToolResult(resultInput, { trace: "summary" });
+  assert.equal("structuredContent" in summary, false);
+  assert.match(textOf(summary), /trace:\n✓ read "README\.md" 3ms/);
+
+  const full = formatToolResult(resultInput, { trace: "full" });
+  assert.deepEqual(full.structuredContent, {
+    sessionId: "session-full",
+    turn: 2,
+    outcome: "completed",
+    cursor: 20,
+    tools: [
+      {
+        index: 0,
+        callId: "c1",
+        name: "read",
+        ok: true,
+        arguments: { path: "README.md" },
+        output: "hello",
+        outputTruncated: false,
+        isError: false,
+        error: null,
+        seq: 19,
+        at: 1000,
+        endedAt: 1003,
+        elapsedMs: 3,
+      },
+    ],
+  });
+  assert.equal("sliceMs" in full.structuredContent, false);
+  assert.equal("requestedMs" in full.structuredContent, false);
+  assert.equal("extraField" in full.structuredContent, false);
+});
+
+test("maxResultChars leaves prose under the cap or when disabled (0) untouched", () => {
+  const body = "a".repeat(120);
+  const under = formatToolResult(
+    { sessionId: "session-cap", turn: 1, status: "completed", text: body },
+    { maxResultChars: 500 },
+  );
+  assert.equal(under.content[1].text, body);
+
+  const huge = "b".repeat(25_000);
+  const uncapped = formatToolResult(
+    { sessionId: "session-cap", turn: 1, status: "completed", text: huge },
+    { maxResultChars: 0 },
+  );
+  assert.equal(uncapped.content[1].text, huge);
+});
+
+test("maxResultChars caps only the turn text block and preserves session, meta, trace, note, reason, next", () => {
+  const result = formatToolResult(
+    {
+      sessionId: "session-cap",
+      turn: 3,
+      status: "aborted",
+      text: "x".repeat(400),
+      reason: { kind: "aborted", reason: { kind: "user" } },
+      tools: [{ callId: "c1", name: "pwsh", arguments: { command: "echo hi" }, ok: false, error: "boom" }],
+    },
+    { maxResultChars: 120 },
+  );
+  const blocks = result.content.map((b) => b.text);
+  assert.equal(blocks[0], "session session-cap");
+  assert.match(blocks[1], /^x+\n… \(turn text truncated at 120 chars; raise config\.maxResultChars to lift the cap\)$/);
+  const keptPrefix = blocks[1].split("\n… ")[0];
+  assert.ok(blocks[0].length + keptPrefix.length + blocks[2].length <= 120);
+  assert.match(blocks[2], /^— outcome: aborted/);
+  assert.match(blocks[3], /^trace:\n/);
+  assert.match(blocks[4], /^note: /);
+  assert.match(blocks[5], /^reason: /);
+  assert.match(blocks[6], /^next: /);
+});
+
+test("capText handles direct inputs, CRLF boundaries, and trailing spaces cleanly", () => {
+  // Budget lands right between \r and \n: must back up so \r\n is not split.
+  const head = "session s"; // 9
+  const meta = "— outcome: completed"; // 20
+  const body = "abcde\r\nfghij"; // \r at index 5, \n at index 6
+  const blocks = [
+    { type: "text", text: head },
+    { type: "text", text: body },
+    { type: "text", text: meta },
+  ];
+  // 9 + 6 + 20 = 35 -> budget 6 cuts at "abcde\r"
+  const capped = capText(blocks, 35);
+  assert.equal(capped[0].text, head);
+  assert.equal(capped[2].text, meta);
+  assert.equal(capped[1].text.includes("\r"), false);
+  assert.equal(
+    capped[1].text,
+    "abcde\n… (turn text truncated at 35 chars; raise config.maxResultChars to lift the cap)",
+  );
+
+  // Trailing spaces at cut boundary must not leave double spaces or trailing space before marker.
+  const spaced = [
+    { type: "text", text: head },
+    { type: "text", text: "alpha   omega" },
+    { type: "text", text: meta },
+  ];
+  // 9 + 8 + 20 = 37 -> budget 8 cuts at "alpha   "
+  const spacedOut = capText(spaced, 37);
+  assert.equal(
+    spacedOut[1].text,
+    "alpha\n… (turn text truncated at 37 chars; raise config.maxResultChars to lift the cap)",
+  );
+
+  // maxResultChars: 0 and short/invalid inputs are no-ops
+  const untouched = capText(
+    [
+      { type: "text", text: head },
+      { type: "text", text: "z".repeat(50) },
+      { type: "text", text: meta },
+    ],
+    0,
+  );
+  assert.equal(untouched[1].text, "z".repeat(50));
+  assert.deepEqual(capText([{ type: "text", text: "only-one" }], 10), [{ type: "text", text: "only-one" }]);
+});
+
+test("advice option appends one final advice block after every other block and ignores empty/null", () => {
+  const timedOut = formatToolResult(
+    {
+      sessionId: "session-adv",
+      turn: 1,
+      status: "timeout",
+      timedOut: true,
+      cursor: 5,
+      text: "working...",
+      reason: { kind: "timeout", message: "wait expired" },
+    },
+    { advice: "prefer wait:false", maxResultChars: 50 },
+  );
+  const last = timedOut.content.at(-1);
+  assert.equal(last.text, "advice: prefer wait:false");
+  assert.match(timedOut.content.at(-2).text, /^next: /);
+
+  const waitingApproval = formatToolResult(
+    {
+      sessionId: "session-adv",
+      turn: 1,
+      status: "waiting-approval",
+      pendingApproval: {
+        approvalId: "apv-1",
+        toolName: "bash",
+        escalation: "danger-full-access",
+      },
+    },
+    { advice: "prefer wait:false" },
+  );
+  assert.equal(waitingApproval.content.at(-1).text, "advice: prefer wait:false");
+  assert.match(waitingApproval.content.at(-2).text, /^next: /);
+
+  const noAdviceNull = formatToolResult(
+    { sessionId: "session-adv", turn: 1, status: "completed", text: "ok" },
+    { advice: null },
+  );
+  assert.equal(noAdviceNull.content.some((b) => b.text.startsWith("advice:")), false);
+
+  const noAdviceEmpty = formatToolResult(
+    { sessionId: "session-adv", turn: 1, status: "completed", text: "ok" },
+    { advice: "" },
+  );
+  assert.equal(noAdviceEmpty.content.some((b) => b.text.startsWith("advice:")), false);
 });

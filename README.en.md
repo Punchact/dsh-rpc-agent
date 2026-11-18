@@ -151,7 +151,7 @@ Cursor / Codex use the equivalent config form (backslashes in JSON must be escap
 
 On the local-checkout route, replace the path with `<path-to-your-clone>\bin\dsh-rpc-mcp.mjs`. The rest of this document writes `node bin/...`, which means "run from inside the package".
 
-**Nine tools** are exposed:
+**Eleven tools** are exposed:
 
 | Tool | Purpose |
 | --- | --- |
@@ -159,8 +159,10 @@ On the local-checkout route, replace the path with `<path-to-your-clone>\bin\dsh
 | `dsh_wait` | Wait for this session's current turn and collect the result |
 | `dsh_cancel` | Cancel the turn that is running |
 | `dsh_sessions` | List sessions (filter by directory, sort by time) |
+| `dsh_history` | Read the recent event window of a session (tool calls, results, turn ends) without activating its agent |
 | `dsh_workspaces` | List workspaces, or register a new one |
 | `dsh_permissions` | List permission presets (sandbox mode + approval policy) |
+| `dsh_capabilities` | Read-only eight-section snapshot of what this Harness can do right now (no session created or touched) |
 | `dsh_status` | Confirm the endpoint and token are readable |
 | `dsh_approvals_pending` | List escalation requests waiting for your answer |
 | `dsh_approvals_resolve` | Answer one escalation request |
@@ -181,6 +183,17 @@ Parameters are snake_case (the MCP convention), unlike the HTTP layer. Common `d
 The first line of a `dsh_ask` result is always `session <id>`, followed by the body and one `— outcome: … · turn … · 5.2s` meta line. Misspelled parameters produce a blunt message: passing `text` to `dsh_ask` yields `` `prompt` is required `` with `isError: true`.
 
 The MCP server and the Harness session it drives **do not share context** — a `dsh_ask` prompt must be self-contained.
+
+When `dsh_wait`'s answer is not enough to see what the Harness actually ran, use the read-only `dsh_history` tool to inspect recent tool calls and events without activating the session's agent:
+
+```js
+// Defaults to tool/call, tool/result, turn/end; raise limit (up to 500) for larger deltas
+dsh_history({ session_id: "session-xxxx", since: 42, limit: 100 })
+// Pass kinds: ["*"] for every event type
+dsh_history({ session_id: "session-xxxx", kinds: ["*"] })
+```
+
+Before drafting a plan, use the read-only `dsh_capabilities` tool to inspect what this Harness instance can actually observe right now without creating or waking a session. It splits the environment into eight sections (`identity`, `runtime`, `permissions`, `tools`, `mcp`, `sessions`, `workspace`, `plugins`), each stamped with its own status: `[ok]` means the named `source` answered in full; `[partial]` means the source answered with less than the full contract and states what is missing on its first line (for example, tool names without schemas); `[unavailable]` means only that this host does not expose that fact here — not that the capability does not exist. The `mcp` section groups only the callable `mcp__*` tools exposed to this agent and never claims to enumerate servers configured in a profile.
 
 ### Sticky sessions
 
@@ -214,6 +227,7 @@ node bin/dsh-rpc.mjs history --session session-xxxx --limit 20
 node bin/dsh-rpc.mjs sessions --limit 10
 node bin/dsh-rpc.mjs models                  # models DSH can route to
 node bin/dsh-rpc.mjs discover                # self-description: methods, transport, result shape
+node bin/dsh-rpc.mjs capabilities            # eight-section capability snapshot (--sections / --max-chars / --session)
 node bin/dsh-rpc.mjs cancel --session session-xxxx
 node bin/dsh-rpc.mjs call dsh.sessions.history '{"sessionId":"session-xxxx"}' --timeout 30000
 ```
@@ -384,6 +398,8 @@ Without it you get the whole turn; with it you get only events whose `seq > sinc
 - **"Not done yet" is not failure**: `status:"timeout"` only says this slice expired; the turn keeps running in the Harness. Resending means asking again — extra sessions and repeated side effects. Use `wait` / `history` for progress.
 - **Turn ownership**: after delivering a prompt, the plugin looks for its own `user/message` in the event stream (`source.rpcId` equals this call's `requestId`) and anchors on the turn it lands in. So **when someone else speaks in that session, their answer is never taken for yours** — that turn's `turn/end` is skipped and waiting continues for your own turn.
 
+Outer MCP clients usually enforce a shorter single-call ceiling than this bridge's `3600000` ms `timeout_ms` maximum (for instance, Codex defaults `tool_timeout_sec` to `900` s), and the bridge cannot raise that outer cap. For long work, pass `wait: false` to `dsh_ask` and poll with `dsh_wait({ session_id, since })`. You can tune this layer with `timeoutAdvice` (default `true`, one-shot per-session advice on long-budget timeouts) and `maxResultChars` (default `20000`, `0..200000`, `0` disables capping; guards only the turn prose block against pathological outputs).
+
 ## Workspaces, models, reasoning effort
 
 These are DSH's own concepts; the bridge only forwards them and invents no new switches.
@@ -494,7 +510,7 @@ Configured through the `config` of `cordis.patch.yml`; every key has a default:
           deadlineMs: 60000    # delegate: how long to wait for the caller's answer; expiry counts as a refusal
 ```
 
-Other keys: `enabled`, `tokenFile` (custom token path), `path` (default `/dsh-rpc`), `logRequests`. The `DSH_RPC_TOKEN` environment variable overrides the token (higher priority than the file), which suits CI or setups that cannot persist a file.
+Other keys: `enabled`, `tokenFile` (custom token path), `path` (default `/dsh-rpc`), `logRequests`, `traceDefault` (default `"errors"`), `maxResultChars` (default `20000`, `0` = uncapped), `timeoutAdvice` (default `true`). The `DSH_RPC_TOKEN` environment variable overrides the token (higher priority than the file), which suits CI or setups that cannot persist a file.
 
 ## Security model
 

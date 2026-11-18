@@ -14,6 +14,10 @@ import { rpcCall, waitForTurn, WAIT_SLICE_MS } from "../lib/client.mjs";
 import { PLUGIN_VERSION } from "../lib/version.mjs";
 import { formatToolResult, formatToolError } from "../lib/mcp-format.mjs";
 import { createInflight } from "../lib/inflight.mjs";
+import { normalizeTraceLevel } from "../lib/trace-format.mjs";
+import { DEFAULT_HISTORY_KINDS, formatHistory } from "../lib/history-format.mjs";
+import { formatCapabilities } from "../lib/capabilities.mjs";
+import { TIMEOUT_ADVICE, shouldAdviseTimeout } from "../lib/advice.mjs";
 
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_INFO = { name: "dsh-rpc", version: PLUGIN_VERSION, title: "DeepSeek Harness bridge" };
@@ -35,7 +39,7 @@ const TOOLS = [
       "wait defaults to false: the call returns a handle (session_id + request_id) in milliseconds, and you collect the answer with " +
       'dsh_wait. Pass wait:true only when the task is known to finish quickly. The answer line starts with "outcome:" — read that, not ' +
       "the tool error flag, to learn what happened. A turn that is still running is NOT a failure: collect it with dsh_wait and never " +
-      "resend the prompt.",
+      "resend the prompt. Use dsh_history to inspect what tools and events actually ran in a session (read-only).",
     inputSchema: {
       type: "object",
       properties: {
@@ -110,7 +114,16 @@ const TOOLS = [
           type: "integer",
           minimum: 1000,
           maximum: 3600000,
-          description: "How long to wait for the turn to finish. Defaults to the bridge's configured value (600000).",
+          description:
+            "How long to wait for the turn to finish. Defaults to the bridge's configured value (600000)." +
+            " Outer MCP clients usually cap a single tool call below this maximum (Codex: tool_timeout_sec, 900 s by default);" +
+            " the bridge cannot raise that cap, so for long work pass wait:false and poll with dsh_wait.",
+        },
+        trace: {
+          type: "string",
+          enum: ["none", "errors", "summary", "full"],
+          description:
+            "How much tool-call trace to render alongside the answer. Defaults to the bridge's traceDefault (errors). 'none' restores the pre-0.8.1 output.",
         },
       },
       required: ["prompt"],
@@ -203,12 +216,35 @@ const TOOLS = [
     },
   },
   {
+    name: "dsh_history",
+    title: "Read Harness session history",
+    description:
+      "Read the recent event window of a session: tool calls, tool results, turn ends, approvals and sandbox changes. " +
+      "Read-only — it never activates the session's agent. Use it when dsh_wait's answer is not enough to see what the " +
+      "Harness actually did. `limit` (default 40, max 500) is the window hint passed to the session store — it is " +
+      "not a hard cap, and the header always reports the window size that actually arrived. since/kinds filter " +
+      "inside that window, so a delta larger than the window is silently incomplete; raise `limit` when needed. " +
+      "`turn` and `running` describe the whole window, not the filtered subset; `max_chars: 0` is unlimited and a positive cap keeps the newest records that fit with `truncated: true`.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: { type: "string", description: "Session id, as printed by dsh_ask/dsh_wait ('session <id>')." },
+        limit: { type: "integer", minimum: 1, maximum: 500, description: "Window hint: how many of the newest events to ask the session store for (default 40). Not a hard cap — read the header for the size that arrived." },
+        kinds: { type: "array", items: { type: "string" }, description: 'Event types to keep (default ["tool/call","tool/result","turn/end"]); pass ["*"] for every type.' },
+        since: { type: "integer", minimum: 0, description: "Only events with seq > since (the cursor printed by dsh_ask/dsh_wait)." },
+        max_chars: { type: "integer", minimum: 0, maximum: 200000, description: "Cap the serialized records (0 = unlimited)." },
+      },
+      required: ["session_id"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "dsh_wait",
     title: "Wait for a Harness turn",
     description:
       "Block until the turn currently running on a session finishes, then return its text. This is the supported way to collect work after " +
       "a timeout or after dsh_ask with wait:false — do not resend the prompt. Pass the `since` cursor from the previous answer to get only " +
-      "what happened afterwards.",
+      "what happened afterwards. Use dsh_history to inspect the recent event window when the answer is not enough.",
     inputSchema: {
       type: "object",
       properties: {
@@ -219,7 +255,20 @@ const TOOLS = [
           description:
             "Return only what happened after this cursor (the `cursor` value from a previous result). Omit for the whole turn.",
         },
-        timeout_ms: { type: "integer", minimum: 1000, maximum: 3600000 },
+        timeout_ms: {
+          type: "integer",
+          minimum: 1000,
+          maximum: 3600000,
+          description:
+            "How long to wait for the turn to finish (milliseconds). Defaults to the bridge's configured value (600000)." +
+            " An outer client cap (Codex tool_timeout_sec) applies before the bridge budget; keep slices short and poll again with since.",
+        },
+        trace: {
+          type: "string",
+          enum: ["none", "errors", "summary", "full"],
+          description:
+            "How much tool-call trace to render alongside the answer. Defaults to the bridge's traceDefault (errors). 'none' restores the pre-0.8.1 output.",
+        },
       },
       required: ["session_id"],
       additionalProperties: false,
@@ -239,8 +288,41 @@ const TOOLS = [
   {
     name: "dsh_status",
     title: "Harness bridge status",
-    description: "Report the bridge version, mounted endpoint, token source and any active runs.",
+    description:
+      "Report the bridge version, mounted endpoint, token source and any active runs. " +
+      "Use dsh_sessions and dsh_history to inspect sessions and their recent events.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "dsh_capabilities",
+    title: "Inspect Harness capabilities",
+    description:
+      "Read-only snapshot of what this Harness can do right now across eight sections " +
+      "(identity, runtime, permissions, tools, mcp, sessions, workspace, plugins). " +
+      "`unavailable` means this host does not expose that fact here — not that it does not exist. " +
+      "Does not create, resume, or touch any session.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sections: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            'Section ids to include (default ["*"] for all eight: identity, runtime, permissions, tools, mcp, sessions, workspace, plugins).',
+        },
+        max_chars: {
+          type: "integer",
+          minimum: 0,
+          maximum: 40000,
+          description: "Cap the rendered text length (default 8000; 0 = uncapped, hard ceiling 40000).",
+        },
+        session_id: {
+          type: "string",
+          description: "Optional session id to include caller session facts in `permissions` and `sessions`.",
+        },
+      },
+      additionalProperties: false,
+    },
   },
 ];
 
@@ -396,6 +478,36 @@ async function handleLine(line) {
 // ------------------------------------------------------------------- tools --
 
 const DEFAULT_TURN_TIMEOUT_MS = 600000;
+const DEFAULT_MAX_RESULT_CHARS = 20000;
+const MAX_ADVISED_SESSIONS = 200;
+
+// One-shot timeout advice per session id, bounded so long-lived MCP processes
+// do not grow without limit.
+const advisedTimeoutSessions = new Set();
+
+function maybeTimeoutAdvice(result, requestedMs, enabled) {
+  const sessionId = typeof result?.sessionId === "string" && result.sessionId.length > 0 ? result.sessionId : null;
+  const alreadyShown = sessionId !== null && advisedTimeoutSessions.has(sessionId);
+  if (
+    !shouldAdviseTimeout({
+      status: result?.status,
+      timedOut: result?.timedOut,
+      requestedMs,
+      enabled,
+      alreadyShown,
+    })
+  ) {
+    return null;
+  }
+  if (sessionId !== null) {
+    if (advisedTimeoutSessions.size >= MAX_ADVISED_SESSIONS) {
+      const oldest = advisedTimeoutSessions.values().next().value;
+      if (oldest !== undefined) advisedTimeoutSessions.delete(oldest);
+    }
+    advisedTimeoutSessions.add(sessionId);
+  }
+  return TIMEOUT_ADVICE;
+}
 
 /** Out-wait the server's turn budget so the bridge never aborts a live turn. */
 function turnBudget(timeoutMs) {
@@ -429,7 +541,13 @@ async function callTool(name, args, signal = undefined) {
   try {
     const defaults = await bridgeSettings();
     const turnDefault = Number.isInteger(defaults.defaultTimeoutMs) ? defaults.defaultTimeoutMs : DEFAULT_TURN_TIMEOUT_MS;
-    const hintOptions = { defaultTimeoutMs: turnDefault };
+    const traceDefault = normalizeTraceLevel(defaults.traceDefault, "errors");
+    const maxResultChars =
+      Number.isInteger(defaults.maxResultChars) && defaults.maxResultChars >= 0
+        ? defaults.maxResultChars
+        : DEFAULT_MAX_RESULT_CHARS;
+    const adviceEnabled = typeof defaults.timeoutAdvice === "boolean" ? defaults.timeoutAdvice : true;
+    const hintOptions = { defaultTimeoutMs: turnDefault, maxResultChars, adviceEnabled };
     switch (name) {
       case "dsh_ask": {
         const prompt = typeof args.prompt === "string" ? args.prompt : "";
@@ -468,10 +586,15 @@ async function callTool(name, args, signal = undefined) {
         // The sticky registry is namespaced per client so two agents that happen to
         // work in the same directory do not inherit each other's session.
         params.namespace = clientNamespace;
+        const askFormatOptions = {
+          ...hintOptions,
+          trace: normalizeTraceLevel(args.trace, traceDefault),
+          since: null,
+        };
 
         if (params.wait === false) {
           const result = await call("dsh.sessions.ask", params, { timeoutMs: turnBudget(args.timeout_ms ?? turnDefault) });
-          return formatToolResult(result, hintOptions);
+          return formatToolResult(result, askFormatOptions);
         }
         // Blocking: ask for one slice, then keep waiting in slices. A single
         // request that stayed quiet past ~300 s would be cut by the transport.
@@ -486,16 +609,23 @@ async function callTool(name, args, signal = undefined) {
           const left = timeoutMs - (first.durationMs ?? slice);
           if (left > 1_000) {
             const waited = await waitTurn(first.sessionId, { timeoutMs: left });
-            return formatToolResult({
+            const merged = {
               ...first,
               ...waited,
               text: waited.text || first.text,
               tools: waited.tools?.length > 0 ? waited.tools : first.tools,
               durationMs: (first.durationMs ?? 0) + (waited.waitedMs ?? 0),
-            }, hintOptions);
+            };
+            return formatToolResult(merged, {
+              ...askFormatOptions,
+              advice: maybeTimeoutAdvice(merged, timeoutMs, adviceEnabled),
+            });
           }
         }
-        return formatToolResult(first, hintOptions);
+        return formatToolResult(first, {
+          ...askFormatOptions,
+          advice: maybeTimeoutAdvice(first, timeoutMs, adviceEnabled),
+        });
       }
 
       case "dsh_workspaces": {
@@ -609,16 +739,62 @@ async function callTool(name, args, signal = undefined) {
         return { content: [{ type: "text", text: lines.length > 0 ? lines.join("\n") : "(no sessions)" }] };
       }
 
+      case "dsh_history": {
+        const sessionId = typeof args.session_id === "string" ? args.session_id.trim() : "";
+        if (!sessionId) {
+          return formatToolError("`session_id` is required", undefined, "call dsh_sessions() to find the session id");
+        }
+        const params = { sessionId };
+        if (args.limit !== undefined) params.limit = args.limit;
+        if (args.since !== undefined) params.since = args.since;
+        if (args.max_chars !== undefined) params.maxChars = args.max_chars;
+
+        let kinds;
+        if (args.kinds === undefined) {
+          kinds = DEFAULT_HISTORY_KINDS;
+        } else if (Array.isArray(args.kinds) && args.kinds.length === 1 && args.kinds[0] === "*") {
+          kinds = "*";
+        } else {
+          kinds = args.kinds;
+        }
+        params.kinds = kinds;
+
+        const payload = await call("dsh.sessions.history", params);
+        const since = Number.isInteger(args.since) ? args.since : null;
+        const formatted = formatHistory(payload, { since, kinds, requestedMaxChars: args.max_chars });
+        const parts = [formatted.header];
+        // A note means the plugin answered without honouring since/kinds: say so
+        // instead of printing a delta the caller would trust and be wrong about.
+        if (formatted.note) parts.push(`note: ${formatted.note}`);
+        if (formatted.empty) {
+          parts.push("records: 0 events in this window — the session may be new, or the filters dropped everything.");
+        } else {
+          parts.push(...formatted.lines);
+        }
+        return {
+          content: [{ type: "text", text: parts.join("\n") }],
+          isError: false,
+          structuredContent: formatted.structured,
+        };
+      }
+
       case "dsh_wait": {
         const sessionId = typeof args.session_id === "string" ? args.session_id.trim() : "";
         if (!sessionId) return formatToolError("`session_id` is required", undefined, "call dsh_sessions() to find the session id");
+        const since = Number.isInteger(args.since) ? args.since : null;
+        const requestedMs = Number.isInteger(args.timeout_ms) ? args.timeout_ms : turnDefault;
         // Sliced on purpose: see waitTurn(). One long request cannot survive
         // the transport's 300 s ceiling, and the answer would be lost with it.
         const result = await waitTurn(sessionId, {
-          timeoutMs: Number.isInteger(args.timeout_ms) ? args.timeout_ms : turnDefault,
-          since: Number.isInteger(args.since) ? args.since : undefined,
+          timeoutMs: requestedMs,
+          since: since ?? undefined,
         });
-        return formatToolResult(result, hintOptions);
+        return formatToolResult(result, {
+          ...hintOptions,
+          trace: normalizeTraceLevel(args.trace, traceDefault),
+          since,
+          advice: maybeTimeoutAdvice(result, requestedMs, adviceEnabled),
+        });
       }
 
       case "dsh_cancel": {
@@ -637,6 +813,49 @@ async function callTool(name, args, signal = undefined) {
           `active runs: ${result.activeRuns?.length ?? 0}`,
         ].join("\n");
         return { content: [{ type: "text", text }] };
+      }
+
+      case "dsh_capabilities": {
+        const params = {};
+        if (args.sections !== undefined) params.sections = args.sections;
+        if (args.max_chars !== undefined) params.max_chars = args.max_chars;
+        if (typeof args.session_id === "string" && args.session_id.trim()) {
+          params.session_id = args.session_id.trim();
+        }
+        // A newer CLI/MCP bridge can be paired with an older plugin inside the
+        // profile: the tool exists here but the RPC method does not exist there.
+        // Say which half is stale instead of forwarding "unknown method" verbatim.
+        let payload;
+        try {
+          payload = await call("dsh.capabilities", params);
+        } catch (error) {
+          const message = String(error?.message ?? error);
+          if (!/unknown method/i.test(message)) throw error;
+          return formatToolError(
+            "this Harness plugin does not implement dsh.capabilities",
+            undefined,
+            "upgrade the plugin inside the DSH profile to 0.8.1 — the MCP bridge and the plugin ship together",
+          );
+        }
+        const sections = Array.isArray(payload?.sections) ? payload.sections : [];
+        const missing = Array.isArray(payload?.missing) ? payload.missing : [];
+        const truncated = Boolean(payload?.truncated);
+        const text =
+          typeof payload?.text === "string" && payload.text.length > 0
+            ? payload.text
+            : formatCapabilities(sections, {
+                maxChars: args.max_chars,
+                missing,
+              }).text;
+        return {
+          content: [{ type: "text", text }],
+          isError: false,
+          structuredContent: {
+            sections,
+            truncated,
+            missing,
+          },
+        };
       }
 
       default:

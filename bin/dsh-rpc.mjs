@@ -12,6 +12,7 @@ import { readFileSync } from "node:fs";
 
 import { rpcCall, rpcStream, waitForTurn, WAIT_SLICE_MS } from "../lib/client.mjs";
 import { endpointPath, readEndpoint, stateDir, tokenPath } from "../lib/auth.mjs";
+import { describeTrace, isTraceLevel, normalizeTraceLevel } from "../lib/trace-format.mjs";
 
 const HELP = `dsh-rpc ${new Date().getUTCFullYear()} — drive a DeepSeek Harness session from the command line
 
@@ -21,6 +22,7 @@ USAGE
 COMMANDS
   ping                      show bridge status, config and active runs
   discover                  list every RPC method with its params and result shape
+  capabilities              report what this Harness can do across eight sections
   models                    list routable providers and models
   workspaces                list the workspaces the Host shows in its sidebar
   permissions               list the permission presets this deployment offers
@@ -47,7 +49,10 @@ OPTIONS
   --queue                   wait for the session when another run is prompting it
   --timeout MS              wait budget for ask/wait (default 600000)
   --limit N                 list/history size
+  --sections IDS            capabilities: comma-separated section ids (default *)
+  --max-chars N             capabilities: cap output characters (0 = uncapped, max 40000)
   --wait MS                 health: keep polling the published endpoint until it answers
+  --trace LEVEL             tool-call trace: none|errors|summary|full (default: bridge traceDefault)
   --stream                  stream progress frames while waiting (ask)
   --json                    print the raw JSON result
   --url URL                 override the endpoint
@@ -76,7 +81,10 @@ const VALUE_FLAGS = new Set([
   "timeout",
   "since",
   "limit",
+  "sections",
+  "max-chars",
   "wait",
+  "trace",
   "url",
   "token",
 ]);
@@ -175,13 +183,39 @@ function footer(result) {
   return bits.join(" · ");
 }
 
-function emitResult(result, flags) {
+async function resolveCliTraceLevel(flags) {
+  if (flags.trace !== undefined) {
+    if (!isTraceLevel(flags.trace)) {
+      throw new UsageError("--trace must be one of: none, errors, summary, full");
+    }
+    return normalizeTraceLevel(flags.trace);
+  }
+  if (flags.json) return "none";
+  try {
+    const info = await rpcCall("dsh.discover", {}, { ...connectionOptions(flags), timeoutMs: 5_000 });
+    return normalizeTraceLevel(info?.config?.traceDefault, "errors");
+  } catch {
+    return "errors";
+  }
+}
+
+function emitResult(result, flags, traceLevel = "none", since = null) {
   if (flags.json) {
     print(JSON.stringify(result, null, 2));
   } else {
     if (result.text) print(result.text);
     else if (result.status !== "completed") note("(no assistant text)");
     if (flags.verbose && result.reason) note(`reason: ${JSON.stringify(result.reason)}`);
+    if (traceLevel !== "none") {
+      const trace = describeTrace(result?.tools ?? [], {
+        level: traceLevel,
+        status: result?.status,
+        since: Number.isInteger(since) ? since : null,
+      });
+      if (trace.lines.length > 0) {
+        print(`\ntrace:\n${trace.lines.join("\n")}`);
+      }
+    }
   }
   note(footer(result));
 }
@@ -194,6 +228,7 @@ function turnBudget(timeoutMs) {
 }
 
 async function runAsk(flags, positional) {
+  const traceLevel = await resolveCliTraceLevel(flags);
   const text = await readPrompt(positional);
   const params = { text };
   // Location and preset are creation-time decisions, and the bridge is the only
@@ -223,7 +258,7 @@ async function runAsk(flags, positional) {
     }
     if (!final) throw new Error("stream ended without a result");
     const { type, ...result } = final;
-    emitResult(result, flags);
+    emitResult(result, flags, traceLevel, null);
     return exitCodeFor(result);
   }
 
@@ -251,7 +286,7 @@ async function runAsk(flags, positional) {
       };
     }
   }
-  emitResult(result, flags);
+  emitResult(result, flags, traceLevel, null);
   return exitCodeFor(result);
 }
 
@@ -480,12 +515,14 @@ async function main(argv) {
     case "wait": {
       if (!flags.session) throw new UsageError("wait needs --session <id>");
       const timeout = numberOf(flags, "timeout");
+      const since = cursorOf(flags, "since");
+      const traceLevel = await resolveCliTraceLevel(flags);
       const result = await waitForTurn(flags.session, {
         timeoutMs: timeout ?? DEFAULT_TURN_TIMEOUT_MS,
-        since: cursorOf(flags, "since"),
+        since,
         ...options,
       });
-      emitResult(result, flags);
+      emitResult(result, flags, traceLevel, since ?? null);
       return exitCodeFor(result);
     }
     case "cancel": {
@@ -509,6 +546,35 @@ async function main(argv) {
       );
       for (const record of result.records ?? []) {
         print(`  ${String(record.seq).padStart(5)} ${record.type}`);
+      }
+      return 0;
+    }
+    case "capabilities": {
+      const params = {};
+      if (flags.sections !== undefined) {
+        const parts = String(flags.sections)
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean);
+        if (parts.length === 0) throw new UsageError("--sections needs at least one section id");
+        params.sections = parts;
+      }
+      if (flags["max-chars"] !== undefined) {
+        const raw = Number(flags["max-chars"]);
+        if (!Number.isInteger(raw) || raw < 0 || raw > 40000) {
+          throw new UsageError("--max-chars must be an integer between 0 and 40000");
+        }
+        params.max_chars = raw;
+      }
+      if (flags.session) params.session_id = flags.session;
+      const result = await rpcCall("dsh.capabilities", params, options);
+      if (flags.json) {
+        print(JSON.stringify(result, null, 2));
+        return 0;
+      }
+      print(result.text ?? "");
+      if (Array.isArray(result.missing) && result.missing.length > 0) {
+        note(`ignored unknown sections: ${result.missing.join(", ")}`);
       }
       return 0;
     }

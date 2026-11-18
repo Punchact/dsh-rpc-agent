@@ -151,7 +151,7 @@ Cursor / Codex 用配置文件等价写法（Windows 下 JSON 里的反斜杠要
 
 走本地克隆那条路线时，把路径换成 `<path-to-your-clone>\bin\dsh-rpc-mcp.mjs`。本文余下示例写 `node bin/...`，等价于"当前目录位于包内时执行"。
 
-暴露 **9 个工具**：
+暴露 **11 个工具**：
 
 | 工具 | 用途 |
 | --- | --- |
@@ -159,8 +159,10 @@ Cursor / Codex 用配置文件等价写法（Windows 下 JSON 里的反斜杠要
 | `dsh_wait` | 等该会话这一轮结束并取结果 |
 | `dsh_cancel` | 中断正在跑的轮次 |
 | `dsh_sessions` | 列会话（可按目录过滤、按时间排序） |
+| `dsh_history` | 只读查看会话最近的事件窗口（工具调用、结果、轮次结束等），不激活 agent |
 | `dsh_workspaces` | 列工作区，或登记一个新工作区 |
 | `dsh_permissions` | 列权限预设（沙箱模式 + 审批策略） |
+| `dsh_capabilities` | 只读自述当前 Harness 的八节能力快照（不创、不碰会话） |
 | `dsh_status` | 确认端点与 token 可读 |
 | `dsh_approvals_pending` | 列出待你回答的升权请求 |
 | `dsh_approvals_resolve` | 回答一条升权请求 |
@@ -181,6 +183,17 @@ Cursor / Codex 用配置文件等价写法（Windows 下 JSON 里的反斜杠要
 `dsh_ask` 的结果第一行固定是 `session <id>`，随后是正文与一行 `— outcome: … · turn … · 5.2s` 元信息。参数名写错时报文很直接：给 `dsh_ask` 传 `text` 会得到 `` `prompt` is required ``，且 `isError: true`。
 
 MCP 服务器与被调用的 Harness 会话**不共享上下文**——给 `dsh_ask` 的 prompt 要自包含。
+
+当 `dsh_wait` 的回答不够看清 Harness 到底做了什么时，用只读的 `dsh_history` 回看最近执行过的工具和事件（不会激活会话 agent）：
+
+```js
+// 默认只看 tool/call、tool/result、turn/end；增量过大时把 limit 调高到最多 500
+dsh_history({ session_id: "session-xxxx", since: 42, limit: 100 })
+// 传 kinds: ["*"] 查看全部事件类型
+dsh_history({ session_id: "session-xxxx", kinds: ["*"] })
+```
+
+做计划前想确认这个 Harness 实例此刻能用什么，调用只读的 `dsh_capabilities`（不会新建或唤醒会话）。它把环境拆成八节（`identity`、`runtime`、`permissions`、`tools`、`mcp`、`sessions`、`workspace`、`plugins`），每节各自标注状态：`[ok]` 表示该 `source` 完整应答；`[partial]` 表示拿到了部分事实并在首行写明缺口（例如宿主只暴露了工具名而没暴露 schema）；`[unavailable]` 只代表“当前宿主环境未暴露该服务或事实”，并不等于该能力不存在。其中 `mcp` 只归并当前实际可调用的 `mcp__*` 工具前缀，不冒充读取 profile 配置里的 server 清单。
 
 ### 粘性会话
 
@@ -214,6 +227,7 @@ node bin/dsh-rpc.mjs history --session session-xxxx --limit 20
 node bin/dsh-rpc.mjs sessions --limit 10
 node bin/dsh-rpc.mjs models                  # DSH 可选模型
 node bin/dsh-rpc.mjs discover                # 自描述：方法、传输、结果结构
+node bin/dsh-rpc.mjs capabilities            # 八节能力快照（--sections / --max-chars / --session）
 node bin/dsh-rpc.mjs cancel --session session-xxxx
 node bin/dsh-rpc.mjs call dsh.sessions.history '{"sessionId":"session-xxxx"}' --timeout 30000
 ```
@@ -384,6 +398,8 @@ console.log(answer.text, answer.usage);
 - **"还没好"不是失败**：`status:"timeout"` 只说明这一片到期，轮次仍在 Harness 里跑。重投等于重新提问，会多开会话、重复副作用。要进度用 `wait` / `history`。
 - **轮次归属**：投递 prompt 后，本插件从事件流里找自己那条 `user/message`（`source.rpcId` 等于本次 `requestId`），以它落在哪一轮为准。因此**同一会话里有别人插话时，不会把别人的回答当成你的**——那一轮的 `turn/end` 会被跳过，继续等自己那一轮。
 
+外层 MCP 客户端通常会对单次工具调用设比本桥 `timeout_ms` 上限（`3600000`）更短的超时（例如 Codex 默认 `tool_timeout_sec` 为 `900` s），本桥无法抬高外层上限；长任务应默认使用 `dsh_ask({ wait: false })` 取回句柄，再用 `dsh_wait({ session_id, since })` 分段轮询。可在配置中通过 `timeoutAdvice`（默认 `true`，控制长等待超时后的每会话一次性提示）和 `maxResultChars`（默认 `20000`，上限 `200000`，`0` 为关闭；仅截断单轮正文以防病态超长输出）微调这一层的行为。
+
 ## 工作区、模型、推理等级
 
 这三个都是 DSH 自己的概念，桥只做转发，不新造开关。
@@ -494,7 +510,7 @@ approvals.mode=deny refused a sandbox escalation to "danger-full-access" for too
           deadlineMs: 60000    # delegate：等调用方回答的时长，超时视为拒绝
 ```
 
-其余键：`enabled`、`tokenFile`（自定义 token 路径）、`path`（默认 `/dsh-rpc`）、`logRequests`。环境变量 `DSH_RPC_TOKEN` 可覆盖 token（优先级高于文件），适合 CI 或不想落盘的场景。
+其余键：`enabled`、`tokenFile`（自定义 token 路径）、`path`（默认 `/dsh-rpc`）、`logRequests`、`traceDefault`（默认 `"errors"`）、`maxResultChars`（默认 `20000`，`0` 表示不截断）、`timeoutAdvice`（默认 `true`）。环境变量 `DSH_RPC_TOKEN` 可覆盖 token（优先级高于文件），适合 CI 或不想落盘的场景。
 
 ## 安全模型
 

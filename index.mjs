@@ -49,6 +49,7 @@ export function apply(ctx, input = {}) {
     tokenPath: tokenPath(config),
     endpointPath: endpointPath(),
     endpointUrl: null,
+    startedAt: Date.now(),
   };
 
   // Escalations this bridge holds for a caller to answer (approvals.mode=delegate).

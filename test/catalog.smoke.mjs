@@ -53,6 +53,7 @@ const names = (info.methods ?? []).map((method) => method.name).sort();
 const expected = [
   "dsh.approvals.pending",
   "dsh.approvals.resolve",
+  "dsh.capabilities",
   "dsh.discover",
   "dsh.models",
   "dsh.permissions.catalog",
@@ -90,7 +91,7 @@ for (const want of ["workspaceId", "agentPreset", "model", "reasoningEffort", "p
 // pass a field that is guaranteed to be rejected.
 check(!createParams.includes("sessionId"), "dsh.sessions.create must not advertise sessionId");
 
-const handlers = ["listWorkspaces", "createWorkspace", "permissionCatalog", "configure"];
+const handlers = ["listWorkspaces", "createWorkspace", "permissionCatalog", "configure", "capabilities"];
 for (const name of handlers) {
   check(typeof methods[name] === "function", `handler missing: ${name}`);
 }
