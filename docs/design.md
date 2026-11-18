@@ -596,3 +596,12 @@ compression: gzip
 4. **出箱写入围栏**。完成/失败更新要求 `status = 'in_flight'`；租约过期被回收后迟到的回执只记 `skipped`，不覆盖接手者的结果。
 
 同时记录一处**刻意不对称**：`cancel_requested` 下收到 `ready` 报告仍可进 `review_pending`（方案 §5.2：先到可信完成证据就按结果走），而 `waiting` 报告会记 `report.disputed`。前者不是缺陷，是「取消与完成竞态时以证据为准」的落地；差别在于 ready 带结果、waiting 只带一句等待。
+
+## 35. 决策 0.9.0-h：执行方失败的可观测性与安全边界
+
+外部安全评审（t3）指出三类风险：注册数据可影响要 spawn 的可执行文件、原始适配器异常会进任务账本与回执（含路径/端口/URL/堆栈）、Codex stdio 没有帧与队列上限；CLI 与 MCP 入口也缺少运行期校验。四条决策：
+
+1. **可执行文件只能由插件配置决定**。`dsh.agents.register` 是 RPC 入口，其 `adapterConfig(Ref)` 可能来自远端调用方，绝不允许影响 `spawn` 的目标。`resolveCodexBinary` 只接受构造期 `defaultBinary`（来自 `tasksAdapters.codex.binary`）与内置发现顺序，并要求候选是普通文件且大小 > 0——0 字节的 `WindowsApps` 执行别名因此天然被跳过。
+2. **失败信息按「固定文案 + 白名单 reason」发布**。直接静默会让排障归零；直接透传异常会泄漏本机信息。折中是 `sanitizeAdapterFailure`：分类文案只有三句（`unavailable` / `timeout` / `rejected`），可操作细节通过 `ADAPTER_REASON_MESSAGES` 的 17 个白名单键发布；未命中白名单的 reason（含任何带路径或空格的 prose）一律丢弃。白名单是代码变更点，因此适配器无法把任意文本塞进回执。
+3. **stdio 必须有界**。Codex 适配器把单帧限制在 4 MiB（超限即判协议错并关闭会话）、要求 JSON 帧是非数组对象、事件队列上限 500（丢最旧并计 `droppedEvents`）、stderr 只保留尾部 4096 字符——否则一个不合作的子进程能把插件的内存与日志撑爆。
+4. **入口校验按声明执行**。CLI 与 MCP 的 schema 声明与运行期校验必须一致：数字走安全整数与范围校验、JSON 语法失败在进入 RPC 前失败、标识符要求非空字符串。校验失败是 `validationFailed`，不是把脏参数交给账本。
