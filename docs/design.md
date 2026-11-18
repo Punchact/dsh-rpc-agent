@@ -478,3 +478,29 @@ compression: gzip
 **决策五十三：闸门关闭要等下游走完，关闭之后不再放行。** 已批准的 `pass()` 正在跑时 `dispose()` 到达，若当场还原 preset，下游就踩在还原后的权限上执行。现在关闭流程等这次 continuation 结束；若它结束时闸门已经关了，返回 hold 决策而不是 allow（`lib/approvals.mjs:546`，理由串是 "The approval gate closed while the downstream listener was running."）。
 
 **决策五十四：粘性会话按 key 排队，选项只在自己的 turn 之前应用。** 并发 `ask` 复用同一会话时，后一个请求若先应用模型/权限设置，会污染前一个尚未提交的 turn。现在同一 key 的获取与注册表更新串行化，各自选项只在自己的 prompt 提交前生效；上一个桥请求已超时但 Host turn 还活着时，直接返回 busy，既不改选项也不再提交。
+
+## 24. 决策 0.8.1-e：capabilities 可达性（SPIKE）
+
+> 2026-11-18 S0 勘探结论。本次仅做只读源码静态勘探（`C:\Users\Andy\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\lib\*.mjs`、`C:\Users\Andy\.dsh\profiles\desktop\node_modules\dsh-skill-mcp-panel\lib\*`、`C:\Users\Andy\AppData\Local\Programs\DeepSeek Harness\resources\app.asar` 内 `@deepseek-ai/*` 源码，以及 `C:\Users\Andy\.dsh\profiles\desktop\cordis.patch.yml` 对照）。除 `permissionPresets` 与 `sessions` 已在现网运行外，其余路径均属**静态推断，尚未在 live Host 内运行验证（未验证）**。
+
+1. **① 哪条路径能拿到工具清单与 MCP server**：
+   - **唯一直接路径：`ctx.get("tools")`（`ToolsService`）**。Cordis 的 `ctx.get(name, strict = true)` 允许在不声明 `inject` 的情况下读取已激活服务（`app.asar/dsh/node_modules/@deepseek-ai/cordis/lib/index.js:1348-1357`）。`ToolsService` 暴露 `schemas(scope?: ScopeKey, toolSet?: ResolvedToolSet)` 与 `definitions(scope?, toolSet?)`（`app.asar/dsh/node_modules/@deepseek-ai/dsh-tools/src/index.ts:101, 114, 307-320`）。同目录插件 `dsh-skill-mcp-panel` 已在生产中使用 `ctx.tools.schemas()` 与 `ctx.tools.view(undefined)` 读取 MCP 工具（`dsh-skill-mcp-panel/lib/mcp/status.js:34-41`、`gateway.js:287-298`）；但本桥未把 `"tools"` 写进 `inject`，改用 `ctx.get("tools")` 读取的运行时表现**未验证**。
+   - **全局 vs 按 Agent 作用域**：不传 `scope` 调用 `ctx.get("tools")?.schemas()` 走 `this.view(undefined)`（`dsh-tools/src/index.ts:201-229`），只返回全局层注册的工具（包含以独立行挂载的 `dsh-mcp-client` 注册的 `mcp__<serverName>__<rawName>` 工具，见 `app.asar/.../dsh-mcp-client/src/tools.ts:93-95, 179`），不含 `agentPreset` 隔离工具与每 agent 的 `tools.restrict()` 限制（`dsh-skill-mcp-panel/lib/tool-filter.js:110-120`）。若要取特定会话 Agent 的可见工具，需先通过 **`ctx.get("agents")?.get(sessionId)`**（或 `.list()`，`app.asar/.../dsh-agent/src/index.ts:582-592`）获取 `ReactLoopAgent` 实例——该实例自身即是 `ScopeKey`（`this.scope = createScope(loopCtx, this)`，`app.asar/.../dsh-agent-loop/src/agent.ts:113, 149`），再传给 `ctx.get("tools")?.schemas(agent)`，即可得到经过 preset 继承与 `restrict()` 过滤后的可见工具集（注意未传 `toolSet` 时不求值动态 `when` 条件，见 `dsh-tools/src/index.ts:275, 318`；**未运行验证**）。
+   - **MCP server**：优先从上述可见工具名按 `mcp__<serverName>__` 前缀归并（`dsh-mcp-client/src/tools.ts:93-95`；仅反映当前已连接且可见的 server，不含连接失败/禁用项）。另存在 `ctx.get("mcpManager")?.list()`（`app.asar/.../dsh-mcp-manager/src/index.ts:222, 270-278`；`api-catalog.ts:2230-2239`），但 `dsh-mcp-manager` 仅由 `dsh-web-app` 挂载（`dsh-desktop-host` / `dsh-base` 未直接依赖），而本机 `cordis.patch.yml:41-63, 400-514` 是用独立 `@deepseek-ai/dsh-mcp-client` 行挂载的，因此 `mcpManager` 在桌面端是否覆盖所有 server **未验证**。
+   - **其余候选路径判定**：
+     - `ctx.get("sessions")?.get(id)?.agent?.tools`：**不可达（不存在）**。`Session`（`app.asar/.../dsh-session/src/index.ts:557-585`）只有 `header`/`surface`/`id`，无 `.agent` 也无 `.tools`；`ReactLoopAgent`（`dsh-agent-loop/src/agent.ts:113-156`）也无 `.tools` 属性。
+     - `ctx.get("agents")`：`dsh-agent/src/index.ts:582-592` **可达**（静态推断），只作 `ScopeKey` 载体配合 `tools.schemas(agent)` 使用。
+     - `ctx.get("agentPresets")`：`app.asar/.../dsh-agent-preset-registry/src/index.ts:182-200` **可达**（静态推断），可查预设列表与 composition 模块名（`list()` / `inspectCompositions()`），不直接返回工具清单。
+     - `ctx.get("permissionPresets")`：**已运行验证可达**（`dsh-rpc-agent/index.mjs:107, 115`、`lib/methods.mjs:561`），提供 `catalog()` 与 `current(session)`。
+     - `ctx.get("mcp")`：**不可达（不存在该服务名）**。`app.asar/.../dsh-tool-cordis/src/api-catalog.ts:84-4952` 中无 `mcp` 键（仅有 `mcpManager` 与 `mcpResources`）。
+     - 插件清单（`plugins`）：`ctx.get("plugins")` 不存在；宿主 `dsh-host-plugin-inventory/src/index.ts:86` 直接读 `ctx.loader.entries()`，第三方非 `inject` 插件通过 `ctx.loader` 读取的权限与稳定性**未验证**，且**严禁**读 `cordis.patch.yml` 冒充运行时状态。
+
+2. **② 拿不到时的降级形态**：
+   - 每节独立降级并标注 `source`：
+     - `tools`：优先 `ctx.get("tools")?.schemas(agent)`（`source: "agent-tools-scoped"`）→ 无活跃 agent 时退回 `ctx.get("tools")?.schemas()`（`source: "tools-global"`，注明不含 per-agent `restrict`/preset 隔离工具）→ 仍不可用或抛错时降级为 `{ status: "unavailable", source: "none", reason }`。
+     - `mcp`：基于 `tools` 可见工具名按 `mcp__<server>__` 归并（`status: "partial"`，注明仅含已连接且可见的工具；若 `ctx.get("mcpManager")?.list()` 可用再合并状态）；两者皆不可用时降级为 `{ status: "unavailable", source: "none", reason }`。
+     - `plugins`：默认保守返回 `{ status: "unavailable", source: "none", reason: "no plugin registry service exposed via ctx.get" }`（不读 YAML 兜底）。
+
+3. **③ 对 D（`dsh_capabilities`）的建议**：
+   - **保留全节结构（`plugin` / `model` / `permissions` / `tools` / `mcp` / `plugins` / `env` / `workspaces`），每节独立按上述阶梯探测并在不可达时输出 `unavailable` + `reason`**，不要在设计期直接砍成三节。
+   - 理由：静态源码确认 `ctx.get("tools")?.schemas(agent?)` 与 `ctx.get("agents")` 均在 Host 存在，且 `dsh-skill-mcp-panel` 已验证了 `tools.schemas()` 模式；按节独立降级意味着即便在精简 Host 或沙箱环境下 `tools` 不可达，也会自动呈现出「核心节正常 + `tools`/`mcp`/`plugins` 为 `unavailable`」的诚实形态，兼顾上限与兜底。S5 阶段需在预演安装时对 `ctx.get("tools")?.schemas(agent)` 与 `ctx.get("mcpManager")` 做一次 live Host 运行验证。

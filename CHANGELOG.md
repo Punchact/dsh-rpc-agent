@@ -1,5 +1,30 @@
 # 变更记录
 
+## [0.8.1] - Unreleased
+
+> 0.8.0 未单独发布，其观测能力并入本版。
+
+### 新增
+
+- A trace 投影：- TODO(S2..S6)
+- B `dsh_history`：- TODO(S2..S6)
+- C `structuredContent`：- TODO(S2..S6)
+- D `dsh_capabilities`：- TODO(S2..S6)
+- E 超时契约：- TODO(S2..S6)
+- F 结果护栏：- TODO(S2..S6)
+
+### 修复
+
+- TODO(S2..S6)
+
+### 行为变化
+
+- TODO(S2..S6)
+
+### 关闭方式
+
+- `traceDefault: "none"`：- TODO(S2..S6)
+
 ## [0.7.8] - 2026-11-18
 
 > 本版已于 2026-11-18 发布到 npm（`@punchact/dsh-rpc-agent@0.7.8`，latest），由 GitHub Actions 的 OIDC 发布并带 SLSA provenance。这一版把审批闸门的持久额度改成**跨进程事务**，并收口 gate 关闭与粘性会话上的并发竞态；升级前请先读本章末尾的「说明」。

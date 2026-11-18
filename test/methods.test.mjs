@@ -17,7 +17,7 @@ import test, { after } from "node:test";
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), "dsh-rpc-home-"));
 
 import { resolveConfig } from "../lib/config.mjs";
-import { createMethods } from "../lib/methods.mjs";
+import { collectTurn, createMethods } from "../lib/methods.mjs";
 import { buildDispatcher } from "../lib/http.mjs";
 
 // The bridge deliberately `unref()`s its timers so a bridge run never keeps the
@@ -221,6 +221,7 @@ function fakeController({
                 content: [{ type: "text", text: step.text }],
                 isError: step.isError ?? false,
               },
+              ...(step.error !== undefined ? { error: step.error } : {}),
             });
           } else if (step.kind === "end") {
             if (step.gate) await step.gate;
@@ -1705,4 +1706,169 @@ test("a Host that never finishes closing still lets history answer", async () =>
   assert.equal(result.sessionId, "session-test");
   assert.ok(Array.isArray(result.records));
   assert.ok(Date.now() - started < 5_000, "cleanup is bounded, the answer is not");
+});
+
+// ------------------------------------------------------------ 0.8.1 S1: trace data --
+
+test("collectTurn records seq, at, endedAt and ok while preserving legacy fields", () => {
+  const events = [
+    { type: "turn/start", seq: 1, time: 1000, data: { turn: 1 } },
+    { type: "tool/call", seq: 2, time: 1010, data: { turn: 1, callId: "c1", name: "read", arguments: { path: "a.txt" } } },
+    {
+      type: "tool/result",
+      seq: 3,
+      time: 1025,
+      data: { turn: 1, callId: "c1", message: { toolCallId: "c1", content: [{ type: "text", text: "ok-body" }], isError: false } },
+    },
+    { type: "tool/call", seq: 4, time: 1030, data: { turn: 1, callId: "c2", name: "pwsh", arguments: { command: "exit 1" } } },
+    {
+      type: "tool/result",
+      seq: 5,
+      time: 1050,
+      data: {
+        turn: 1,
+        callId: "c2",
+        error: { code: "ENOENT", message: "missing" },
+        message: { toolCallId: "c2", content: [{ type: "text", text: "failed-body" }], isError: true },
+      },
+    },
+  ];
+  const collected = collectTurn(events, 1);
+  assert.equal(collected.tools.length, 2);
+
+  const [first, second] = collected.tools;
+  assert.equal(first.callId, "c1");
+  assert.equal(first.name, "read");
+  assert.deepEqual(first.arguments, { path: "a.txt" });
+  assert.equal(first.output, "ok-body");
+  assert.equal(first.isError, undefined);
+  assert.equal(first.seq, 2);
+  assert.equal(first.at, 1010);
+  assert.equal(first.endedAt, 1025);
+  assert.ok(first.endedAt >= first.at);
+  assert.equal(first.ok, true);
+
+  assert.equal(second.callId, "c2");
+  assert.equal(second.name, "pwsh");
+  assert.deepEqual(second.arguments, { command: "exit 1" });
+  assert.equal(second.output, "failed-body");
+  assert.equal(second.isError, true);
+  assert.deepEqual(second.error, { code: "ENOENT", message: "missing" });
+  assert.equal(second.seq, 4);
+  assert.equal(second.at, 1030);
+  assert.equal(second.endedAt, 1050);
+  assert.ok(second.endedAt >= second.at);
+  assert.equal(second.ok, false);
+  assert.ok(second.seq > first.seq);
+  assert.ok(second.at >= first.at);
+});
+
+test("ask carries seq/at/endedAt/ok and retains error alongside legacy tool fields", async () => {
+  const controller = fakeController({
+    script: [
+      { kind: "start", turn: 1 },
+      { kind: "tool", turn: 1, callId: "c1", name: "read" },
+      { kind: "toolResult", turn: 1, callId: "c1", text: "alpha", isError: false },
+      { kind: "tool", turn: 1, callId: "c2", name: "bash" },
+      { kind: "toolResult", turn: 1, callId: "c2", text: "boom", isError: true, error: { reason: "exit 1" } },
+      { kind: "text", turn: 1, text: "done" },
+      { kind: "end", turn: 1 },
+    ],
+  });
+  const result = await build(controller).ask({ text: "run tools" });
+  assert.equal(result.tools.length, 2);
+  const [t1, t2] = result.tools;
+  assert.ok(Number.isInteger(t1.seq) && Number.isInteger(t2.seq) && t2.seq > t1.seq);
+  assert.ok(typeof t1.at === "number" && typeof t2.at === "number" && t2.at >= t1.at);
+  assert.ok(typeof t1.endedAt === "number" && t1.endedAt >= t1.at);
+  assert.ok(typeof t2.endedAt === "number" && t2.endedAt >= t2.at);
+  assert.equal(t1.ok, true);
+  assert.equal(t2.ok, false);
+  assert.equal(t2.isError, true);
+  assert.deepEqual(t2.error, { reason: "exit 1" });
+  assert.equal(t1.callId, "c1");
+  assert.equal(t1.name, "read");
+  assert.deepEqual(t1.arguments, {});
+  assert.equal(t1.output, "alpha");
+  assert.equal(t2.output, "boom");
+});
+
+test("history filters by kinds and since while keeping omission backward compatible", async () => {
+  const historical = [
+    { type: "turn/start", seq: 0, time: 10, data: { turn: 1 } },
+    { type: "tool/call", seq: 1, time: 20, data: { turn: 1, callId: "c1", name: "read", arguments: {} } },
+    {
+      type: "tool/result",
+      seq: 2,
+      time: 30,
+      data: { turn: 1, callId: "c1", message: { toolCallId: "c1", content: [{ type: "text", text: "ok" }] } },
+    },
+    {
+      type: "assistant/message",
+      seq: 3,
+      time: 40,
+      data: { turn: 1, message: { content: [{ type: "text", text: "reply" }] } },
+    },
+    { type: "turn/end", seq: 4, time: 50, data: { turn: 1, reason: { kind: "completed" } } },
+  ];
+  const methods = build(fakeController({ historical }));
+
+  const baseline = await methods.history({ sessionId: "session-test" });
+  assert.equal(baseline.records.length, 5);
+  assert.equal(baseline.records[0].seq, 0);
+  assert.equal("truncated" in baseline, false);
+
+  const byKinds = await methods.history({ sessionId: "session-test", kinds: ["tool/call", "tool/result"] });
+  assert.deepEqual(byKinds.records.map((r) => r.type), ["tool/call", "tool/result"]);
+
+  const wildcard = await methods.history({ sessionId: "session-test", kinds: "*" });
+  assert.equal(wildcard.records.length, 5);
+
+  const bySince = await methods.history({ sessionId: "session-test", since: 2 });
+  assert.deepEqual(bySince.records.map((r) => r.seq), [3, 4]);
+  assert.equal(bySince.cursor, 4);
+  assert.equal(bySince.turn, 1);
+
+  const combined = await methods.history({ sessionId: "session-test", since: 1, kinds: ["tool/result", "turn/end"] });
+  assert.deepEqual(combined.records.map((r) => r.type), ["tool/result", "turn/end"]);
+});
+
+test("history enforces maxChars with an explicit truncated flag and validates bad filters", async () => {
+  const historical = [
+    { type: "turn/start", seq: 1, time: 10, data: { turn: 1 } },
+    {
+      type: "assistant/message",
+      seq: 2,
+      time: 20,
+      data: { turn: 1, message: { content: [{ type: "text", text: "x".repeat(400) }] } },
+    },
+    { type: "turn/end", seq: 3, time: 30, data: { turn: 1, reason: { kind: "completed" } } },
+  ];
+  const methods = build(fakeController({ historical }));
+
+  const capped = await methods.history({ sessionId: "session-test", maxChars: 180 });
+  assert.equal(capped.truncated, true);
+  assert.ok(JSON.stringify(capped.records).length <= 180);
+  assert.equal(capped.records.at(-1)?.type, "turn/end");
+
+  const singleHuge = await methods.history({
+    sessionId: "session-test",
+    kinds: ["assistant/message"],
+    maxChars: 160,
+  });
+  assert.equal(singleHuge.truncated, true);
+  assert.ok(JSON.stringify(singleHuge.records).length <= 160);
+  assert.match(JSON.stringify(singleHuge.records), /truncated/);
+
+  const unlimited = await methods.history({ sessionId: "session-test", maxChars: 0 });
+  assert.equal(unlimited.records.length, 3);
+  assert.equal("truncated" in unlimited, false);
+
+  const withinBudget = await methods.history({ sessionId: "session-test", maxChars: 10_000 });
+  assert.equal(withinBudget.truncated, false);
+  assert.equal(withinBudget.records.length, 3);
+
+  await assert.rejects(() => methods.history({ sessionId: "session-test", since: -1 }), (err) => err.code === -32602);
+  await assert.rejects(() => methods.history({ sessionId: "session-test", kinds: "tool/call" }), (err) => err.code === -32602);
+  await assert.rejects(() => methods.history({ sessionId: "session-test", maxChars: -5 }), (err) => err.code === -32602);
 });
