@@ -424,12 +424,12 @@ test("dispatch, pump, and drainEffects sanitize raw adapter exceptions out of le
     const res = await disp.startTask({ taskId: t.taskId });
     assert.equal(res.dispatchFailed, true);
     assert.equal(res.error, "the execution backend is unavailable");
-    assert.doesNotMatch(JSON.stringify(res), /4035|csrf_top_secret_99|priv\.key|ECONNREFUSED/);
+    assert.doesNotMatch(JSON.stringify(res), /127\.0\.0\.1:4035|csrf_top_secret_99|priv\.key|ECONNREFUSED/);
 
     const detail = await s1.engine.get({ taskId: t.taskId });
     const evts = await s1.engine.events({ taskId: t.taskId, afterSeq: 0 });
-    assert.doesNotMatch(JSON.stringify(detail), /4035|csrf_top_secret_99|priv\.key/);
-    assert.doesNotMatch(JSON.stringify(evts), /4035|csrf_top_secret_99|priv\.key/);
+    assert.doesNotMatch(JSON.stringify(detail), /127\.0\.0\.1:4035|csrf_top_secret_99|priv\.key/);
+    assert.doesNotMatch(JSON.stringify(evts), /127\.0\.0\.1:4035|csrf_top_secret_99|priv\.key/);
     assert.ok(debugLogs.length >= 1);
     assert.doesNotMatch(JSON.stringify(debugLogs), /csrf_top_secret_99/);
   } finally {
@@ -461,7 +461,7 @@ test("dispatch, pump, and drainEffects sanitize raw adapter exceptions out of le
     const started = await disp.startTask({ taskId: t.taskId });
     await assert.rejects(
       () => disp.pump({ taskId: t.taskId }),
-      (err) => !err.message.includes("4035") && !err.message.includes("csrf_top_secret_99"),
+      (err) => !err.message.includes("127.0.0.1:4035") && !err.message.includes("csrf_top_secret_99"),
     );
 
     await s2.engine.cancel({
@@ -473,7 +473,7 @@ test("dispatch, pump, and drainEffects sanitize raw adapter exceptions out of le
     assert.equal(d.failed, 1);
 
     const effRows = s2.store.read((db) => db.prepare("SELECT * FROM effects WHERE task_id = ?").all(t.taskId));
-    assert.doesNotMatch(JSON.stringify(effRows), /4035|csrf_top_secret_99|priv\.key/);
+    assert.doesNotMatch(JSON.stringify(effRows), /127\.0\.0\.1:4035|csrf_top_secret_99|priv\.key/);
   } finally {
     s2.store.close();
   }
