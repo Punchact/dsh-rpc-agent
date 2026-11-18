@@ -407,6 +407,18 @@ async function probeHealth(explicitUrl, budgetMs) {
   return failure.kind === "http" ? 1 : 3;
 }
 
+/**
+ * Mixed-version hint (acceptance A18): a 0.9.0 bridge talking to a pre-0.9.0 plugin
+ * must say what to do next instead of leaking the raw RPC error, and may never
+ * half-succeed. Returns the hint line, or null when the error is unrelated.
+ */
+function mixedVersionHint(message) {
+  if (!/unknown method: dsh\.(tasks|agents)\./.test(typeof message === "string" ? message : "")) {
+    return null;
+  }
+  return "  next: this Harness plugin predates the task centre (0.9.0). Upgrade the plugin inside the DSH profile — the bridge and the plugin ship together.";
+}
+
 async function main(argv) {
   const { flags, positional } = parseArgv(argv);
   if (flags.help || positional.length === 0) {
@@ -901,9 +913,11 @@ if (IS_MAIN) {
           : `dsh-rpc: ${error?.message ?? error}`,
       );
       if (error?.data) note(`  ${JSON.stringify(error.data)}`);
+      const hint = mixedVersionHint(error?.message);
+      if (hint) note(hint);
       await flushStdio();
       process.exit(code);
     });
 }
 
-export { UsageError, main, parseArgv, runAgentsCommand, runTasksCommand };
+export { UsageError, main, mixedVersionHint, parseArgv, runAgentsCommand, runTasksCommand };

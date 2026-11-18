@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { UsageError, main, parseArgv } from "../bin/dsh-rpc.mjs";
+import { UsageError, main, mixedVersionHint, parseArgv } from "../bin/dsh-rpc.mjs";
+const NEXT_HINT =
+  "  next: this Harness plugin predates the task centre (0.9.0). Upgrade the plugin inside the DSH profile — the bridge and the plugin ship together.";
 
 function withMockCliRpc(responder, fn) {
   const prevFetch = globalThis.fetch;
@@ -116,4 +118,14 @@ test("CLI tasks and agents subcommands invoke matching RPC methods and honor --j
       assert.deepEqual(calls[2].params, { agentId: "ag-1", controls: ["start", "cancel"] });
     },
   );
+});
+
+test("mixedVersionHint explains a pre-0.9.0 plugin instead of leaking the RPC error", () => {
+  assert.equal(mixedVersionHint("unknown method: dsh.tasks.list"), NEXT_HINT);
+  assert.equal(mixedVersionHint("unknown method: dsh.agents.list"), NEXT_HINT);
+  assert.equal(mixedVersionHint("unknown method: dsh.sessions.ask"), null);
+  assert.equal(mixedVersionHint("boom"), null);
+  assert.equal(mixedVersionHint(undefined), null);
+  assert.match(NEXT_HINT, /predates the task centre/);
+  assert.match(NEXT_HINT, /next:/);
 });
