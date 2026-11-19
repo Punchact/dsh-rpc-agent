@@ -20,9 +20,11 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createServer, request as httpRequest } from "node:http";
+import { request as httpRequest } from "node:http";
 import { spawn } from "node:child_process";
 import { mkdtempSync } from "node:fs";
+
+import { closeServer, listenSafe } from "./helpers/stub-server.mjs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -61,17 +63,16 @@ async function serve(dispatch, stats = createStats()) {
     stats,
   });
   const rpc = server.routes.get("/dsh-rpc");
-  const http = createServer((req, res) => {
+  const { server: http, port } = await listenSafe((req, res) => {
     rpc(req, res).catch(() => res.destroy());
   });
-  await new Promise((resolve) => http.listen(0, "127.0.0.1", resolve));
   return {
-    port: http.address().port,
+    port,
     stats,
     async close() {
       routes.dispose();
       http.closeAllConnections?.();
-      await new Promise((resolve) => http.close(resolve));
+      await closeServer(http);
     },
   };
 }

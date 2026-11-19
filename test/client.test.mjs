@@ -7,10 +7,11 @@
 
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+import { closeServer as close, deadSafePort as deadPort, listenSafe as listen } from "./helpers/stub-server.mjs";
 
 const home = join(tmpdir(), `dsh-rpc-client-test-${process.pid}`);
 mkdirSync(join(home, "dsh-rpc"), { recursive: true });
@@ -134,33 +135,32 @@ function publishEndpoint(url, extra = {}) {
   );
 }
 
-async function listen(handler, { onConnection } = {}) {
-  // fetch refuses the standard's "bad ports" (5060, 6667, ...) before it opens a
-  // socket. The OS can hand one out on port 0, and then a test about the
-  // transport would be measuring undici's blocklist instead. Re-roll.
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const server = createServer(handler);
-    if (onConnection) server.on("connection", onConnection);
-    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const { port } = server.address();
-    if (!isFetchBlockedPort(port)) return { server, url: `http://127.0.0.1:${port}/dsh-rpc` };
-    await close(server);
-  }
-  throw new Error("could not get a port outside the fetch blocked-port list");
-}
-
-async function close(server) {
-  await new Promise((resolve) => server.close(resolve));
-}
-
-/** A port nobody is listening on: bind, read the number, release it. */
-async function deadPort() {
-  const { server, url } = await listen(() => {});
-  await close(server);
-  return Number(new URL(url).port);
-}
-
 after(() => rmSync(home, { recursive: true, force: true }));
+
+test("listenSafe skips fetch-blocked ports and closes rejected sockets deterministically", async () => {
+  const ports = [5060, 6667, 54321];
+  const closed = [];
+  let idx = 0;
+  const res = await listen(() => {}, {
+    createServerImpl() {
+      const assigned = ports[idx++];
+      return {
+        listen(_p, _h, cb) {
+          cb();
+        },
+        address() {
+          return { port: assigned };
+        },
+        close(cb) {
+          closed.push(assigned);
+          cb();
+        },
+      };
+    },
+  });
+  assert.equal(res.port, 54321);
+  assert.deepEqual(closed, [5060, 6667]);
+});
 
 test("a refused port is retried once after the endpoint is republished", async () => {
   const dead = await deadPort();
