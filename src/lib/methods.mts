@@ -3754,9 +3754,17 @@ export function createMethods(
       agentId: params.agentId ?? null,
       input: params.input ?? null,
     };
+    // A digest the caller supplies is a promise about the request being previewed. Replacing a
+    // non-string with a computed one would keep the preview working while dropping that promise —
+    // `requestDigest: 123` would bind nothing and look fine (same class as the submit fix; quality
+    // review, 0.9.4). Absent or null still means "compute it for me".
+    const suppliedDigest = params.requestDigest;
+    if (suppliedDigest !== undefined && suppliedDigest !== null && typeof suppliedDigest !== "string") {
+      throw validationFailed("`requestDigest` must be a string", { field: "requestDigest" });
+    }
     const requestDigest =
-      typeof params.requestDigest === "string" && params.requestDigest.trim()
-        ? params.requestDigest.trim()
+      typeof suppliedDigest === "string" && suppliedDigest.trim()
+        ? suppliedDigest.trim()
         : createHash("sha256").update(JSON.stringify(digestInput)).digest("hex");
     return createPreview(store, {
       principalId,

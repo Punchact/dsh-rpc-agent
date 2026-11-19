@@ -77,14 +77,14 @@ git push origin v0.8.1
 ```
 
 Draft 状态**不会**触发工作流，所以写正文是安全的：先存 Draft、反复改、最后 Publish。
-工作流按 `release: published` 触发：`verify` job 会先执行 `npm run build` 生成 `dist/`，再校验 tag、版本、`check:types`、全套单测、真宿主集成与 `dist/` 打包/`check-release-path`；任何一项红都不会进 `publish`。`publish` job 同样先 `npm run build` 再在 **`dist/` 目录内** 执行 `npm publish --access public`（发布的是构建并验证过的 `dist/` 产物包；仓库根目录保留 `"private": true` 且无 `files` 字段，不会被直接发布），并用 OIDC 换短期凭证，仓库里没有可被盗的令牌。
+工作流按 `release: published` 触发，两个 job 之间**不重建**：`verify` job 先 `npm run build` 生成 `dist/`，校验 tag、版本、`check:types`、全套单测、真宿主集成、`dist/` 打包与 `check-release-path`，然后把 `dist/` 打成 tarball（`npm pack ./dist`）、写出 `sha256sum` 并 `upload-artifact`；任何一项红都不会进 `publish`。`publish` job 只做三件事——`download-artifact` 取回那份 tarball、`sha256sum -c` 校验摘要、`npm publish "$TARBALL" --access public`（+ OIDC 换短期凭证，仓库里没有可被盗的令牌）。**发布物就是验证物**：publish 不再 checkout 源码重新构建，所以不会出现“验的是 Node 22 的构建、发的是 Node 24 的构建”这种两份字节。仓库根目录保留 `"private": true` 且无 `files` 字段，任何形式的根目录发布会直接失败。
 
-只想演练不发布：Actions → release → Run workflow，`dry_run` 保持默认 `true`。它会跑完整 `verify` 并在 `publish` job 打印 `(cd dist && npm publish --access public --dry-run)` 的真实清单。若这个版本号已经在注册表上（比如对着已发布的提交重跑
+只想演练不发布：Actions → release → Run workflow，`dry_run` 保持默认 `true`。它会跑完整 `verify`（含打包与上传 tarball），并在 `publish` job 下载那份 tarball、校验摘要后打印 `npm publish "$TARBALL" --access public --dry-run` 的真实清单。若这个版本号已经在注册表上（比如对着已发布的提交重跑
 演练），工作流会先查 `registry.npmjs.org/@punchact%2Fdsh-rpc-agent/<version>`，命中 200 就直接给出
 `::notice::version … already exists` 并结束——npm 那句 "You cannot publish over the previously published
 versions" 对重跑演练是正常状态，不是缺陷。想真正演练打包结果，改版本号再跑。
 
-### 2.3 B. 本机令牌发布（OIDC 出问题时的兜底，同样只发布 `dist/`）
+### 2.3 B. 本机令牌发布（OIDC 出问题时的兜底，同样只发布 `dist/` 产物）
 
 仓库根目录带有 `"private": true` 与指向 `./dist/...` 的工作区入口，**禁止**也不可能直接从仓库根执行 `npm publish`；本机发布与 CI 一样，先构建并整套验过，再发布 `dist/` 产物包（二选一）：
 
@@ -101,6 +101,8 @@ npm publish ./punchact-dsh-rpc-agent-<版本>.tgz
 ```
 
 以上校验不通过就不要进入第二步，也就不会白白占掉一个版本号。用令牌发布的版本**没有 provenance**（见 §6）。
+
+本机兜底路径没有 artifact 绑定（那是 CI 的事），“发布物是验证物”靠你按第一步先跑 `verify` 来保证；想更接近 CI 的形态，用方式二先 `npm pack ./dist` 再发那个 `.tgz`。
 
 **这条路径没有自动防呆，别指望 npm 帮你拦。** `dist/package.json` 的 `prepublishOnly` 由构建脚本剥掉了（它引用仓库根的 `scripts/`，产物包里没有），而仓库根的 `prepublishOnly` 因为 `"private": true` 永远不会被触发——所以 `(cd dist && npm publish)` 一旦敲下去就直接发。要么按上面第一步手工跑 `verify`，要么用 `npm run release:local`（先 `verify` 再 `npm pack ./dist`，产出的 `*.tgz` 已被 `.gitignore` 忽略）。
 

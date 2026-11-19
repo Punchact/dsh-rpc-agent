@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createMethods } from "../dist/lib/methods.mjs";
+import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
 import { createTaskEngine, seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
 import { openStore } from "../dist/lib/tasks/store.mjs";
 
@@ -154,6 +155,39 @@ test("preview reports why a peer that declares the same capability was excluded"
     assert.equal(excluded.included, false);
     assert.equal(excluded.reason, "AGENT_DISABLED");
     assert.equal(preview.selectionReason, "selected");
+  } finally {
+    store.close();
+  }
+});
+test("a caller-supplied digest must be a string, not silently replaced", async () => {
+  const { store, methods } = await makeWorld();
+  try {
+    const reg = await methods.registerAgent({ card: card("ag_digest") });
+    const revisionId = reg.capabilityRevisions[0].revisionId;
+    const base = {
+      principalId: "local-operator",
+      capabilityRevisionId: revisionId,
+      workspaceId: "local",
+      agentId: "ag_digest",
+      input: { prompt: "hi" },
+    };
+
+    const named = await methods.previewTask({ ...base, requestDigest: "digest-from-caller" });
+    assert.equal(named.requestDigest, "digest-from-caller");
+
+    // A number used to fall through to the computed branch: the preview worked, and the promise the
+    // caller tried to make about the request disappeared (quality review, 0.9.4).
+    await assert.rejects(
+      () => methods.previewTask({ ...base, requestDigest: 123 }),
+      (error) => {
+        assert.equal(isTaskError(error, TASK_ERROR.VALIDATION_FAILED), true);
+        assert.match(error.message, /requestDigest/);
+        return true;
+      },
+    );
+
+    const computed = await methods.previewTask(base);
+    assert.match(computed.requestDigest, /^[0-9a-f]{64}$/);
   } finally {
     store.close();
   }

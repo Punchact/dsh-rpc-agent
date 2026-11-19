@@ -9,7 +9,7 @@
 // DSH_RPC_TOKEN, then the files the plugin publishes under $DSH_HOME/dsh-rpc/.
 
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -1409,8 +1409,21 @@ async function runAgentsCommand(
   }
 }
 
-const IS_MAIN =
-  Boolean(process.argv[1]) && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+// A symlink or a Windows junction resolves to its target inside import.meta.url
+// but stays unresolved in process.argv[1]. Comparing the raw paths therefore
+// reported "not the entry point" and the CLI exited 0 silently — a failure mode
+// that looks like success. Both sides go through realpathSync so they live in
+// the same coordinate system (quality review, 0.9.4).
+function isEntryPoint(): boolean {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(resolve(process.argv[1])) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+const IS_MAIN = isEntryPoint();
 
 if (IS_MAIN) {
   main(process.argv.slice(2))

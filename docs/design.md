@@ -855,3 +855,22 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 - **`client.js` 纳入独立严格类型门禁**：新增 `tsconfig.client.json`（`include: ["client.js"]`、`allowJs: true`、`checkJs: true`、`strict: true`、`noEmit: true`、`lib: ["es2023", "dom"]`、`types: []`）与 `npm run check:types`，接入 `npm test` 链及两个工作流。
 
 **怎么钉住**：新增 `scripts/check-release-path.mjs` 并在 `npm test` 与双工作流运行：① 检查 `dist` `npm pack --dry-run` 包含 `dist/package.json` 声明的全部 `main`/`exports`/`bin`；② 检查根目录 `package.json` 为 `private: true` 且无发布 `files`（或所有声明入口均在根打包中且存在于磁盘）；③ 静态断言 `release.yml` 的 `verify` 顺序与 `publish` 从 `dist/` 发布。同时 `npm run check:types` 真执行 `tsc -p tsconfig.client.json`。
+
+
+## 60. 决策 0.9.4-e：入口判定与参数校验不许把非法静默成“没传”
+
+**现象（Codex 质量复核，两轮结论都是 BLOCK）**：三条回归属于同一类问题——输入没通过校验，却也没有报错，而是被悄悄抹成“调用方没要求”。① `bin/dsh-rpc.mjs` 与 `bin/dsh-rpc-mcp.mjs` 用 `resolve(process.argv[1]) === fileURLToPath(import.meta.url)` 判断“我是不是入口”；Node 会把模块 URL 解析成真实路径，却把 argv 原样保留，于是通过 junction/symlink 调用时两边永远不等，进程直接 `exit 0`：CLI 一行不输出、MCP 不服务，看起来都像“客户端正常结束”。② `engine.submit` 把 `requestDigest` 写成 `typeof … === "string" ? … : undefined`，数字摘要被抹成“未传”，`consumePreviewInTx` 的摘要比对整段跳过，一次对不上的提交因此建了单。③ MCP `tools/call` 把非对象 `arguments`（例如 `[]`）归一成 `{}`，非法输入变成一次带默认值的正常调用。
+
+**为什么危险**：三者都不会红。①让“装好了但跑不起来”看起来像“跑完了”；②③让非法输入看起来像合法输入，把校验层的存在意义抹掉——而这两层正是任务账本与 MCP 面上唯一的入口闸门。
+
+**决定**：①入口判定两侧都过 `realpathSync`，把 argv 与模块 URL 放到同一坐标系；②参数只做**形状**判断，不做“合法值收窄”——值交给下游校验器原样拒绝；③MCP 的 `arguments` 不是对象就直接 `-32602`，不再猜调用方想传什么。；④复查时又抓到同类的第四处：`dsh.tasks.preview` 收到非字符串 `requestDigest`（例如数字）会静默改用计算值，等于把调用方“我预览的就是这个请求”的承诺丢掉，一并改成拒绝（回归在 `test/tasks-events-and-preview.test.mjs`）。
+
+**怎么钉住**：`test/bin-entry.test.mjs` 用目录 junction/symlink 跑真实的两个 bin（`--help` 要有输出、`initialize` 要有应答）；`test/tasks-preview.test.mjs` 断言数字摘要被 `VALIDATION_FAILED` 拒绝且不留下任务；`test/cli-mcp-regressions.test.mjs` 断言 `arguments: []` 返回 `-32602`。三条都做过负向控制：把 dist 里的修复改回旧写法，三条全转红——否则“测试通过”只证明测试会跑。
+
+## 61. 决策 0.9.4-f：发布物必须是验证物（artifact 绑定）
+
+**问题**：`release.yml` 的 verify 与 publish 各自 `actions/checkout` + 各自 `npm run build`，verify 在 Node 22 上验、publish 在 Node 24 上重建后按目录发布。只要两次构建有任何差异（工具链、缓存、构建脚本自身），用户拿到的字节就没被检查看过；把 `needs: verify` 删掉门禁照样绿，说明两个 job 之间根本没有身份关系——这是 0.9.4 复核的 P0。
+
+**决定**：verify 打包并上传（`npm pack ./dist` → `sha256sum` → `upload-artifact`），publish 下载同名 artifact、`sha256sum -c` 校验、`npm publish "$TARBALL"`，并**禁止**在 publish 里 `npm run build`。`scripts/check-release-path.mjs` 增加五条断言：verify 必须 `npm pack ./dist`、必须 `upload-artifact`（带 name）、publish 必须 `download-artifact`（同名）、必须 `sha256sum -c`、**每条** publish 调用都必须指向 tarball。最后一条是被咬过才加的：最初只要求“某处 publish 指向 tarball”，于是“rehearsal 指向 tarball + 真实分支 `cd dist && npm publish`”照样过关。
+
+**残留边界**：`npm publish` 的 provenance 由 OIDC 提供，artifact 绑定管的是“发布的是哪份字节”，两者互不替代；本机令牌兜底路径（`docs/release.md` §2.3）没有 artifact 绑定，靠手工 `verify` 保证。
