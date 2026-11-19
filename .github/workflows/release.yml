@@ -78,6 +78,24 @@ jobs:
       - run: npm run check:package
       - run: node scripts/check-release-path.mjs
 
+      # What gets published has to be the thing that was verified. Packing here and handing the
+      # tarball to the publish job removes the previous hole: that job rebuilt from the same commit
+      # and published whatever the second build happened to produce, so the bytes users received
+      # were never the bytes the checks ran against (quality review, 0.9.4 finding 1).
+      - name: pack the verified tarball
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          npm pack ./dist --pack-destination artifacts
+          (cd artifacts && sha256sum ./*.tgz | tee SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          if-no-files-found: error
+          path: |
+            artifacts/*.tgz
+            artifacts/SHA256SUMS
+
   publish:
     name: publish
     needs: verify
@@ -104,9 +122,26 @@ jobs:
           # Deliberately no dependency cache in the publishing job: a release build should not
           # reuse a download cache that something else could have poisoned.
       - run: npm ci
-      # Build the publishable `dist/` package before publishing (the repo root is marked `private: true`
-      # and ships no `index.mjs`/`lib/`/`bin/`; every publish runs inside `dist/`).
-      - run: npm run build
+      # No build here on purpose. `npm ci` gives the job an npm CLI and nothing else; the publish
+      # input is the tarball the verify job packed and checksummed, downloaded below. Building again
+      # would publish bytes nobody verified (quality review, 0.9.4 finding 1).
+      - name: fetch the verified tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-tarball
+          path: artifacts
+      - name: the tarball is the verified one
+        run: |
+          set -euo pipefail
+          ls -l artifacts
+          (cd artifacts && sha256sum -c SHA256SUMS)
+          TARBALL=$(ls artifacts/*.tgz)
+          echo "tarball: ${TARBALL}"
+          tar -xzOf "$TARBALL" package/package.json > /tmp/packed-package.json
+          node -e 'const p=require("/tmp/packed-package.json"); console.log("packed version:", p.version, "files:", p.files.length)'
+          diff <(node -e 'console.log(JSON.stringify(require("./package.json").version))') \
+               <(node -e 'console.log(JSON.stringify(require("/tmp/packed-package.json").version))') \
+            || { echo "::error::the tarball version does not match the checked-out commit"; exit 1; }
       - name: toolchain
         run: |
           echo "node $(node --version), npm $(npm --version)"
@@ -163,6 +198,10 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
+          TARBALL=$(ls artifacts/*.tgz)
+          VERSION=$(tar -xzOf "$TARBALL" package/package.json \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).version))')
+          echo "publishing ${VERSION} from ${TARBALL}"
           if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
             printf '//registry.npmjs.org/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > "$HOME/.npmrc"
             echo "NPM_TOKEN is set — wrote it into ~/.npmrc (used only if OIDC is unavailable)"
@@ -180,7 +219,6 @@ jobs:
             # again against an already-released commit is a normal thing to do, so report that state
             # and treat it as the end of the rehearsal instead of a failure. Nothing is lost: the
             # pack contents were already checked by `check:package` in the verify job.
-            VERSION=$(node -p "require('./dist/package.json').version")
             CODE=$(curl -sS -o /dev/null -w '%{http_code}' \
               "https://registry.npmjs.org/@punchact%2Fdsh-rpc-agent/${VERSION}")
             if [ "$CODE" = "200" ]; then
@@ -188,8 +226,8 @@ jobs:
               echo "::notice::version ${VERSION} already exists, so this rehearsal stops here — bump the version to rehearse a publish"
               exit 0
             fi
-            echo "rehearsal: (cd dist && npm publish --access public --dry-run)"
-            (cd dist && npm publish --access public --dry-run)
+            echo "rehearsal: npm publish ${TARBALL} --access public --dry-run"
+            npm publish "$TARBALL" --access public --dry-run
             exit 0
           fi
 
@@ -197,12 +235,12 @@ jobs:
           # while `npm publish` needs the extra "Allowed actions" tick. Staging tells the two
           # failure modes apart — a staging publish that authenticates proves the entry matches.
           if [ "${{ inputs.stage }}" = "true" ]; then
-            echo "diagnostic: (cd dist && npm stage publish --access public)"
-            (cd dist && npm stage publish --access public)
+            echo "diagnostic: npm stage publish ${TARBALL} --access public"
+            npm stage publish "$TARBALL" --access public
             exit 0
           fi
 
-          if (cd dist && npm publish --access public); then
+          if npm publish "$TARBALL" --access public; then
             echo "published"
             exit 0
           fi

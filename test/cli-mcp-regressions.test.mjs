@@ -165,6 +165,13 @@ test("MCP approval resolution returns structured tool errors for invalid argumen
       assert.equal(response.result?.isError, true);
       assert.match(response.result?.content?.[0]?.text ?? "", expected);
     }
+
+    // `arguments` is an object in the MCP schema. Coercing a non-object into "no
+    // arguments" let an array reach the tool with defaults, so invalid input
+    // looked like a normal call (quality review, 0.9.4 finding 2).
+    const nonObject = await request(3, { name: "dsh_approvals_resolve", arguments: [] });
+    assert.equal(nonObject.error?.code, -32602);
+    assert.match(nonObject.error?.message ?? "", /expected object/);
   } finally {
     child.stdin.end();
     await new Promise((resolve) => {

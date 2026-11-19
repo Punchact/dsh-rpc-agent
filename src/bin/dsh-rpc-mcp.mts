@@ -15,6 +15,7 @@
 // stdout carries protocol frames only; every diagnostic goes to stderr.
 
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -607,8 +608,20 @@ function track(work: Promise<void>): void {
     });
 }
 
-const IS_MAIN =
-  Boolean(process.argv[1]) && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+// A symlink or a Windows junction resolves to its target inside import.meta.url
+// but stays unresolved in process.argv[1]. Comparing the raw paths therefore
+// reported "not the entry point" and the server exited 0 without serving —
+// indistinguishable from "the client finished cleanly" (quality review, 0.9.4).
+function isEntryPoint(): boolean {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(resolve(process.argv[1])) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+const IS_MAIN = isEntryPoint();
 
 if (IS_MAIN) {
   process.stdin.setEncoding("utf8");
@@ -706,10 +719,20 @@ async function handleLine(line: string): Promise<void> {
 
       case "tools/call": {
         const name = typeof reqParams.name === "string" ? reqParams.name : "";
-        const args =
-          reqParams.arguments && typeof reqParams.arguments === "object" && !Array.isArray(reqParams.arguments)
-            ? (reqParams.arguments as Record<string, unknown>)
-            : ({} as Record<string, unknown>);
+        // MCP defines `arguments` as an object. Coercing anything else into "no
+        // arguments" let a client send `[]` and still run the tool with its
+        // defaults, turning invalid input into a plausible-looking success
+        // (quality review, 0.9.4). Reject instead of guessing.
+        const rawArguments = reqParams.arguments;
+        if (
+          rawArguments !== undefined &&
+          rawArguments !== null &&
+          (typeof rawArguments !== "object" || Array.isArray(rawArguments))
+        ) {
+          if (!isNotification) replyError(id, -32602, "invalid arguments: arguments — expected object");
+          return;
+        }
+        const args = (rawArguments ?? {}) as Record<string, unknown>;
         const controller = new AbortController();
         if (id !== null) inflight.begin(id, controller);
         let outcome: McpCallToolOutcome;

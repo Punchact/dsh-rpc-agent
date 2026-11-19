@@ -102,8 +102,42 @@ function findRootPublishLines(publishBlock) {
   return offenders;
 }
 
-function checkWildcardInPack(baseDir, shippedSet, pattern) {
-  const relPattern = pattern.replace(/^\.\//, "");
+// Every publish call in the publish job must name the tarball it downloaded. Checking that *some*
+// call mentions $TARBALL is not enough: a real `cd dist && npm publish` branch sitting next to a
+// rehearsal line that does name it passed the gate (quality review round, 0.9.4 finding 1).
+function nonTarballPublishLines(publishBlock) {
+  const offenders = [];
+  for (const raw of publishBlock.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const masked = maskQuotedSpans(line);
+    PUBLISH_CALL.lastIndex = 0;
+    let match = PUBLISH_CALL.exec(masked);
+    while (match) {
+      const tail = line.slice(match.index);
+      const namesTarball = /\$\{?TARBALL\b|\bartifacts\//.test(tail) || /\.tgz\b/.test(tail);
+      if (!namesTarball) offenders.push(line);
+      match = PUBLISH_CALL.exec(masked);
+    }
+  }
+  return offenders;
+}
+
+// The artifact name an upload/download step declares, so verify and publish can be compared. Stops
+// at the next step so a later step's `name:` cannot be mistaken for this one's.
+function artifactName(block, verb) {
+  const marker = `uses: actions/${verb}-artifact@`;
+  const at = block.indexOf(marker);
+  if (at < 0) return null;
+  for (const line of block.slice(at).split("\n").slice(1)) {
+    if (/^\s{0,6}-\s/.test(line)) return null;
+    const match = /^name:\s*([A-Za-z0-9._-]+)$/.exec(line.trim());
+    if (match) return match[1];
+  }
+  return null;
+}
+
+function checkWildcardInPack(baseDir, shippedSet, pattern) {  const relPattern = pattern.replace(/^\.\//, "");
   const dirRel = posix.dirname(relPattern);
   const basePattern = posix.basename(relPattern);
   const [prefix, suffix] = basePattern.split("*");
@@ -196,12 +230,41 @@ if (!existsSync(RELEASE_WORKFLOW)) {
       );
     }
 
-    if (!publishBlock.includes("npm run build")) {
-      problems.push("release.yml publish job 缺少 npm run build");
+    // The published bytes have to be the verified bytes. That means: verify packs `dist/` into a
+    // tarball, uploads it, publish downloads that same artifact, checks its digest, and never
+    // rebuilds. Until 0.9.4 the publish job rebuilt from the same commit and published whatever the
+    // second build produced, so `verify` only vouched for a sibling artifact (quality review,
+    // 0.9.4 finding 1).
+    if (!/npm\s+pack\s+(?:\.\/)?dist\b/.test(verifyBlock)) {
+      problems.push("release.yml verify job 没有把 dist 打包成 tarball（npm pack ./dist），发布物与验证物无法绑定");
     }
-    const usesDist = /(?:cd\s+dist\b|npm\s+pack\s+(?:\.\/)?dist\b)/.test(publishBlock);
-    if (!usesDist) {
-      problems.push("release.yml publish job 未显式从 dist/ 发布（需 cd dist 或 npm pack dist）");
+    const uploadedArtifact = artifactName(verifyBlock, "upload");
+    const downloadedArtifact = artifactName(publishBlock, "download");
+    if (!uploadedArtifact) {
+      problems.push("release.yml verify job 没有用 upload-artifact 上传 tarball（缺少 name）");
+    }
+    if (!downloadedArtifact) {
+      problems.push("release.yml publish job 没有用 download-artifact 取回 tarball（缺少 name）");
+    }
+    if (uploadedArtifact && downloadedArtifact && uploadedArtifact !== downloadedArtifact) {
+      problems.push(
+        `release.yml 上传与下载的 artifact 名字不一致（${uploadedArtifact} vs ${downloadedArtifact}）`,
+      );
+    }
+    if (!/sha256sum\s+-c\b/.test(publishBlock)) {
+      problems.push("release.yml publish job 没有校验下载到的 tarball 摘要（sha256sum -c SHA256SUMS）");
+    }
+    if (/npm\s+run\s+build\b/.test(publishBlock)) {
+      problems.push("release.yml publish job 仍在自行构建（npm run build），发布物必须是 verify 打包的那份 tarball");
+    }
+    if (!/npm\s+(?:stage\s+)?publish\s+["']?(?:\$\{?TARBALL|\.?\/?artifacts\/)/.test(publishBlock)) {
+      problems.push("release.yml publish job 没有把发布目标指向下载到的 tarball（应 publish $TARBALL 或 ./artifacts/*.tgz）");
+    }
+    const strayPublish = nonTarballPublishLines(publishBlock);
+    if (strayPublish.length > 0) {
+      problems.push(
+        `release.yml publish job 有 ${strayPublish.length} 处 publish 没有指向 tarball：${strayPublish[0].slice(0, 120)}`,
+      );
     }
     const bareRootPublish = findRootPublishLines(publishBlock);
     if (bareRootPublish.length > 0) {
@@ -220,5 +283,5 @@ if (problems.length > 0) {
 
 const distFilesCount = existsSync(DIST) && existsSync(resolve(DIST, "package.json")) ? "58" : "?";
 console.log(
-  `check-release-path: ok — dist 包校验通过（预期 ${distFilesCount} 文件，main/exports/bin 全在包内）；根目录 private=${Boolean(rootPkg.private)}（无 files 字段，0 死入口）；release.yml 已锁定从 dist 发布`,
+  `check-release-path: ok — dist 包校验通过（预期 ${distFilesCount} 文件，main/exports/bin 全在包内）；根目录 private=${Boolean(rootPkg.private)}（无 files 字段，0 死入口）；release.yml 在 verify 打包上传、publish 校验摘要后发布同一份 tarball（不重新构建）`,
 );

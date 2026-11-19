@@ -189,3 +189,54 @@ test("engine.submit consumes preview atomically and rejects reused or tampered p
     store.close();
   }
 });
+
+test("a numeric requestDigest is refused instead of being read as absent", async () => {
+  const { store, engine } = await setup();
+  try {
+    const good = await createPreview(store, {
+      principalId: "p-owner",
+      requestDigest: "digest-typed-1",
+      capabilityRevisionId: "cap-1",
+      workspaceId: "ws-1",
+      agentId: "ag-1",
+    });
+    const submitted = await engine.submit({
+      principalId: "p-owner",
+      idempotencyKey: "digest-typed-ok",
+      previewId: good.previewId,
+      requestDigest: "digest-typed-1",
+    });
+    assert.equal(submitted.status, "queued");
+
+    // The 0.9.4 candidate narrowed the digest to "string or undefined" before
+    // validating it, so 123 became "absent" and the preview was consumed without
+    // any digest check at all. Invalid input has to stay refused (quality
+    // review, 0.9.4 finding 2).
+    const bad = await createPreview(store, {
+      principalId: "p-owner",
+      requestDigest: "digest-typed-2",
+      capabilityRevisionId: "cap-1",
+      workspaceId: "ws-1",
+      agentId: "ag-1",
+    });
+    await assert.rejects(
+      () =>
+        engine.submit({
+          principalId: "p-owner",
+          idempotencyKey: "digest-typed-bad",
+          previewId: bad.previewId,
+          requestDigest: 123,
+        }),
+      (error) => {
+        assert.equal(isTaskError(error, TASK_ERROR.VALIDATION_FAILED), true);
+        assert.match(error.message, /requestDigest/);
+        return true;
+      },
+    );
+
+    const tasks = await engine.list({ principalId: "p-owner" });
+    assert.equal(tasks.items.length, 1, "the refused submit must not leave a task behind");
+  } finally {
+    store.close();
+  }
+});

@@ -1055,7 +1055,12 @@ export function createTaskEngine(store: TaskStore, options: TaskEngineOptions = 
           const consumed = consumePreviewInTx(db, {
             previewId,
             principalId,
-            requestDigest: typeof params.requestDigest === "string" ? params.requestDigest : undefined,
+            // Pass the caller's value through untouched. Narrowing it to "string
+            // or undefined" turned a number into "absent", which skipped the
+            // digest check inside consumePreviewInTx — a mismatched request then
+            // created a task instead of being refused (quality review, 0.9.4).
+            // consumePreviewInTx itself rejects a digest that is not a string.
+            requestDigest: params.requestDigest as string | null | undefined,
           });
           if (workspaceId && consumed.workspaceId && workspaceId !== consumed.workspaceId) {
             throw taskError(TASK_ERROR.PREVIEW_MISMATCH, `preview "${previewId}" workspaceId mismatch`, {
