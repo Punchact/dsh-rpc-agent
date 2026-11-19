@@ -24,6 +24,7 @@ import { createDshAdapterOps, createMethods } from "./lib/methods.mjs";
 import { isOwnedSession, useOwnedState } from "./lib/owned.mjs";
 import { createPendingStore } from "./lib/pending.mjs";
 import { createStats } from "./lib/stats.mjs";
+import { isFetchBlockedPort } from "./lib/transport.mjs";
 import { createDispatcher } from "./lib/tasks/dispatch.mjs";
 import { createAutopilot } from "./lib/tasks/autopilot.mjs";
 import { createTaskEngine, seedBaselineEntities } from "./lib/tasks/engine.mjs";
@@ -402,10 +403,23 @@ export async function apply(ctx, input = {}) {
   // Publish the endpoint so out-of-process callers (CLI, MCP bridge, curl) can
   // discover url + token without being told the port. `getOrigin()` throws
   // before the listener binds, hence the `ready` retry.
+  let blockedPortWarned = false;
   const publish = () => {
     try {
       const origin = ctx.webServer.getOrigin();
       if (!origin) return false;
+      // The bridge does not choose the port; the Host does. A port fetch refuses
+      // ("bad port") would leave every out-of-process caller unable to connect
+      // while this process looks perfectly healthy, so say it out loud once.
+      const parsed = new URL(origin);
+      const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+      if (!blockedPortWarned && isFetchBlockedPort(port)) {
+        blockedPortWarned = true;
+        log.warn?.(
+          `[dsh-rpc-agent] the Host's web port ${port} is one fetch refuses to connect to ("bad port"). ` +
+            "Out-of-process callers (CLI, MCP bridge) will fail with EBADPORT until the Harness starts on another port.",
+        );
+      }
       state.endpointUrl = `${origin}${config.path}`;
       writeEndpoint({
         url: state.endpointUrl,

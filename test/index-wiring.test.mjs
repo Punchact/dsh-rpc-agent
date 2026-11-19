@@ -226,3 +226,28 @@ test("index.mjs survives a strict Host whose ctx.get() throws for unknown servic
     rmSync(home, { recursive: true, force: true });
   }
 });
+test("a Host that binds a fetch-blocked port is warned about at startup", async () => {
+  // The bridge inherits the Host's port, so it cannot refuse the assignment —
+  // it can only say why clients will fail. Silence here would look like a
+  // healthy server plus broken clients.
+  const prevHome = process.env.DSH_HOME;
+  const home = mkdtempSync(join(tmpdir(), "dsh-wire-port-"));
+  process.env.DSH_HOME = home;
+  const fake = makeFakeCtx();
+  fake.ctx.webServer.getOrigin = () => "http://127.0.0.1:5060";
+  try {
+    await apply(fake.ctx, { token: "c".repeat(32), defaultCwd: home, tasksEnabled: false });
+    assert.ok(
+      fake.warnings.some((w) => /port 5060 is one fetch refuses/.test(w) && /EBADPORT/.test(w)),
+      "a blocked Host port must be named at startup, because every out-of-process caller will fail",
+    );
+    assert.ok(
+      fake.infos.some((m) => /ready at http:\/\/127\.0\.0\.1:5060\/dsh-rpc/.test(m)),
+      "the bridge still mounts and publishes; only the warning is extra",
+    );
+  } finally {
+    if (prevHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});

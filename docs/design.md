@@ -784,4 +784,14 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 **残余边界**：这个标记只说明「没过 schema 校验」，不说明结果对不对；人工签收之后 `resultValid` 仍然是 `false`，那笔账由 `task.resolved` 的 `resultValid`/`acceptedUnvalidated` 记。
 
 **怎么钉住**：`test/tasks-engine.test.mjs` 读 `attention.opened` 事件断言「同一问题重复=repeated、不同问题不 repeated」；`test/mcp-summary.test.mjs` 断言未校验结果在纯文本里带标记、已校验结果不带；`check-docs` 新增「测试表明细行数 = 链上测试文件数」。
+## 54. 决策 0.9.3-a：宿主挑的端口可能正是 `fetch` 拒绝的端口
 
+**现象**。0.9.2 整链在本机偶发失败一次，报 `test/client.test.mjs:181` 的 `undefined !== -32001`。用 300 轮复现脚本（`audit-tmp/smoke-090/flake-32001.mjs`）抓住 3 次：`TypeError: fetch failed` → `cause: Error("bad port")`，`code` 全链为 `undefined`，而当次的「死端口」是 `6667`。`fetch` 按标准在建立连接之前就拒绝一批端口（`FETCH_BLOCKED_PORTS`：`989`、`1720`、`4045`、`5060`、`6000`、`6665`–`6669`、`6697`、`10080` 等），这种拒绝不带 errno。
+
+**为什么不能只当成测试抖动**。桥自己没有监听器：`index.mjs` 明确不建第二个 listener，端口、origin 全部继承宿主的 `webServer`。宿主在 `port 0` 上拿到哪个端口不由插件决定，只要落进那份名单，所有进程外调用方（CLI、MCP 桥、Codex）都会拿到 `fetch failed`，而服务端自己一切正常——「服务健康、客户端全挂」是最难排查的组合。客户端还有一个次生问题：`withEndpointRetry` 只重试 `ECONNREFUSED`，`undefined` 既不是它、也没法被调用方分支处理。
+
+**怎么改**。①`lib/transport.mjs` 导出 `FETCH_BLOCKED_PORTS` 与 `isFetchBlockedPort()`，`transportCode()` 在整条链都没有 errno 且 cause 明确是 `bad port` 时返回 `EBADPORT`——这不是给 errno 编代号，而是 `fetch` 自己给出的原因；②`lib/client.mjs` 的 `transportError` 把最深层 cause 带进消息，`EBADPORT` 时直接给「让宿主换端口或 `--url`」的下一步；③`index.mjs` 发布端点时若发现宿主端口在名单里，启动日志告警一次（只告警一次，端点重试不该刷屏）。
+
+**残余边界**（如实记）：插件改不了宿主的端口选择，所以这仍是「报得清楚」而不是「不可能发生」；`EBADPORT` 也不是操作系统错误码，判断它必须看文档，不能按 `E[A-Z]+` 的直觉处理。测试侧另外修了根因：`listen()` 与 `deadPort()` 都跳过名单里的端口，否则「被拒绝的连接」会被当成「没人监听的握手」来测。
+
+**怎么钉住**：`test/client.test.mjs` 的「a blocked port is named instead of left as an undefined code」（`EBADPORT` 命名、消息含 `bad port` 与 `--url`、不出现 `nothing is listening`、`hits === 0` 证明没有重试）；`test/index-wiring.test.mjs` 的「a Host that binds a fetch-blocked port is warned about at startup」；复现脚本可重跑（`node audit-tmp/smoke-090/flake-32001.mjs 300`）。

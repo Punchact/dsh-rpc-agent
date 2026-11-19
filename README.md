@@ -76,7 +76,7 @@ http://127.0.0.1:<port>/dsh-rpc   ->   DSH agent
 - **会自述**：`dsh_capabilities` 给出八节能力快照（运行时、权限档位、可调工具、MCP 前缀、会话、工作区、插件），做计划前不必猜本机有什么。
 - **不假装知道**：外层客户端有更短的超时上限时，本桥只如实说明并建议分段轮询，不让长任务看起来像失败。
 - **可托管外部 agent 任务（任务中心，`tasksEnabled` 默认关闭）**：内置 15 表 SQLite 账本、11 态状态机与能力卡/只读探测，统一调度 DSH 自身、Antigravity 与 Codex App Server，详情见 [任务中心手册](./docs/task-center.md)。
-- **关键行为有回归用例守着**：46 个测试文件共 397 例 + catalog smoke（本机实测 397/397 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
+- **关键行为有回归用例守着**：46 个测试文件共 399 例 + catalog smoke（本机实测 399/399 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
 
 ## 安装与更新
 
@@ -738,6 +738,7 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 - **`maxResultChars` 治不了外层的 413**：它只截单轮正文（默认 20000 字）。外层客户端（例如 Codex 的 `codex-auto-review` 旁路请求）被累计上下文撑爆时，靠截断单次结果救不回来——那要在调用方控制上下文。
 - **`principalId` 是命名空间，不是授权边界**：任务账本用它分区、做 `(principalId, idempotencyKey)` 幂等，并在传了它时校验 `get` / `cancel` 的归属；`list` / `input` / `readArtifact` / `resolve` 不读它。真正的鉴权边界仍是 loopback token 加本机用户（见上面那条 token 泄漏面）。要跨主体隔离，得把它变成强制参数并逐方法校验——这是未完成项，不是已经实现的隔离。
 - **适配器只有 DSH 自身在真机上跑过**：DSH 适配器有真机端到端证据（正常链、取消链、诚实性三组用例）；Antigravity 与 Codex 适配器目前只有离线套件与静态契约证据，未接真实执行方（方案 A07/A14/A18 未验收）。
+- **宿主端口可能是 `fetch` 拒绝的端口**：桥继承宿主 Web 服务的端口，而 `fetch` 会在建连接前拒掉一批「bad port」（`989`、`1720`、`4045`、`5060`、`6000`、`6665`–`6669`、`6697`、`10080` 等）。落进名单时客户端报 `EBADPORT`（不是 errno，是 `fetch` 给出的原因），插件启动日志也会告警一次；让宿主换端口，或用 `--url` 指到可达地址。
 
 ## 排障
 
@@ -757,7 +758,7 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 46 个测试文件，共 397 例，另有 catalog smoke；无需运行中的 Harness
+npm test                       # 46 个测试文件，共 399 例，另有 catalog smoke；无需运行中的 Harness
 node test/host.test.mjs        # 1 例：真实 WebServer 集成（需先 npm ci）
 node test/e2e.mjs              # 14 例：端到端，打真实 Harness（--cwd 只接受绝对路径）
 node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harness
@@ -845,7 +846,7 @@ npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案
 - **边界**检查协议层：batch、通知、id 形态、鉴权头、超大 body（应得真正的 413 而不是断连）、参数注入防护、超时钳制、并发 ask、`limit` 语义。
 - **端口漂移**（手工）：把 `endpoint.json` 的 url 改成死端口再跑 `dsh-rpc ping`，应得退出码 3 与含 `nothing is listening`、`pid`、`health --wait` 的可读报错。
 
-本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 46 个测试文件 **397/397** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.mjs` 输出 `methods: 34` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
+本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 46 个测试文件 **399/399** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.mjs` 输出 `methods: 34` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
 
 ## 许可证
 
