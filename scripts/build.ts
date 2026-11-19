@@ -22,7 +22,7 @@ import {
   collectMigratedOutputs,
   collectUnmigratedFiles,
   verifyDistFidelity,
-} from "./check-dist-fidelity.mjs";
+} from "./check-dist-fidelity.ts";
 
 const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const DIST = join(REPO, "dist");

@@ -362,7 +362,7 @@ compression: gzip
 
 ## 15. 发布工程（2026-11-05）
 
-**决策十九：`files` 的正确性由脚本守，不由人眼守。** `scripts/check-package.mjs` 向 npm 要真实打包清单（`npm pack --dry-run --json`），然后做四层校验：必需文件在不在、`test/`·`scripts/`·`node_modules/` 有没有混进来、`main`/`exports`/`bin`/`icon`/`dsh.bundle.patch` 指向的路径在不在包里、每个相对 `import` 的目标在不在包里。写它的理由是这类失败**不报错**：`files` 少写一项，`npm install` 一切正常，宿主在 `import` 那一刻才失败，而用户看到的现象是"设置里没有这一页"。`prepublishOnly` 会先跑它，`release.yml` 也会。
+**决策十九：`files` 的正确性由脚本守，不由人眼守。** `scripts/check-package.ts` 向 npm 要真实打包清单（`npm pack --dry-run --json`），然后做四层校验：必需文件在不在、`test/`·`scripts/`·`node_modules/` 有没有混进来、`main`/`exports`/`bin`/`icon`/`dsh.bundle.patch` 指向的路径在不在包里、每个相对 `import` 的目标在不在包里。写它的理由是这类失败**不报错**：`files` 少写一项，`npm install` 一切正常，宿主在 `import` 那一刻才失败，而用户看到的现象是"设置里没有这一页"。`prepublishOnly` 会先跑它，`release.yml` 也会。
 
 **决策二十：发 npm 用 0.4.1，不复用 0.4.0。** `v0.4.0` 的 tag 已经指向 `f6374b4`，而发布 npm 需要改 `package.json`（去 `private`、加 `publishConfig`、收 `files`）——这些改动会让 tarball 里的 `package.json` 与 tag 不一致。版本号是"这个 tarball 对应哪次提交"的索引，让它对不上比多用一个补丁号更糟。所以 0.4.1 = 0.4.0 的代码 + 打包元数据变更。
 
@@ -370,7 +370,7 @@ compression: gzip
 
 **决策二十二：发布凭证两条都留，OIDC 优先、令牌兜底。** 形成过程值得记：我先按 OIDC 写好 `id-token: write` 的流水线，真正发布时却撞上 npm 全站政策——发布强制 2FA，或者用一个**创建时**才可勾选的 bypass-2FA granular token，普通令牌一律 `E403`；所以当时先用令牌把 0.4.1 发出去了。随后用户把 Trusted Publisher 配好（`Punchact` / `dsh-rpc-agent` / `release.yml`），工作流改成同时接受两条路：`id-token: write` 常开，`secrets.NPM_TOKEN` 有就作为兜底——npm CLI 自己会先用 OIDC、失败再回落到令牌；两者都没有时只跑 `npm publish --dry-run` 并说明原因，既不在发版日卡死，也不假装成功。发布失败时打印的提示直接指向三个最可能的原因（信任关系是否允许 `npm publish`、工作流文件名是否一字不差、要不要补令牌），因为 npm 保存那张表时不校验任何字段。代价与硬规则（新建信任关系必须 2 天内完成一次成功发布）写在 `docs/release.md`。
 
-**验证**：`npm publish --dry-run`（未登录状态）exit 0 并给出真实清单；加入 `docs/release.md` 后 `node scripts/check-package.mjs` 报 `@punchact/dsh-rpc-agent@0.4.1, 23 files, 84.2 KB packed`。
+**验证**：`npm publish --dry-run`（未登录状态）exit 0 并给出真实清单；加入 `docs/release.md` 后 `node scripts/check-package.ts` 报 `@punchact/dsh-rpc-agent@0.4.1, 23 files, 84.2 KB packed`。
 
 **一个必须记下来的实测结论：`--dry-run` 不校验 `private`。** 上一版 `package.json` 里还留着 `"private": true`，而 `npm publish --dry-run` **照样 exit 0**——我据此以为"可以发了"。真实的拒绝发生在正式 publish，也就是打完 tag、建好 Release 之后，是最坏的发现时机。为此 `check-package.mjs` 现在直接断言 `private` 必须不存在、`publishConfig.access` 必须是 `"public"`，并做了反向对照（临时加回 `private: true` → 脚本 exit 1 并指出原因；还原后 exit 0）。教训：**"命令跑通了"不等于"这条命令检查了你在意的那件事"**，能证明可发布性的只有断言本身。
 
@@ -815,7 +815,7 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 
 ## 56. 决策 0.9.4-a：宿主装配（`src/index.mts`）与浏览器设置页（`client.js`）类型化
 
-**现象**。PR 4 收口宿主入口 `index.mjs` 与浏览器 Web UI 设置页 `client.js` 的 TypeScript 迁移：`index.mjs`（468 行）无复杂构建保真矛盾，可直接迁入 `src/index.mts` 由 `tsc` 编译生成 `dist/index.mjs`；但 `client.js` 是 `window.__ModuleLoader__.load({ id, factory })` 形态的静态浏览器脚本，且 `scripts/check-dist-fidelity.mjs` 将其列在 `ROOT_FILES` 并逐文件比对 `REPO/client.js` 与 `DIST/client.js` 的 SHA-256。实测直接用 `tsc`（`ts.transpileModule`）转译 `client.js` 会重排缩进与空白，`20,833` 字节变为 `21,829` 字节（SHA-256 由 `399f7184...` 变为 `ab3bf7c2...`），无法与原始手写格式字节等价；此外 `tsconfig.json` 当前仅将 `src/**/*.mts` 视作 `build.mjs` 编译入口。
+**现象**。PR 4 收口宿主入口 `index.mjs` 与浏览器 Web UI 设置页 `client.js` 的 TypeScript 迁移：`index.mjs`（468 行）无复杂构建保真矛盾，可直接迁入 `src/index.mts` 由 `tsc` 编译生成 `dist/index.mjs`；但 `client.js` 是 `window.__ModuleLoader__.load({ id, factory })` 形态的静态浏览器脚本，且 `scripts/check-dist-fidelity.ts` 将其列在 `ROOT_FILES` 并逐文件比对 `REPO/client.js` 与 `DIST/client.js` 的 SHA-256。实测直接用 `tsc`（`ts.transpileModule`）转译 `client.js` 会重排缩进与空白，`20,833` 字节变为 `21,829` 字节（SHA-256 由 `399f7184...` 变为 `ab3bf7c2...`），无法与原始手写格式字节等价；此外 `tsconfig.json` 当前仅将 `src/**/*.mts` 视作 `build.mjs` 编译入口。
 
 **怎么改**。
 - `index.mjs` → `src/index.mts`（删除根 `index.mjs`）：将 Cordis 入口 `name`、`inject`、`apply(ctx, input?)`、`taskCentre` 装配、自动推进定时器与 `cleanupTasks`、`publish()` 与 `ping` 投影显式类型化，并导出 `HostPluginContext`、`BridgeState`、`TaskCentreState`、`TaskCentreWiring`、`PublishHandle`、`TaskDispatcher`、`Autopilot`、`AutopilotConfigProjection`、`AutopilotStatsProjection` 等装配形状；补齐并扩展 `types/lib/{approval-state,approvals,auth,config,pending,stats,tasks/engine}.d.mts` 声明桥接。
@@ -850,11 +850,11 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 **现象**。TS 全仓迁移后，源码在 `src/**/*.mts`、构建产物在 `dist/`，但发布链路仍残留四处旧布局假设：① `release.yml` publish job 在仓库根运行 `npm publish`，而根 `package.json` 的 `files` 指向已删除的 `index.mjs`/`lib/`/`bin/`，实测根 `npm pack --dry-run` 仅含 17 文件且缺失全部代码入口，与此同时 `check-package.mjs` 却只验证 `dist/`（58 文件），造成“验的是 `dist/`、发的却是残缺根目录”；② `release.yml` verify job 先于 `npm test`（`pretest` 构建）调用 `check:version`（`import('./dist/lib/version.mjs')`），在全新检出上触发 `ERR_MODULE_NOT_FOUND`；③ `client.js` 原位带着 `// @ts-check` 与 JSDoc，但无任何 tsconfig 真正检查它；④ 根 `package.json` 入口与 `tsconfig.json` `rootDirs: ["src", "types"]` 留有死引用。
 
 **核心原则：发布的是验过的那一份**。
-- **根目录与构建产物的职责分离**：根 `package.json` 设为 `"private": true`、移除 `"files"`，并将 `main`/`bin`/`exports` 指向 `./dist/...` 真实产物路径（工作区零死引用，且根目录本身不可被 `npm publish` 误发）；`scripts/build.mjs` 通过与 `check-dist-fidelity.mjs` 共用的 `buildDistManifest()` 从根清单确定性推导 `dist/package.json`（移除 `private`、剥离 `./dist/` 前缀、写入 58 文件发布 `files` 白名单并剔除指向仓库脚本的 `prepublishOnly`）。
+- **根目录与构建产物的职责分离**：根 `package.json` 设为 `"private": true`、移除 `"files"`，并将 `main`/`bin`/`exports` 指向 `./dist/...` 真实产物路径（工作区零死引用，且根目录本身不可被 `npm publish` 误发）；`scripts/build.ts` 通过与 `check-dist-fidelity.mjs` 共用的 `buildDistManifest()` 从根清单确定性推导 `dist/package.json`（移除 `private`、剥离 `./dist/` 前缀、写入 58 文件发布 `files` 白名单并剔除指向仓库脚本的 `prepublishOnly`）。
 - **工作流强制先建后验并锁死从 `dist/` 发布**：`release.yml` 在 `verify` 与 `publish` 两个 job 开头均显式执行 `npm run build`（使 `check:version`、`check:types`、`npm test`、`test:host`、`check:package` 与 `check-release-path` 均作用于新构 `dist/`），`publish` job 全部经 `(cd dist && npm ... publish)` 发布产物包。
 - **`client.js` 纳入独立严格类型门禁**：新增 `tsconfig.client.json`（`include: ["client.js"]`、`allowJs: true`、`checkJs: true`、`strict: true`、`noEmit: true`、`lib: ["es2023", "dom"]`、`types: []`）与 `npm run check:types`，接入 `npm test` 链及两个工作流。
 
-**怎么钉住**：新增 `scripts/check-release-path.mjs` 并在 `npm test` 与双工作流运行：① 检查 `dist` `npm pack --dry-run` 包含 `dist/package.json` 声明的全部 `main`/`exports`/`bin`；② 检查根目录 `package.json` 为 `private: true` 且无发布 `files`（或所有声明入口均在根打包中且存在于磁盘）；③ 静态断言 `release.yml` 的 `verify` 顺序与 `publish` 从 `dist/` 发布。同时 `npm run check:types` 真执行 `tsc -p tsconfig.client.json`。
+**怎么钉住**：新增 `scripts/check-release-path.ts` 并在 `npm test` 与双工作流运行：① 检查 `dist` `npm pack --dry-run` 包含 `dist/package.json` 声明的全部 `main`/`exports`/`bin`；② 检查根目录 `package.json` 为 `private: true` 且无发布 `files`（或所有声明入口均在根打包中且存在于磁盘）；③ 静态断言 `release.yml` 的 `verify` 顺序与 `publish` 从 `dist/` 发布。同时 `npm run check:types` 真执行 `tsc -p tsconfig.client.json`。
 
 
 ## 60. 决策 0.9.4-e：入口判定与参数校验不许把非法静默成“没传”
@@ -871,6 +871,6 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 
 **问题**：`release.yml` 的 verify 与 publish 各自 `actions/checkout` + 各自 `npm run build`，verify 在 Node 22 上验、publish 在 Node 24 上重建后按目录发布。只要两次构建有任何差异（工具链、缓存、构建脚本自身），用户拿到的字节就没被检查看过；把 `needs: verify` 删掉门禁照样绿，说明两个 job 之间根本没有身份关系——这是 0.9.4 复核的 P0。
 
-**决定**：verify 打包并上传（`npm pack ./dist` → `sha256sum` → `upload-artifact`），publish 下载同名 artifact、`sha256sum -c` 校验、`npm publish "$TARBALL"`，并**禁止**在 publish 里 `npm run build`。`scripts/check-release-path.mjs` 增加五条断言：verify 必须 `npm pack ./dist`、必须 `upload-artifact`（带 name）、publish 必须 `download-artifact`（同名）、必须 `sha256sum -c`、**每条** publish 调用都必须指向 tarball。最后一条是被咬过才加的：最初只要求“某处 publish 指向 tarball”，于是“rehearsal 指向 tarball + 真实分支 `cd dist && npm publish`”照样过关。
+**决定**：verify 打包并上传（`npm pack ./dist` → `sha256sum` → `upload-artifact`），publish 下载同名 artifact、`sha256sum -c` 校验、`npm publish "$TARBALL"`，并**禁止**在 publish 里 `npm run build`。`scripts/check-release-path.ts` 增加五条断言：verify 必须 `npm pack ./dist`、必须 `upload-artifact`（带 name）、publish 必须 `download-artifact`（同名）、必须 `sha256sum -c`、**每条** publish 调用都必须指向 tarball。最后一条是被咬过才加的：最初只要求“某处 publish 指向 tarball”，于是“rehearsal 指向 tarball + 真实分支 `cd dist && npm publish`”照样过关。
 
 **残留边界**：`npm publish` 的 provenance 由 OIDC 提供，artifact 绑定管的是“发布的是哪份字节”，两者互不替代；本机令牌兜底路径（`docs/release.md` §2.3）没有 artifact 绑定，靠手工 `verify` 保证。

@@ -60,7 +60,7 @@ npm run check:types
 npm test
 npm run test:host
 npm run check:package            # 向 npm 要 dist/ 真实打包清单再核对
-node scripts/check-release-path.mjs
+node scripts/check-release-path.ts
 
 # 4. 常规 PR 流程合进 main
 ```

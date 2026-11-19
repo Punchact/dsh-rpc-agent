@@ -7,7 +7,7 @@
 //   - 能从代码或磁盘算出来的（RPC 方法数、MCP 工具数、`npm test` 链上的测试文件数）一律现算；
 //   - 算不出来的（用例总数要整跑一遍才知道）记在 `docs/counts.json` 里，作为唯一来源。
 //
-// `node scripts/check-docs.mjs`        核对：文档里的数字必须与上面两处一致，不一致就失败。
+// `node scripts/check-docs.ts`         核对：文档里的数字必须与上面两处一致，不一致就失败。
 // `node scripts/check-docs.mjs --write` 同步：把这些数字刷进文档（幂等，再跑一次不会有改动）。
 //
 // 匹配用的锚点是固定的；锚点消失也算失败——那样说明这句文档被改写，规则该跟着更新，而不是静默放过。
@@ -15,7 +15,7 @@ import { readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { chainDigest } from "./count-cases.mjs";
+import { chainDigest } from "./count-cases.ts";
 
 const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const read = (rel) => readFileSync(join(REPO, rel), "utf8").replace(/\r\n/g, "\n");

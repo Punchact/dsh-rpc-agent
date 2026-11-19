@@ -76,7 +76,7 @@ jobs:
       - run: npm test
       - run: npm run test:host
       - run: npm run check:package
-      - run: node scripts/check-release-path.mjs
+      - run: node scripts/check-release-path.ts
 
       # What gets published has to be the thing that was verified. Packing here and handing the
       # tarball to the publish job removes the previous hole: that job rebuilt from the same commit

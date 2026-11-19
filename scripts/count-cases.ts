@@ -7,8 +7,8 @@
 // 摘要与「声明的用例条数」，`check-docs` 靠这两项判断「这个数是刚量的，还是有人手改的」。
 //
 // 用法：
-//   node scripts/count-cases.mjs            量一次并打印（不落盘）
-//   node scripts/count-cases.mjs --record   量一次并写进 docs/counts.json
+//   node scripts/count-cases.ts             量一次并打印（不落盘）
+//   node scripts/count-cases.ts --record    量一次并写进 docs/counts.json
 //
 // 沙箱注意：本机沙箱禁止 Node 用管道拉子进程 stdio（EPERM），所以子进程用 inherit，
 // TAP 用 `--test-reporter-destination` 直接落文件。
