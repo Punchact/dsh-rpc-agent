@@ -18,7 +18,7 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { rpcCall, waitForTurn, WAIT_SLICE_MS } from "../lib/client.mjs";
+import { rpcCall, waitForTurn, WAIT_SLICE_MS, type RpcCallOptions } from "../lib/client.mjs";
 import { sanitizeAdapterFailure } from "../lib/adapters/base.mjs";
 import { PLUGIN_VERSION } from "../lib/version.mjs";
 import {
@@ -27,12 +27,44 @@ import {
   formatTaskSummary,
   formatToolError,
   formatToolResult,
+  type FormatToolResultInput,
+  type McpToolResult,
+  type TaskProjection,
 } from "../lib/mcp-format.mjs";
 import { createInflight } from "../lib/inflight.mjs";
 import { normalizeTraceLevel } from "../lib/trace-format.mjs";
-import { DEFAULT_HISTORY_KINDS, formatHistory } from "../lib/history-format.mjs";
-import { formatCapabilities } from "../lib/capabilities.mjs";
+import { DEFAULT_HISTORY_KINDS, formatHistory, type HistoryPayloadInput } from "../lib/history-format.mjs";
+import { formatCapabilities, type CollectedCapabilitySection } from "../lib/capabilities.mjs";
 import { TIMEOUT_ADVICE, shouldAdviseTimeout } from "../lib/advice.mjs";
+
+export type JsonSchemaType = "string" | "number" | "integer" | "boolean" | "array" | "object";
+
+export interface McpJsonSchemaProperty {
+  readonly type: JsonSchemaType;
+  readonly description?: string;
+  readonly enum?: readonly string[];
+  readonly default?: unknown;
+  readonly minimum?: number;
+  readonly maximum?: number;
+  readonly items?: McpJsonSchemaProperty;
+  readonly properties?: Readonly<Record<string, McpJsonSchemaProperty>>;
+  readonly required?: readonly string[];
+  readonly additionalProperties?: boolean;
+}
+
+export interface McpToolInputSchema {
+  readonly type: "object";
+  readonly properties: Readonly<Record<string, McpJsonSchemaProperty>>;
+  readonly required?: readonly string[];
+  readonly additionalProperties: false;
+}
+
+export interface McpToolDefinition {
+  readonly name: string;
+  readonly title: string;
+  readonly description: string;
+  readonly inputSchema: McpToolInputSchema;
+}
 
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_INFO = { name: "dsh-rpc", version: PLUGIN_VERSION, title: "DeepSeek Harness bridge" };
@@ -339,7 +371,7 @@ const BASE_TOOLS = [
       additionalProperties: false,
     },
   },
-];
+] as const satisfies readonly McpToolDefinition[];
 
 const TASK_TOOLS = [
   {
@@ -517,15 +549,28 @@ const TASK_TOOLS = [
       additionalProperties: false,
     },
   },
-];
+] as const satisfies readonly McpToolDefinition[];
 
-const TOOLS = [...BASE_TOOLS, ...TASK_TOOLS];
-const TASK_TOOL_NAMES = new Set(TASK_TOOLS.map((t) => t.name));
+export type BaseToolName = (typeof BASE_TOOLS)[number]["name"];
+export type TaskToolName = (typeof TASK_TOOLS)[number]["name"];
+export type McpToolName = BaseToolName | TaskToolName;
+
+const TOOLS: readonly McpToolDefinition[] = [...BASE_TOOLS, ...TASK_TOOLS];
+const TASK_TOOL_NAMES: ReadonlySet<string> = new Set<TaskToolName>(TASK_TOOLS.map((t) => t.name));
 
 // 客户端自己产生的传输层失败码。0.9.3 复核第三轮：这里必须是显式白名单，不能写成
 // 「任何 E 开头的码」——适配器的 spawn 失败也长这样（ENOENT），那类消息里带着绝对路径
 // 和命令行参数，必须继续走 sanitizeAdapterFailure，不许跟着这里一起裸奔出去。
-const CLIENT_TRANSPORT_CODES = new Set([
+export type ClientTransportCode =
+  | "EBADPORT"
+  | "ECONNREFUSED"
+  | "ECONNRESET"
+  | "EPIPE"
+  | "ETIMEDOUT"
+  | "UND_ERR_SOCKET"
+  | "UND_ERR_CONNECT_TIMEOUT";
+
+export const CLIENT_TRANSPORT_CODES: ReadonlySet<ClientTransportCode> = new Set<ClientTransportCode>([
   "EBADPORT",
   "ECONNREFUSED",
   "ECONNRESET",
@@ -534,6 +579,8 @@ const CLIENT_TRANSPORT_CODES = new Set([
   "UND_ERR_SOCKET",
   "UND_ERR_CONNECT_TIMEOUT",
 ]);
+
+export type McpCallToolOutcome = McpToolResult<unknown>;
 
 // --------------------------------------------------------------- transport --
 
@@ -548,12 +595,12 @@ let closing = false;
 
 // Requests are answered concurrently, so end-of-input must not tear the process
 // down while a `dsh_ask` is still waiting on a Harness turn.
-function track(work) {
+function track(work: Promise<void>): void {
   pending += 1;
   // `finally` alone would hand back a rejected promise nobody awaits, and an
   // unhandled rejection kills the process — catch first, then settle.
   work
-    .catch((error) => log(`unhandled: ${error instanceof Error ? error.message : String(error)}`))
+    .catch((error: unknown) => log(`unhandled: ${error instanceof Error ? error.message : String(error)}`))
     .finally(() => {
       pending -= 1;
       if (closing && pending === 0) process.exit(0);
@@ -565,7 +612,7 @@ const IS_MAIN =
 
 if (IS_MAIN) {
   process.stdin.setEncoding("utf8");
-  process.stdin.on("data", (chunk) => {
+  process.stdin.on("data", (chunk: string) => {
     buffer += chunk;
     let newline = buffer.indexOf("\n");
     while (newline >= 0) {
@@ -581,26 +628,26 @@ if (IS_MAIN) {
   });
 }
 
-function send(payload) {
+function send(payload: unknown): void {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
 }
 
-function reply(id, result) {
+function reply(id: string | number | null, result: unknown): void {
   send({ jsonrpc: "2.0", id, result });
 }
 
-function replyError(id, code, message, data) {
-  const error = { code, message };
+function replyError(id: string | number | null, code: number, message: string, data?: unknown): void {
+  const error: { code: number; message: string; data?: unknown } = { code, message };
   if (data !== undefined) error.data = data;
   send({ jsonrpc: "2.0", id, error });
 }
 
-function log(message) {
+function log(message: string): void {
   process.stderr.write(`[dsh-rpc-mcp] ${message}\n`);
 }
 
-async function handleLine(line) {
-  let request;
+async function handleLine(line: string): Promise<void> {
+  let request: unknown;
   try {
     request = JSON.parse(line);
   } catch {
@@ -611,15 +658,18 @@ async function handleLine(line) {
     replyError(null, -32600, "invalid request");
     return;
   }
-  const isNotification = !("id" in request);
-  const id = request.id ?? null;
-  const method = typeof request.method === "string" ? request.method : "";
+  const reqObj = request as Record<string, unknown>;
+  const isNotification = !("id" in reqObj);
+  const id = (reqObj.id as string | number | null | undefined) ?? null;
+  const method = typeof reqObj.method === "string" ? reqObj.method : "";
+  const reqParams = reqObj.params && typeof reqObj.params === "object" ? (reqObj.params as Record<string, unknown>) : {};
 
   try {
     switch (method) {
       case "initialize":
         {
-          const name = request.params?.clientInfo?.name;
+          const clientInfo = reqParams.clientInfo as { name?: unknown } | undefined;
+          const name = clientInfo?.name;
           if (typeof name === "string" && name.trim()) clientNamespace = name.trim();
         }
         reply(id, {
@@ -637,8 +687,8 @@ async function handleLine(line) {
         return;
 
       case "notifications/cancelled": {
-        const target = request.params?.requestId ?? request.params?.id ?? null;
-        if (target !== null && inflight.cancel(target)) {
+        const target = reqParams.requestId ?? reqParams.id ?? null;
+        if (target !== null && (typeof target === "string" || typeof target === "number") && inflight.cancel(target)) {
           log(`cancelled by the client: ${String(target)}`);
         }
         return;
@@ -655,12 +705,14 @@ async function handleLine(line) {
       }
 
       case "tools/call": {
-        const params = request.params ?? {};
-        const name = params.name;
-        const args = params.arguments ?? {};
+        const name = typeof reqParams.name === "string" ? reqParams.name : "";
+        const args =
+          reqParams.arguments && typeof reqParams.arguments === "object" && !Array.isArray(reqParams.arguments)
+            ? (reqParams.arguments as Record<string, unknown>)
+            : ({} as Record<string, unknown>);
         const controller = new AbortController();
         if (id !== null) inflight.begin(id, controller);
-        let outcome;
+        let outcome: McpCallToolOutcome;
         try {
           outcome = await callTool(name, args, controller.signal);
         } finally {
@@ -686,7 +738,8 @@ async function handleLine(line) {
     const message = error instanceof Error ? error.message : String(error);
     log(`error in ${method}: ${message}`);
     if (!isNotification) {
-      replyError(id, -32603, message, error?.data);
+      const data = error && typeof error === "object" && "data" in error ? (error as { data?: unknown }).data : undefined;
+      replyError(id, -32603, message, data);
     }
   }
 }
@@ -699,9 +752,13 @@ const MAX_ADVISED_SESSIONS = 200;
 
 // One-shot timeout advice per session id, bounded so long-lived MCP processes
 // do not grow without limit.
-const advisedTimeoutSessions = new Set();
+const advisedTimeoutSessions = new Set<string>();
 
-function maybeTimeoutAdvice(result, requestedMs, enabled) {
+function maybeTimeoutAdvice(
+  result: FormatToolResultInput | null | undefined,
+  requestedMs: number,
+  enabled: boolean,
+): string | null {
   const sessionId = typeof result?.sessionId === "string" && result.sessionId.length > 0 ? result.sessionId : null;
   const alreadyShown = sessionId !== null && advisedTimeoutSessions.has(sessionId);
   if (
@@ -726,26 +783,39 @@ function maybeTimeoutAdvice(result, requestedMs, enabled) {
 }
 
 /** Out-wait the server's turn budget so the bridge never aborts a live turn. */
-function turnBudget(timeoutMs) {
-  return (Number.isInteger(timeoutMs) ? timeoutMs : DEFAULT_TURN_TIMEOUT_MS) + 30_000;
+function turnBudget(timeoutMs: unknown): number {
+  return (typeof timeoutMs === "number" && Number.isInteger(timeoutMs) ? timeoutMs : DEFAULT_TURN_TIMEOUT_MS) + 30_000;
+}
+
+interface BridgeConfigDefaults {
+  defaultTimeoutMs?: number;
+  traceDefault?: string;
+  maxResultChars?: number;
+  timeoutAdvice?: boolean;
+  tasksEnabled?: boolean;
+  [key: string]: unknown;
 }
 
 // The bridge may configure other budgets than these literals. Ask it once, then
 // quote its answer in hints and use it as the default turn budget — a hint that
 // names 600000 against a 10-minute deployment is exactly the drift the audit
 // flagged.
-let bridgeDefaults = null;
-let bridgeMethods = null;
+let bridgeDefaults: BridgeConfigDefaults | null = null;
+let bridgeMethods: string[] | null = null;
 
-function resetBridgeDefaults() {
+function resetBridgeDefaults(): void {
   bridgeDefaults = null;
   bridgeMethods = null;
 }
 
-async function bridgeSettings() {
+async function bridgeSettings(): Promise<BridgeConfigDefaults> {
   if (bridgeDefaults !== null) return bridgeDefaults;
   try {
-    const info = await rpcCall("dsh.discover", {}, { timeoutMs: 5_000 });
+    const info = await rpcCall<{ config?: BridgeConfigDefaults; methods?: Array<{ name: string }> }>(
+      "dsh.discover",
+      {},
+      { timeoutMs: 5_000 },
+    );
     bridgeDefaults = { ...(info?.config ?? {}) };
     bridgeMethods = Array.isArray(info?.methods) ? info.methods.map((m) => m.name) : null;
   } catch {
@@ -761,11 +831,17 @@ async function bridgeSettings() {
 // plugin is loaded with the switch off — a config change fixes it; "unsupported"
 // means the plugin predates the task centre, where telling the caller to set
 // `tasksEnabled` is advice that cannot work.
-const TASK_CENTRE_ENABLED = "enabled";
-const TASK_CENTRE_DISABLED = "disabled";
-const TASK_CENTRE_UNSUPPORTED = "unsupported";
+const TASK_CENTRE_ENABLED = "enabled" as const;
+const TASK_CENTRE_DISABLED = "disabled" as const;
+const TASK_CENTRE_UNSUPPORTED = "unsupported" as const;
 
-async function taskCentreState(callFn = (method, params, options) => rpcCall(method, params, options)) {
+type TaskCentreState = typeof TASK_CENTRE_ENABLED | typeof TASK_CENTRE_DISABLED | typeof TASK_CENTRE_UNSUPPORTED;
+
+type CallRpcFn = <T = unknown>(method: string, params?: Record<string, unknown>, options?: RpcCallOptions) => Promise<T>;
+
+async function taskCentreState(
+  callFn: CallRpcFn = (method, params, options) => rpcCall(method, params, options),
+): Promise<TaskCentreState> {
   const defaults = await bridgeSettings();
   if (defaults.tasksEnabled === false) return TASK_CENTRE_DISABLED;
   if (defaults.tasksEnabled === true) {
@@ -785,11 +861,13 @@ async function taskCentreState(callFn = (method, params, options) => rpcCall(met
   }
 }
 
-async function isTasksEnabled(callFn = (method, params, options) => rpcCall(method, params, options)) {
+async function isTasksEnabled(
+  callFn: CallRpcFn = (method, params, options) => rpcCall(method, params, options),
+): Promise<boolean> {
   return (await taskCentreState(callFn)) === TASK_CENTRE_ENABLED;
 }
 
-async function listTools() {
+async function listTools(): Promise<readonly McpToolDefinition[]> {
   const enabled = await isTasksEnabled();
   return enabled ? [...BASE_TOOLS, ...TASK_TOOLS] : [...BASE_TOOLS];
 }
@@ -797,10 +875,10 @@ async function listTools() {
 // Keys that would reach Object.prototype if any later code copies arguments
 // with Object.assign or [[Set]]. JSON.parse stores them as own properties, so
 // the danger is downstream, not here — refuse them at the door.
-const PROTO_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+const PROTO_KEYS: ReadonlySet<string> = new Set(["__proto__", "constructor", "prototype"]);
 const MAX_SCHEMA_DEPTH = 8;
 
-function validateValue(schema, value, path, depth = 0) {
+function validateValue(schema: McpJsonSchemaProperty | McpToolInputSchema, value: unknown, path: string, depth = 0): string | null {
   if (!schema || typeof schema !== "object") return null;
   if (depth > MAX_SCHEMA_DEPTH) {
     return `invalid arguments: ${path} — nesting deeper than ${MAX_SCHEMA_DEPTH} levels`;
@@ -825,30 +903,32 @@ function validateValue(schema, value, path, depth = 0) {
     return `invalid arguments: ${path} — expected object`;
   }
 
-  if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
-    return `invalid arguments: ${path} — \`${path}\` must be one of ${schema.enum.join(", ")}`;
+  const propSchema = schema as McpJsonSchemaProperty;
+  if (Array.isArray(propSchema.enum) && !propSchema.enum.includes(value as string)) {
+    return `invalid arguments: ${path} — \`${path}\` must be one of ${propSchema.enum.join(", ")}`;
   }
 
   if (typeof value === "number") {
-    if (schema.minimum !== undefined && value < schema.minimum) {
-      return `invalid arguments: ${path} — must be >= ${schema.minimum}`;
+    if (propSchema.minimum !== undefined && value < propSchema.minimum) {
+      return `invalid arguments: ${path} — must be >= ${propSchema.minimum}`;
     }
-    if (schema.maximum !== undefined && value > schema.maximum) {
-      return `invalid arguments: ${path} — must be <= ${schema.maximum}`;
+    if (propSchema.maximum !== undefined && value > propSchema.maximum) {
+      return `invalid arguments: ${path} — must be <= ${propSchema.maximum}`;
     }
   }
 
-  if (Array.isArray(value) && schema.items) {
+  if (Array.isArray(value) && propSchema.items) {
     for (let i = 0; i < value.length; i += 1) {
-      const err = validateValue(schema.items, value[i], `${path}[${i}]`, depth + 1);
+      const err = validateValue(propSchema.items, value[i], `${path}[${i}]`, depth + 1);
       if (err) return err;
     }
   }
 
   if (schema.type === "object" && value && typeof value === "object" && !Array.isArray(value)) {
+    const valObj = value as Record<string, unknown>;
     if (Array.isArray(schema.required)) {
       for (const reqKey of schema.required) {
-        if (!Object.hasOwn(value, reqKey) || value[reqKey] === undefined) {
+        if (!Object.hasOwn(valObj, reqKey) || valObj[reqKey] === undefined) {
           const reqPath = path === "arguments" ? reqKey : `${path}.${reqKey}`;
           return `invalid arguments: ${reqPath} — \`${reqKey}\` is required`;
         }
@@ -856,7 +936,7 @@ function validateValue(schema, value, path, depth = 0) {
     }
     const props = schema.properties && typeof schema.properties === "object" ? schema.properties : null;
     if (schema.additionalProperties === false && props) {
-      for (const key of Object.keys(value)) {
+      for (const key of Object.keys(valObj)) {
         // `key in props` is true for "__proto__" on every plain object, so a
         // prototype key slipped past additionalProperties:false. hasOwn is the
         // check that actually means "the schema lists this property".
@@ -867,7 +947,7 @@ function validateValue(schema, value, path, depth = 0) {
       }
     }
     if (props) {
-      for (const [key, val] of Object.entries(value)) {
+      for (const [key, val] of Object.entries(valObj)) {
         if (PROTO_KEYS.has(key) || val === undefined || !Object.hasOwn(props, key)) continue;
         const propPath = path === "arguments" ? key : `${path}.${key}`;
         const err = validateValue(props[key], val, propPath, depth + 1);
@@ -879,22 +959,33 @@ function validateValue(schema, value, path, depth = 0) {
   return null;
 }
 
-function validateToolArgs(schema, args) {
+function validateToolArgs(schema: McpToolInputSchema, args: unknown): string | null {
   const normalized = args === undefined ? {} : args;
   return validateValue(schema, normalized, "arguments", 0);
 }
 
-async function callTool(name, args, signal = undefined) {
+async function callTool(
+  name: string,
+  args: Record<string, unknown> = {},
+  signal: AbortSignal | undefined = undefined,
+): Promise<McpCallToolOutcome> {
   // Cancellation from the client has to reach the request that is still in flight;
   // these two wrappers are the only places that talk to the bridge from here.
-  const call = (method, params, options = {}) => rpcCall(method, params, signal ? { ...options, signal } : options);
-  const waitTurn = (sessionId, options = {}) => waitForTurn(sessionId, signal ? { ...options, signal } : options);
+  const call: CallRpcFn = (method, params, options = {}) =>
+    rpcCall(method, params, signal ? { ...options, signal } : options);
+  const waitTurn = (sessionId: string, options: RpcCallOptions & { sliceMs?: number; since?: number } = {}) =>
+    waitForTurn(sessionId, signal ? { ...options, signal } : options);
   try {
     const defaults = await bridgeSettings();
-    const turnDefault = Number.isInteger(defaults.defaultTimeoutMs) ? defaults.defaultTimeoutMs : DEFAULT_TURN_TIMEOUT_MS;
+    const turnDefault =
+      typeof defaults.defaultTimeoutMs === "number" && Number.isInteger(defaults.defaultTimeoutMs)
+        ? defaults.defaultTimeoutMs
+        : DEFAULT_TURN_TIMEOUT_MS;
     const traceDefault = normalizeTraceLevel(defaults.traceDefault, "errors");
     const maxResultChars =
-      Number.isInteger(defaults.maxResultChars) && defaults.maxResultChars >= 0
+      typeof defaults.maxResultChars === "number" &&
+      Number.isInteger(defaults.maxResultChars) &&
+      defaults.maxResultChars >= 0
         ? defaults.maxResultChars
         : DEFAULT_MAX_RESULT_CHARS;
     const adviceEnabled = typeof defaults.timeoutAdvice === "boolean" ? defaults.timeoutAdvice : true;
@@ -930,7 +1021,7 @@ async function callTool(name, args, signal = undefined) {
         if (prompt.trim().length === 0) {
           return formatToolError("`prompt` is required", undefined, "pass the task as a self-contained prompt string");
         }
-        const params = { text: prompt };
+        const params: Record<string, unknown> = { text: prompt };
         if (args.session_id !== undefined) {
           if (typeof args.session_id !== "string" || !args.session_id.trim()) {
             return formatToolError("`session_id` must be a non-empty string", undefined, -32602);
@@ -959,7 +1050,7 @@ async function callTool(name, args, signal = undefined) {
         // caller whose own tool budget is 300 s cannot finish a 10-minute turn and
         // the timeout then looks like a failure that invites a resend.
         if (args.wait !== true) params.wait = false;
-        if (Number.isInteger(args.timeout_ms)) params.timeoutMs = args.timeout_ms;
+        if (typeof args.timeout_ms === "number" && Number.isInteger(args.timeout_ms)) params.timeoutMs = args.timeout_ms;
         if (typeof args.project === "string" && args.project.trim()) params.project = args.project.trim();
         if (typeof args.reuse === "string" && args.reuse.trim()) params.reuse = args.reuse.trim();
         if (typeof args.mode === "string" && args.mode.trim()) params.mode = args.mode.trim();
@@ -973,14 +1064,17 @@ async function callTool(name, args, signal = undefined) {
         };
 
         if (params.wait === false) {
-          const result = await call("dsh.sessions.ask", params, { timeoutMs: turnBudget(args.timeout_ms ?? turnDefault) });
+          const result = await call<FormatToolResultInput>("dsh.sessions.ask", params, {
+            timeoutMs: turnBudget(args.timeout_ms ?? turnDefault),
+          });
           return formatToolResult(result, askFormatOptions);
         }
         // Blocking: ask for one slice, then keep waiting in slices. A single
         // request that stayed quiet past ~300 s would be cut by the transport.
-        const timeoutMs = Number.isInteger(args.timeout_ms) ? args.timeout_ms : turnDefault;
+        const timeoutMs =
+          typeof args.timeout_ms === "number" && Number.isInteger(args.timeout_ms) ? args.timeout_ms : turnDefault;
         const slice = Math.min(timeoutMs, WAIT_SLICE_MS);
-        const first = await call(
+        const first = await call<FormatToolResultInput>(
           "dsh.sessions.ask",
           { ...params, timeoutMs: slice },
           { timeoutMs: Math.min(slice + 30_000, 280_000) },
@@ -988,12 +1082,14 @@ async function callTool(name, args, signal = undefined) {
         if (first?.status === "timeout" && typeof first.sessionId === "string") {
           const left = timeoutMs - (first.durationMs ?? slice);
           if (left > 1_000) {
-            const waited = await waitTurn(first.sessionId, { timeoutMs: left });
-            const merged = {
+            const waited = (await waitTurn(first.sessionId, { timeoutMs: left })) as FormatToolResultInput & {
+              waitedMs?: number;
+            };
+            const merged: FormatToolResultInput = {
               ...first,
               ...waited,
               text: waited.text || first.text,
-              tools: waited.tools?.length > 0 ? waited.tools : first.tools,
+              tools: Array.isArray(waited.tools) && waited.tools.length > 0 ? waited.tools : first.tools,
               durationMs: (first.durationMs ?? 0) + (waited.waitedMs ?? 0),
             };
             return formatToolResult(merged, {
@@ -1012,32 +1108,55 @@ async function callTool(name, args, signal = undefined) {
         const path = typeof args.path === "string" ? args.path.trim() : "";
         if (path) {
           const title = typeof args.title === "string" ? args.title.trim() : "";
-          const created = await call("dsh.workspaces.create", title ? { path, title } : { path });
+          const created = await call<{ id: string; title: string; path: string }>(
+            "dsh.workspaces.create",
+            title ? { path, title } : { path },
+          );
           return {
             content: [{ type: "text", text: `workspace ${created.id}  ${created.title}\n${created.path}` }],
+            isError: false,
           };
         }
-        const result = await call("dsh.workspaces.list", {});
+        const result = await call<{
+          items?: Array<{ id: string; title: string; status: string; sessions: number; path: string }>;
+        }>("dsh.workspaces.list", {});
         const lines = (result.items ?? []).map(
           (item) => `${item.id}  ${item.title}  [${item.status}, ${item.sessions} sessions]\n  ${item.path}`,
         );
         return {
           content: [{ type: "text", text: lines.length > 0 ? lines.join("\n") : "(no workspaces registered)" }],
+          isError: false,
         };
       }
 
       case "dsh_approvals_pending": {
-        const params = {};
+        const params: Record<string, unknown> = {};
         if (args.session_id !== undefined) {
           if (typeof args.session_id !== "string" || !args.session_id.trim()) {
             return formatToolError("`session_id` must be a non-empty string", undefined, -32602);
           }
           params.sessionId = args.session_id.trim();
         }
-        if (Number.isInteger(args.wait_ms)) params.waitMs = args.wait_ms;
-        const result = await call("dsh.approvals.pending", params);
-        const pending = Array.isArray(result.pending) ? result.pending : [];
-        if (pending.length === 0) {
+        if (typeof args.wait_ms === "number" && Number.isInteger(args.wait_ms)) params.waitMs = args.wait_ms;
+        const result = await call<{
+          pending?: Array<{
+            approvalId: string;
+            sessionId: string;
+            toolName: string;
+            escalation: unknown;
+            args?: unknown;
+            argv?: string;
+            argsTruncated?: boolean;
+            cwd?: string;
+            preset?: string;
+            reason?: string;
+            expiresAt: string | number | Date;
+          }>;
+          mode?: string;
+          timedOut?: boolean;
+        }>("dsh.approvals.pending", params);
+        const pendingItems = Array.isArray(result.pending) ? result.pending : [];
+        if (pendingItems.length === 0) {
           return {
             content: [
               {
@@ -1048,9 +1167,10 @@ async function callTool(name, args, signal = undefined) {
                     : `(this bridge does not hold escalations: approvals.mode=${result.mode}; nothing can be pending)`,
               },
             ],
+            isError: false,
           };
         }
-        const lines = pending.map((item) => {
+        const lines = pendingItems.map((item) => {
           // The whole call, not one field of it: a `write_file` keeps its payload in
           // `content`, so showing only `command`/`path` would let the interesting
           // half of a call stay invisible to the caller deciding on it.
@@ -1068,7 +1188,7 @@ async function callTool(name, args, signal = undefined) {
             .filter(Boolean)
             .join("\n");
         });
-        return { content: [{ type: "text", text: lines.join("\n\n") }] };
+        return { content: [{ type: "text", text: lines.join("\n\n") }], isError: false };
       }
       case "dsh_approvals_resolve": {
         const approvalId = typeof args.approval_id === "string" ? args.approval_id.trim() : "";
@@ -1076,7 +1196,12 @@ async function callTool(name, args, signal = undefined) {
         if (args.decision !== "allow-once" && args.decision !== "reject") {
           return formatToolError('`decision` must be "allow-once" or "reject"', undefined, -32602);
         }
-        const resolved = await call("dsh.approvals.resolve", {
+        const resolved = await call<{
+          approvalId: string;
+          sessionId: string;
+          toolName: string;
+          decision: "allow-once" | "reject";
+        }>("dsh.approvals.resolve", {
           approvalId,
           decision: args.decision,
           ...(typeof args.note === "string" ? { note: args.note } : {}),
@@ -1093,10 +1218,14 @@ async function callTool(name, args, signal = undefined) {
                   : "\nnext: the agent was told the call was not executed; do not resend the same escalation."),
             },
           ],
+          isError: false,
         };
       }
       case "dsh_permissions": {
-        const result = await call("dsh.permissions.catalog", {});
+        const result = await call<{
+          defaultPreset?: string | null;
+          options?: Array<{ value: string; name: string; description?: string | null }>;
+        }>("dsh.permissions.catalog", {});
         const lines = (result.options ?? []).map((option) => {
           const mark = option.value === result.defaultPreset ? "*" : " ";
           return `${mark} ${option.value}  ${option.name}${option.description ? ` — ${option.description}` : ""}`;
@@ -1108,20 +1237,23 @@ async function callTool(name, args, signal = undefined) {
               text: lines.length > 0 ? lines.join("\n") : "(this deployment exposes no permission presets)",
             },
           ],
+          isError: false,
         };
       }
 
       case "dsh_sessions": {
-        const params = {};
-        if (Number.isInteger(args.limit)) params.limit = args.limit;
+        const params: Record<string, unknown> = {};
+        if (typeof args.limit === "number" && Number.isInteger(args.limit)) params.limit = args.limit;
         if (typeof args.cwd === "string" && args.cwd.trim()) params.cwd = args.cwd.trim();
         if (typeof args.sort === "string" && args.sort.trim()) params.sort = args.sort.trim();
-        const result = await call("dsh.sessions.list", params);
+        const result = await call<{
+          items?: Array<{ sessionId: string; running?: boolean; blank?: boolean; cwd?: string | null }>;
+        }>("dsh.sessions.list", params);
         const lines = (result.items ?? []).map(
           (item) =>
             `${item.sessionId}  ${item.running ? "running" : "idle"}${item.blank ? ",blank" : ""}  ${item.cwd ?? ""}`,
         );
-        return { content: [{ type: "text", text: lines.length > 0 ? lines.join("\n") : "(no sessions)" }] };
+        return { content: [{ type: "text", text: lines.length > 0 ? lines.join("\n") : "(no sessions)" }], isError: false };
       }
 
       case "dsh_history": {
@@ -1129,24 +1261,28 @@ async function callTool(name, args, signal = undefined) {
         if (!sessionId) {
           return formatToolError("`session_id` is required", undefined, "call dsh_sessions() to find the session id");
         }
-        const params = { sessionId };
+        const params: Record<string, unknown> = { sessionId };
         if (args.limit !== undefined) params.limit = args.limit;
         if (args.since !== undefined) params.since = args.since;
         if (args.max_chars !== undefined) params.maxChars = args.max_chars;
 
-        let kinds;
+        let kinds: readonly string[] | string[] | "*";
         if (args.kinds === undefined) {
           kinds = DEFAULT_HISTORY_KINDS;
         } else if (Array.isArray(args.kinds) && args.kinds.length === 1 && args.kinds[0] === "*") {
           kinds = "*";
         } else {
-          kinds = args.kinds;
+          kinds = args.kinds as string[];
         }
         params.kinds = kinds;
 
-        const payload = await call("dsh.sessions.history", params);
-        const since = Number.isInteger(args.since) ? args.since : null;
-        const formatted = formatHistory(payload, { since, kinds, requestedMaxChars: args.max_chars });
+        const payload = await call<HistoryPayloadInput>("dsh.sessions.history", params);
+        const since = typeof args.since === "number" && Number.isInteger(args.since) ? args.since : null;
+        const formatted = formatHistory(payload, {
+          since,
+          kinds: kinds as string[] | "*",
+          requestedMaxChars: typeof args.max_chars === "number" ? args.max_chars : undefined,
+        });
         const parts = [formatted.header];
         // A note means the plugin answered without honouring since/kinds: say so
         // instead of printing a delta the caller would trust and be wrong about.
@@ -1166,14 +1302,15 @@ async function callTool(name, args, signal = undefined) {
       case "dsh_wait": {
         const sessionId = typeof args.session_id === "string" ? args.session_id.trim() : "";
         if (!sessionId) return formatToolError("`session_id` is required", undefined, "call dsh_sessions() to find the session id");
-        const since = Number.isInteger(args.since) ? args.since : null;
-        const requestedMs = Number.isInteger(args.timeout_ms) ? args.timeout_ms : turnDefault;
+        const since = typeof args.since === "number" && Number.isInteger(args.since) ? args.since : null;
+        const requestedMs =
+          typeof args.timeout_ms === "number" && Number.isInteger(args.timeout_ms) ? args.timeout_ms : turnDefault;
         // Sliced on purpose: see waitTurn(). One long request cannot survive
         // the transport's 300 s ceiling, and the answer would be lost with it.
-        const result = await waitTurn(sessionId, {
+        const result = (await waitTurn(sessionId, {
           timeoutMs: requestedMs,
           since: since ?? undefined,
-        });
+        })) as FormatToolResultInput;
         return formatToolResult(result, {
           ...hintOptions,
           trace: normalizeTraceLevel(args.trace, traceDefault),
@@ -1185,23 +1322,30 @@ async function callTool(name, args, signal = undefined) {
       case "dsh_cancel": {
         const sessionId = typeof args.session_id === "string" ? args.session_id.trim() : "";
         if (!sessionId) return formatToolError("`session_id` is required", undefined, "call dsh_sessions() to find the session id");
-        const result = await call("dsh.sessions.cancel", { sessionId });
-        return { content: [{ type: "text", text: `cancelled ${result.sessionId}` }] };
+        const result = await call<{ sessionId: string }>("dsh.sessions.cancel", { sessionId });
+        return { content: [{ type: "text", text: `cancelled ${result.sessionId}` }], isError: false };
       }
 
       case "dsh_status": {
-        const result = await call("dsh.ping", {});
+        const result = await call<{
+          plugin?: string;
+          version?: string;
+          origin?: string | null;
+          config?: { path?: string };
+          state?: { tokenSource?: string };
+          activeRuns?: unknown[];
+        }>("dsh.ping", {});
         const text = [
           `plugin: ${result.plugin} ${result.version}`,
           `endpoint: ${result.origin ?? "?"}${result.config?.path ?? ""}`,
           `token source: ${result.state?.tokenSource}`,
           `active runs: ${result.activeRuns?.length ?? 0}`,
         ].join("\n");
-        return { content: [{ type: "text", text }] };
+        return { content: [{ type: "text", text }], isError: false };
       }
 
       case "dsh_capabilities": {
-        const params = {};
+        const params: Record<string, unknown> = {};
         if (args.sections !== undefined) params.sections = args.sections;
         if (args.max_chars !== undefined) params.max_chars = args.max_chars;
         if (args.session_id !== undefined) {
@@ -1213,11 +1357,19 @@ async function callTool(name, args, signal = undefined) {
         // A newer CLI/MCP bridge can be paired with an older plugin inside the
         // profile: the tool exists here but the RPC method does not exist there.
         // Say which half is stale instead of forwarding "unknown method" verbatim.
-        let payload;
+        let payload: {
+          sections?: CollectedCapabilitySection[];
+          missing?: string[];
+          truncated?: boolean;
+          text?: string;
+        };
         try {
           payload = await call("dsh.capabilities", params);
         } catch (error) {
-          const message = String(error?.message ?? error);
+          const message =
+            error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string"
+              ? (error as { message: string }).message
+              : String(error);
           if (!/unknown method/i.test(message)) throw error;
           return formatToolError(
             "this Harness plugin does not implement dsh.capabilities",
@@ -1232,7 +1384,7 @@ async function callTool(name, args, signal = undefined) {
           typeof payload?.text === "string" && payload.text.length > 0
             ? payload.text
             : formatCapabilities(sections, {
-                maxChars: args.max_chars,
+                maxChars: typeof args.max_chars === "number" ? args.max_chars : undefined,
                 missing,
               }).text;
         return {
@@ -1247,7 +1399,7 @@ async function callTool(name, args, signal = undefined) {
       }
 
       case "dsh_task_preview": {
-        const params = {};
+        const params: Record<string, unknown> = {};
         if (typeof args.workspace_id === "string" && args.workspace_id.trim()) params.workspaceId = args.workspace_id.trim();
         if (typeof args.agent_id === "string" && args.agent_id.trim()) params.agentId = args.agent_id.trim();
         if (typeof args.capability_revision_id === "string" && args.capability_revision_id.trim()) {
@@ -1262,27 +1414,31 @@ async function callTool(name, args, signal = undefined) {
         } else if (typeof args.prompt === "string" && args.prompt.trim()) {
           params.input = { prompt: args.prompt.trim() };
         }
-        const result = await call("dsh.tasks.preview", params);
+        const result = await call<TaskProjection>("dsh.tasks.preview", params);
         return formatTaskSummary(result, maxResultChars);
       }
 
       case "dsh_task_events": {
         const taskId = typeof args.task_id === "string" ? args.task_id.trim() : "";
         if (!taskId) return formatToolError("`task_id` is required", undefined, -32602);
-        const params = { taskId };
+        const params: Record<string, unknown> = { taskId };
         if (args.after_seq !== undefined) {
-          if (!Number.isInteger(args.after_seq) || args.after_seq < 0) {
+          if (typeof args.after_seq !== "number" || !Number.isInteger(args.after_seq) || args.after_seq < 0) {
             return formatToolError("`after_seq` must be a non-negative integer", undefined, -32602);
           }
           params.afterSeq = args.after_seq;
         }
         if (args.limit !== undefined) {
-          if (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 500) {
+          if (typeof args.limit !== "number" || !Number.isInteger(args.limit) || args.limit < 1 || args.limit > 500) {
             return formatToolError("`limit` must be an integer between 1 and 500", undefined, -32602);
           }
           params.limit = args.limit;
         }
-        const result = await call("dsh.tasks.events", params);
+        const result = await call<{
+          events?: Array<{ seq: number; type: string; attemptId?: string | null }>;
+          hasMore?: boolean;
+          nextAfterSeq?: number;
+        }>("dsh.tasks.events", params);
         const events = Array.isArray(result?.events) ? result.events : [];
         const lines = events.map((e) => `#${e.seq} ${e.type}${e.attemptId ? " · " + e.attemptId : ""}`);
         const content = capText(
@@ -1301,20 +1457,29 @@ async function callTool(name, args, signal = undefined) {
         const artifactId = typeof args.artifact_id === "string" ? args.artifact_id.trim() : "";
         if (!taskId) return formatToolError("`task_id` is required", undefined, -32602);
         if (!artifactId) return formatToolError("`artifact_id` is required", undefined, -32602);
-        const params = { taskId, artifactId };
+        const params: Record<string, unknown> = { taskId, artifactId };
         if (args.offset !== undefined) {
-          if (!Number.isInteger(args.offset) || args.offset < 0) {
+          if (typeof args.offset !== "number" || !Number.isInteger(args.offset) || args.offset < 0) {
             return formatToolError("`offset` must be a non-negative integer", undefined, -32602);
           }
           params.offset = args.offset;
         }
         if (args.length !== undefined) {
-          if (!Number.isInteger(args.length) || args.length < 1 || args.length > 1_000_000) {
+          if (typeof args.length !== "number" || !Number.isInteger(args.length) || args.length < 1 || args.length > 1_000_000) {
             return formatToolError("`length` must be an integer between 1 and 1000000", undefined, -32602);
           }
           params.length = args.length;
         }
-        const result = await call("dsh.tasks.readArtifact", params);
+        const result = await call<{
+          artifactId?: string;
+          kind?: string;
+          sizeBytes?: number;
+          encoding?: string;
+          bytesRead?: number;
+          content?: string;
+          offset?: number;
+          truncated?: boolean;
+        }>("dsh.tasks.readArtifact", params);
         const body = result?.encoding === "base64" ? `(base64, ${result?.bytesRead ?? 0} bytes)` : String(result?.content ?? "");
         const content = capText(
           [
@@ -1335,7 +1500,7 @@ async function callTool(name, args, signal = undefined) {
         const text = typeof args.text === "string" ? args.text.trim() : "";
         if (!taskId) return formatToolError("`task_id` is required", undefined, -32602);
         if (!text) return formatToolError("`text` is required", undefined, -32602);
-        const params = {
+        const params: Record<string, unknown> = {
           taskId,
           text,
           idempotencyKey:
@@ -1346,7 +1511,7 @@ async function callTool(name, args, signal = undefined) {
         if (typeof args.attempt_id === "string" && args.attempt_id.trim()) params.attemptId = args.attempt_id.trim();
         if (typeof args.question_id === "string" && args.question_id.trim()) params.questionId = args.question_id.trim();
         if (typeof args.principal_id === "string" && args.principal_id.trim()) params.principalId = args.principal_id.trim();
-        const result = await call("dsh.tasks.input", params);
+        const result = await call<TaskProjection>("dsh.tasks.input", params);
         return formatTaskSummary(
           { taskId: result?.taskId, status: "input queued", phase: "person/delivery", ...result },
           maxResultChars,
@@ -1356,7 +1521,12 @@ async function callTool(name, args, signal = undefined) {
       case "dsh_agents_get": {
         const agentId = typeof args.agent_id === "string" ? args.agent_id.trim() : "";
         if (!agentId) return formatToolError("`agent_id` is required", undefined, -32602);
-        const result = await call("dsh.agents.get", { agentId });
+        const result = await call<{
+          agentId?: string;
+          adapterKind?: string;
+          probeStatus?: string | null;
+          capabilityRevisions?: unknown[];
+        }>("dsh.agents.get", { agentId });
         const caps = Array.isArray(result?.capabilityRevisions) ? result.capabilityRevisions.length : 0;
         const content = capText(
           [
@@ -1377,7 +1547,7 @@ async function callTool(name, args, signal = undefined) {
         if (args.preview_id !== undefined && (typeof args.preview_id !== "string" || !args.preview_id.trim())) {
           return formatToolError("`preview_id` must be a non-empty string", undefined, -32602);
         }
-        const params = {
+        const params: Record<string, unknown> = {
           idempotencyKey:
             typeof args.idempotency_key === "string" && args.idempotency_key.trim()
               ? args.idempotency_key.trim()
@@ -1392,23 +1562,23 @@ async function callTool(name, args, signal = undefined) {
         }
         if (args.input !== undefined) params.input = args.input;
         else if (typeof args.prompt === "string" && args.prompt.trim()) params.input = { prompt: args.prompt.trim() };
-        const result = await call("dsh.tasks.submit", params);
+        const result = await call<TaskProjection>("dsh.tasks.submit", params);
         return formatTaskSummary(result, maxResultChars);
       }
 
       case "dsh_task_list": {
-        const params = {};
+        const params: Record<string, unknown> = {};
         if (typeof args.status === "string" && args.status.trim()) params.status = args.status.trim();
         if (typeof args.workspace_id === "string" && args.workspace_id.trim()) params.workspaceId = args.workspace_id.trim();
         if (typeof args.principal_id === "string" && args.principal_id.trim()) params.principalId = args.principal_id.trim();
         if (typeof args.cursor === "string" && args.cursor.trim()) params.cursor = args.cursor.trim();
         if (args.limit !== undefined) {
-          if (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 200) {
+          if (typeof args.limit !== "number" || !Number.isInteger(args.limit) || args.limit < 1 || args.limit > 200) {
             return formatToolError("`limit` must be an integer between 1 and 200", undefined, -32602);
           }
           params.limit = args.limit;
         }
-        const result = await call("dsh.tasks.list", params);
+        const result = await call<{ items?: TaskProjection[]; hasMore?: boolean }>("dsh.tasks.list", params);
         const items = Array.isArray(result?.items) ? result.items : [];
         const lines = items.map((item) => formatTaskListLine(item));
         const content = capText(
@@ -1429,19 +1599,23 @@ async function callTool(name, args, signal = undefined) {
       case "dsh_task_get": {
         const taskId = typeof args.task_id === "string" ? args.task_id.trim() : "";
         if (!taskId) return formatToolError("`task_id` is required", undefined, -32602);
-        const params = { taskId };
+        const params: Record<string, unknown> = { taskId };
         if (typeof args.principal_id === "string" && args.principal_id.trim()) params.principalId = args.principal_id.trim();
-        const result = await call("dsh.tasks.get", params);
+        const result = await call<TaskProjection>("dsh.tasks.get", params);
         return formatTaskSummary(result, maxResultChars);
       }
 
       case "dsh_task_cancel": {
         const taskId = typeof args.task_id === "string" ? args.task_id.trim() : "";
         if (!taskId) return formatToolError("`task_id` is required", undefined, -32602);
-        if (!Number.isInteger(args.expected_state_version) || args.expected_state_version < 1) {
+        if (
+          typeof args.expected_state_version !== "number" ||
+          !Number.isInteger(args.expected_state_version) ||
+          args.expected_state_version < 1
+        ) {
           return formatToolError("`expected_state_version` must be a positive integer", undefined, -32602);
         }
-        const params = {
+        const params: Record<string, unknown> = {
           taskId,
           expectedStateVersion: args.expected_state_version,
           idempotencyKey:
@@ -1451,16 +1625,22 @@ async function callTool(name, args, signal = undefined) {
         };
         if (typeof args.reason === "string" && args.reason.trim()) params.reason = args.reason.trim();
         if (typeof args.principal_id === "string" && args.principal_id.trim()) params.principalId = args.principal_id.trim();
-        const result = await call("dsh.tasks.cancel", params);
-        return formatTaskSummary({ phase: result.status === "needs_reconcile" ? "person/reconcile" : "machine/working", ...result }, maxResultChars);
+        const result = await call<TaskProjection>("dsh.tasks.cancel", params);
+        return formatTaskSummary(
+          { phase: result.status === "needs_reconcile" ? "person/reconcile" : "machine/working", ...result },
+          maxResultChars,
+        );
       }
 
       case "dsh_agents_list": {
-        const params = {};
+        const params: Record<string, unknown> = {};
         if (typeof args.kind === "string" && args.kind.trim()) params.kind = args.kind.trim();
         if (typeof args.enabled === "boolean") params.enabled = args.enabled;
         if (typeof args.verified_only === "boolean") params.verifiedOnly = args.verified_only;
-        const result = await call("dsh.agents.list", params);
+        const result = await call<{
+          total?: number;
+          items?: Array<{ agentId: string; kind: string; probeStatus?: string | null }>;
+        }>("dsh.agents.list", params);
         const items = Array.isArray(result?.items) ? result.items : [];
         const lines = items.map(
           (a) => `agent ${a.agentId} · ${a.kind} · ${a.probeStatus ?? "unknown"}`,
@@ -1483,14 +1663,21 @@ async function callTool(name, args, signal = undefined) {
       case "dsh_agents_probe": {
         const agentId = typeof args.agent_id === "string" ? args.agent_id.trim() : "";
         if (!agentId) return formatToolError("`agent_id` is required", undefined, -32602);
-        const params = { agentId };
+        const params: Record<string, unknown> = { agentId };
         if (args.controls !== undefined) {
           if (!Array.isArray(args.controls) || args.controls.some((c) => typeof c !== "string" || !c.trim())) {
             return formatToolError("`controls` must be an array of non-empty strings", undefined, -32602);
           }
-          params.controls = args.controls.map((c) => c.trim());
+          params.controls = args.controls.map((c) => String(c).trim());
         }
-        const result = await call("dsh.agents.probe", params);
+        const result = await call<{
+          agentId: string;
+          probeStatus?: string | null;
+          verifiedControls?: string[];
+          verified?: Record<string, unknown>;
+          unknown?: Array<{ control: string; reason: string }>;
+          elapsedMs?: number;
+        }>("dsh.agents.probe", params);
         const header = `agent ${result.agentId} · ${result.probeStatus ?? "unknown"}`;
         const body = `verified: ${(result.verifiedControls ?? Object.keys(result.verified ?? {})).join(", ") || "(none)"}\nunknown: ${(result.unknown ?? []).map((u) => `${u.control}(${u.reason})`).join(", ") || "(none)"}`;
         const content = capText(
@@ -1517,18 +1704,29 @@ async function callTool(name, args, signal = undefined) {
     // Client-side transport failures (`EBADPORT`, `ECONNREFUSED`, `ECONNRESET`,
     // etc.) are passed through verbatim so diagnostics survive; only adapter and
     // server/internal failures are sanitized.
+    const err =
+      error && typeof error === "object"
+        ? (error as {
+            transport?: unknown;
+            code?: unknown;
+            taskCode?: unknown;
+            data?: { kind?: unknown; [key: string]: unknown };
+          })
+        : null;
+    const errCodeStr = String(err?.code ?? "");
     const isTransport =
-      error?.transport === true ||
-      (CLIENT_TRANSPORT_CODES.has(String(error?.code ?? "")) &&
-        error?.taskCode !== "ADAPTER_UNAVAILABLE" &&
-        error?.data?.kind !== "ADAPTER_UNAVAILABLE");
+      err?.transport === true ||
+      ((CLIENT_TRANSPORT_CODES as ReadonlySet<string>).has(errCodeStr) &&
+        err?.taskCode !== "ADAPTER_UNAVAILABLE" &&
+        err?.data?.kind !== "ADAPTER_UNAVAILABLE");
+    const errCodeNum = typeof err?.code === "number" && Number.isInteger(err.code) ? err.code : null;
     const isAdapterOrInternal =
       !isTransport &&
-      (error?.data?.kind === "ADAPTER_UNAVAILABLE" ||
-        error?.taskCode === "ADAPTER_UNAVAILABLE" ||
-        !Number.isInteger(error?.code) ||
-        error.code === -32000 ||
-        error.code === -32603);
+      (err?.data?.kind === "ADAPTER_UNAVAILABLE" ||
+        err?.taskCode === "ADAPTER_UNAVAILABLE" ||
+        errCodeNum === null ||
+        errCodeNum === -32000 ||
+        errCodeNum === -32603);
     if (TASK_TOOL_NAMES.has(name) && isAdapterOrInternal) {
       const safe = sanitizeAdapterFailure(error);
       return formatToolError(
@@ -1536,14 +1734,18 @@ async function callTool(name, args, signal = undefined) {
         safe.code || safe.kind || safe.httpStatus
           ? { code: safe.code, kind: safe.kind, httpStatus: safe.httpStatus }
           : undefined,
-        error?.code,
+        errCodeNum ?? (typeof err?.code === "string" ? err.code : undefined),
       );
     }
     const errorData =
-      isTransport && typeof error?.code === "string" && error.code.length > 0
-        ? { ...(error?.data && typeof error.data === "object" ? error.data : {}), code: error.code }
-        : error?.data;
-    return formatToolError(error instanceof Error ? error.message : String(error), errorData, error?.code);
+      isTransport && typeof err?.code === "string" && err.code.length > 0
+        ? { ...(err?.data && typeof err.data === "object" ? err.data : {}), code: err.code }
+        : err?.data;
+    return formatToolError(
+      error instanceof Error ? error.message : String(error),
+      errorData,
+      errCodeNum ?? (typeof err?.code === "string" ? err.code : undefined),
+    );
   }
 }
 

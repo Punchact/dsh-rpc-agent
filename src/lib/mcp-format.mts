@@ -18,9 +18,15 @@
 // not a euphemism for "completed" — it means nobody knows, and the caller has to
 // check before doing anything.
 
-import { describeTrace, normalizeTraceLevel } from "./trace-format.mjs";
+import {
+  describeTrace,
+  normalizeTraceLevel,
+  type DescribeTraceResult,
+  type StructuredTraceEntry,
+  type TraceLevel,
+} from "./trace-format.mjs";
 
-const NEXT_BY_CODE = {
+export const NEXT_BY_CODE = {
   "-32602": "fix the arguments named in the message and call again — retrying the same call will fail the same way",
   "-32003": "call dsh_sessions() to find the real session id",
   "-32004": "the session is busy — call dsh_wait({ session_id }) to follow the running turn instead of resending the prompt",
@@ -34,9 +40,11 @@ const NEXT_BY_CODE = {
   ETIMEDOUT: "the request outlived its budget — run `dsh-rpc health`, then retry with a larger timeout_ms",
   UND_ERR_SOCKET: "the socket closed before the response arrived — run `dsh-rpc health` before retrying",
   UND_ERR_CONNECT_TIMEOUT: "the connection never opened — run `dsh-rpc health`, and check for a proxy between you and the Harness",
-};
+} as const satisfies Readonly<Record<string, string>>;
 
-const DEFAULT_NEXT = "retry once; if it still fails, report the message above verbatim";
+export type KnownNextCode = keyof typeof NEXT_BY_CODE;
+
+export const DEFAULT_NEXT = "retry once; if it still fails, report the message above verbatim";
 
 const WAIT_NEXT = "do NOT resend the prompt";
 
@@ -45,11 +53,137 @@ const WAIT_NEXT = "do NOT resend the prompt";
 const DEFAULT_WAIT_HINT_MS = 600000;
 const DEFAULT_MAX_RESULT_CHARS = 20000;
 
+export interface McpTextBlock {
+  type: "text";
+  text: string;
+}
+
+export interface McpToolResult<T = Record<string, unknown>> {
+  content: McpTextBlock[];
+  isError: boolean;
+  structuredContent?: T;
+}
+
+export interface EndDescription {
+  note: string;
+  next: string | null;
+  wait?: boolean;
+}
+
+export interface PendingEscalationSummary {
+  approvalId?: string;
+  escalation?: unknown;
+  toolName?: string;
+  argv?: string;
+  [key: string]: unknown;
+}
+
+export interface FormatToolResultInput {
+  sessionId?: string | null;
+  turn?: number | null;
+  requestId?: string | null;
+  status?: string;
+  accepted?: boolean;
+  text?: string | null;
+  durationMs?: number;
+  cursor?: number | null;
+  sliceMs?: number;
+  requestedMs?: number;
+  timedOut?: boolean;
+  partial?: boolean;
+  tools?: unknown[];
+  reason?: { kind?: string; reason?: unknown; error?: { code?: unknown; message?: unknown }; message?: unknown } | null;
+  pendingApproval?: PendingEscalationSummary | null;
+  next?: unknown;
+  [key: string]: unknown;
+}
+
+export interface FormatToolResultOptions {
+  defaultTimeoutMs?: number;
+  trace?: unknown;
+  since?: number | null;
+  advice?: string | null;
+  maxResultChars?: number;
+}
+
+export interface StructuredTurnToolOutcome {
+  sessionId?: string | null;
+  turn?: number | null;
+  outcome: string;
+  cursor?: number | null;
+  sliceMs?: number;
+  requestedMs?: number;
+  tools: StructuredTraceEntry[];
+}
+
+export interface TaskDegradedEntry {
+  control?: string;
+  effect?: string;
+  [key: string]: unknown;
+}
+
+export interface TaskAttentionEntry {
+  kind?: string;
+  questionId?: string;
+  prompt?: string;
+  options?: unknown[];
+  [key: string]: unknown;
+}
+
+export interface TaskApprovalEntry {
+  approvalId?: string;
+  attemptId?: string;
+  summary?: string;
+  [key: string]: unknown;
+}
+
+export interface TaskPreviewCandidate {
+  agentId?: string;
+  included?: boolean;
+  reason?: string;
+  [key: string]: unknown;
+}
+
+export interface TaskProjection {
+  taskId?: string | null;
+  previewId?: string | null;
+  status?: string | null;
+  phase?: string | null;
+  stateVersion?: number | null;
+  agentId?: string | null;
+  workspaceId?: string | null;
+  capabilityRevisionId?: string | null;
+  selectionReason?: string | null;
+  candidates?: TaskPreviewCandidate[];
+  expiresAt?: string | null;
+  notice?: string | null;
+  result?: unknown;
+  resultValid?: boolean | null;
+  error?: unknown;
+  degraded?: TaskDegradedEntry[];
+  pending?: {
+    attention?: TaskAttentionEntry[];
+    approvals?: TaskApprovalEntry[];
+  } | null;
+  deduplicated?: boolean;
+  requestAccepted?: boolean;
+  [key: string]: unknown;
+}
+
+export interface TaskDetailLinesResult {
+  isPreview: boolean;
+  degraded: TaskDegradedEntry[];
+  attention: TaskAttentionEntry[];
+  approvals: TaskApprovalEntry[];
+  unvalidated: boolean;
+  lines: string[];
+}
+
 /**
  * Cap only the turn prose block (`content[1]`) so `session + prose + meta`
  * stay within `maxResultChars` before appending the truncation marker.
  */
-export function capText(content, maxResultChars = DEFAULT_MAX_RESULT_CHARS) {
+export function capText<T extends McpTextBlock[]>(content: T, maxResultChars = DEFAULT_MAX_RESULT_CHARS): T {
   if (!Array.isArray(content) || content.length < 3) return content;
   if (!Number.isInteger(maxResultChars) || maxResultChars <= 0) return content;
   const sessionText = content[0]?.text;
@@ -72,9 +206,9 @@ export function capText(content, maxResultChars = DEFAULT_MAX_RESULT_CHARS) {
   }
   const kept = bodyText.slice(0, end).replace(/[ \t\r\n]+$/, "");
   const marker = `\n… (turn text truncated at ${maxResultChars} chars; raise config.maxResultChars to lift the cap)`;
-  const cappedBlock = { ...content[1], text: `${kept}${marker}` };
+  const cappedBlock: McpTextBlock = { ...content[1], text: `${kept}${marker}` };
   if (Object.isFrozen(content)) {
-    const copy = content.slice();
+    const copy = content.slice() as T;
     copy[1] = cappedBlock;
     return copy;
   }
@@ -82,18 +216,21 @@ export function capText(content, maxResultChars = DEFAULT_MAX_RESULT_CHARS) {
   return content;
 }
 
-function waitCall(result, timeoutMs = DEFAULT_WAIT_HINT_MS) {
+function waitCall(result: FormatToolResultInput | null | undefined, timeoutMs = DEFAULT_WAIT_HINT_MS): string {
   const budget = Number.isInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_WAIT_HINT_MS;
   const args = [`session_id: ${JSON.stringify(result?.sessionId ?? "")}`, `timeout_ms: ${budget}`];
-  if (Number.isInteger(result?.cursor) && result.cursor >= 0) args.push(`since: ${result.cursor}`);
+  if (typeof result?.cursor === "number" && Number.isInteger(result.cursor) && result.cursor >= 0) {
+    args.push(`since: ${result.cursor}`);
+  }
   return `dsh_wait({ ${args.join(", ")} })`;
 }
 
 // `TurnEndCancelCause` → one clause a human can read. The Host cannot tell a
 // bridge-initiated cancel from a click on the GUI's stop button, both arriving as
 // `{kind:"user"}`; saying so is more useful than pretending to know.
-function abortedBy(cause) {
-  const kind = typeof cause?.kind === "string" ? cause.kind : null;
+function abortedBy(cause: unknown): EndDescription {
+  const rec = cause && typeof cause === "object" ? (cause as { kind?: unknown; reason?: unknown }) : null;
+  const kind = typeof rec?.kind === "string" ? rec.kind : null;
   switch (kind) {
     case "user":
       return {
@@ -112,7 +249,7 @@ function abortedBy(cause) {
       };
     case "hook":
       return {
-        note: `the turn was stopped by a hook${typeof cause?.reason === "string" && cause.reason ? ` (${cause.reason})` : ""}`,
+        note: `the turn was stopped by a hook${typeof rec?.reason === "string" && rec.reason ? ` (${rec.reason})` : ""}`,
         next: "a hook decided to stop it — check that hook's rule before retrying",
       };
     case "disposed":
@@ -132,11 +269,20 @@ function abortedBy(cause) {
 // creates itself (`timeout` while waiting, `unknown` when the Host sent no reason
 // at all). `TurnEndReasonMap` is merge-extensible, so an unrecognised kind is
 // normal and must degrade to "unverified", never to "completed".
-export function describeEnd(reason) {
-  const kind = typeof reason?.kind === "string" ? reason.kind : null;
+export function describeEnd(reason: unknown): EndDescription | null {
+  const rec =
+    reason && typeof reason === "object"
+      ? (reason as {
+          kind?: unknown;
+          reason?: unknown;
+          error?: { code?: unknown; message?: unknown };
+          message?: unknown;
+        })
+      : null;
+  const kind = typeof rec?.kind === "string" ? rec.kind : null;
   if (kind === null || kind === "completed") return null;
 
-  if (kind === "aborted") return abortedBy(reason?.reason);
+  if (kind === "aborted") return abortedBy(rec?.reason);
 
   if (kind === "blocked") {
     return {
@@ -146,7 +292,7 @@ export function describeEnd(reason) {
   }
 
   if (kind === "error") {
-    const failure = reason?.error ?? {};
+    const failure = rec?.error ?? {};
     const detail = [failure.code, failure.message].filter((part) => typeof part === "string" && part.length > 0);
     return {
       note: `the turn ended on a model/provider error${detail.length > 0 ? `: ${detail.join(" — ")}` : ""}`,
@@ -184,7 +330,7 @@ export function describeEnd(reason) {
 
   if (kind === "timeout") {
     return {
-      note: typeof reason?.message === "string" ? reason.message : "the wait budget expired before the turn finished",
+      note: typeof rec?.message === "string" ? rec.message : "the wait budget expired before the turn finished",
       next: null, // the caller gets the `dsh_wait(...)` hint below
       wait: true,
     };
@@ -192,7 +338,7 @@ export function describeEnd(reason) {
 
   if (kind === "unknown") {
     return {
-      note: typeof reason?.message === "string" ? reason.message : "the Host ended the turn without a reason",
+      note: typeof rec?.message === "string" ? rec.message : "the Host ended the turn without a reason",
       next: "treat this outcome as unverified: check dsh_sessions() before resending",
     };
   }
@@ -203,16 +349,25 @@ export function describeEnd(reason) {
   };
 }
 
-function finishToolResult(content, result, status, level, trace, options = {}) {
+function finishToolResult(
+  content: McpTextBlock[],
+  result: FormatToolResultInput | null | undefined,
+  status: string,
+  level: TraceLevel,
+  trace: DescribeTraceResult,
+  options: FormatToolResultOptions = {},
+): McpToolResult<StructuredTurnToolOutcome> {
   if (typeof options.advice === "string" && options.advice.length > 0) {
     content.push({ type: "text", text: `advice: ${options.advice}` });
   }
   const maxResultChars =
-    Number.isInteger(options.maxResultChars) && options.maxResultChars >= 0
+    typeof options.maxResultChars === "number" &&
+    Number.isInteger(options.maxResultChars) &&
+    options.maxResultChars >= 0
       ? options.maxResultChars
       : DEFAULT_MAX_RESULT_CHARS;
   const finalContent = capText(content, maxResultChars);
-  const outcome = { content: finalContent, isError: false };
+  const outcome: McpToolResult<StructuredTurnToolOutcome> = { content: finalContent, isError: false };
   if (level === "full" && trace.structured !== null) {
     outcome.structuredContent = {
       ...(result?.sessionId !== undefined ? { sessionId: result.sessionId } : {}),
@@ -227,13 +382,19 @@ function finishToolResult(content, result, status, level, trace, options = {}) {
   return outcome;
 }
 
-export function formatToolResult(result, options = {}) {
-  const waitTimeout = Number.isInteger(options.defaultTimeoutMs) ? options.defaultTimeoutMs : DEFAULT_WAIT_HINT_MS;
+export function formatToolResult(
+  result: FormatToolResultInput | null | undefined,
+  options: FormatToolResultOptions = {},
+): McpToolResult<StructuredTurnToolOutcome> {
+  const waitTimeout =
+    typeof options.defaultTimeoutMs === "number" && Number.isInteger(options.defaultTimeoutMs)
+      ? options.defaultTimeoutMs
+      : DEFAULT_WAIT_HINT_MS;
   const level = normalizeTraceLevel(options.trace, "errors");
   const trace = describeTrace(result?.tools ?? [], {
     level,
     status: result?.status,
-    since: Number.isInteger(options.since) ? options.since : null,
+    since: typeof options.since === "number" && Number.isInteger(options.since) ? options.since : null,
   });
   const accepted = result?.accepted === true && (result?.text ?? "") === "";
   const text = accepted
@@ -252,11 +413,13 @@ export function formatToolResult(result, options = {}) {
     `outcome: ${status}${accepted ? " (accepted, not waited)" : ""}`,
     // No "?" placeholder: a handle has no turn yet, and inventing a value for
     // it is how a caller ends up waiting on the wrong one.
-    Number.isInteger(result?.turn) ? `turn ${result.turn}` : null,
+    Number.isInteger(result?.turn) ? `turn ${result?.turn}` : null,
     result?.requestId ? `request ${result.requestId}` : null,
     typeof result?.durationMs === "number" ? `${(result.durationMs / 1000).toFixed(1)}s` : null,
     toolsSummary,
-    Number.isInteger(result?.cursor) && result.cursor >= 0 ? `cursor ${result.cursor}` : null,
+    typeof result?.cursor === "number" && Number.isInteger(result.cursor) && result.cursor >= 0
+      ? `cursor ${result.cursor}`
+      : null,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -264,7 +427,7 @@ export function formatToolResult(result, options = {}) {
   const reason = result?.reason ?? null;
   const end = describeEnd(reason);
 
-  const content = [
+  const content: McpTextBlock[] = [
     // First line, always: the id a caller has to keep. It used to live only in the
     // trailing meta line, which is exactly the part a truncated tool result loses —
     // and losing it is what made the caller open a new session on the next call.
@@ -323,7 +486,10 @@ export function formatToolResult(result, options = {}) {
   } else if (end?.next) {
     content.push({ type: "text", text: `next: ${end.next}` });
   } else if (end?.wait === true) {
-    content.push({ type: "text", text: `next: the turn is still running — ${WAIT_NEXT}. Call ${waitCall(result, waitTimeout)} to collect it.` });
+    content.push({
+      type: "text",
+      text: `next: the turn is still running — ${WAIT_NEXT}. Call ${waitCall(result, waitTimeout)} to collect it.`,
+    });
   } else if (result?.next) {
     // e.g. the sandbox escalation hint built by the bridge.
     content.push({ type: "text", text: `next: ${JSON.stringify(result.next)}` });
@@ -337,11 +503,12 @@ export function formatToolResult(result, options = {}) {
 // A raw `JSON.stringify(data)` in the body reads like a stack trace and buries the
 // hint. Keep only what the message does not already say, and only drop `next`
 // when a table hint actually replaces it.
-function detailLine(data, message, code) {
+function detailLine(data: unknown, message: string, code: string): string | null {
   if (data === undefined || data === null) return null;
   if (typeof data !== "object") return String(data);
-  const rest = { ...data };
-  if (NEXT_BY_CODE[code] !== undefined) delete rest.next; // rendered as the hint below
+  const rest: Record<string, unknown> = { ...(data as Record<string, unknown>) };
+  const nextLookup = NEXT_BY_CODE as Readonly<Record<string, string | undefined>>;
+  if (nextLookup[code] !== undefined) delete rest.next; // rendered as the hint below
   // Drop any scalar the message already states. It used to cover only
   // `sessionId`, so `turn: 7` was reprinted as `data: {"turn":7}` right after a
   // message that already said "turn 7".
@@ -353,15 +520,20 @@ function detailLine(data, message, code) {
   return Object.keys(rest).length > 0 ? `data: ${JSON.stringify(rest)}` : null;
 }
 
-export function formatToolError(message, data, code) {
-  const key = Number.isInteger(code) ? String(code) : typeof code === "string" ? code : "";
-  const hint = NEXT_BY_CODE[key] ?? (/^-?\d+$/.test(key) || key === "" ? DEFAULT_NEXT : key);
+export function formatToolError(
+  message: string,
+  data?: unknown,
+  code?: number | string | null,
+): McpToolResult {
+  const key = typeof code === "number" && Number.isInteger(code) ? String(code) : typeof code === "string" ? code : "";
+  const nextLookup = NEXT_BY_CODE as Readonly<Record<string, string | undefined>>;
+  const hint = nextLookup[key] ?? (/^-?\d+$/.test(key) || key === "" ? DEFAULT_NEXT : key);
   const text = [message, detailLine(data, message, key), `next: ${hint}`].filter(Boolean).join("\n");
   return { content: [{ type: "text", text }], isError: true };
 }
 
-export function formatTaskListLine(item) {
-  const tags = [];
+export function formatTaskListLine(item: TaskProjection): string {
+  const tags: string[] = [];
   if (item.resultValid === false) tags.push("unvalidated");
   else if (item.resultValid === true) tags.push("resultValid=true");
   const degraded = Array.isArray(item.degraded) ? item.degraded : [];
@@ -374,19 +546,19 @@ export function formatTaskListLine(item) {
   return `task ${item.taskId ?? "?"} · ${item.status ?? "unknown"} · ${item.phase ?? "unknown"}${suffix}`;
 }
 
-export function formatTaskDetailLines(task) {
+export function formatTaskDetailLines(task: TaskProjection | null | undefined): TaskDetailLinesResult {
   const isPreview = !task?.taskId && Boolean(task?.previewId);
   const degraded = Array.isArray(task?.degraded) ? task.degraded : [];
   const attention = Array.isArray(task?.pending?.attention) ? task.pending.attention : [];
   const approvals = Array.isArray(task?.pending?.approvals) ? task.pending.approvals : [];
   const unvalidated = task?.resultValid === false;
-  const lines = [];
+  const lines: string[] = [];
 
   if (isPreview) {
-    if (task.workspaceId) lines.push(`workspace: ${task.workspaceId}`);
-    if (task.capabilityRevisionId) lines.push(`capability: ${task.capabilityRevisionId}`);
-    if (task.selectionReason) lines.push(`selection: ${task.selectionReason}`);
-    if (Array.isArray(task.candidates) && task.candidates.length > 0) {
+    if (task?.workspaceId) lines.push(`workspace: ${task.workspaceId}`);
+    if (task?.capabilityRevisionId) lines.push(`capability: ${task.capabilityRevisionId}`);
+    if (task?.selectionReason) lines.push(`selection: ${task.selectionReason}`);
+    if (Array.isArray(task?.candidates) && task.candidates.length > 0) {
       lines.push(
         `candidates (${task.candidates.length}): ${task.candidates
           .map((c) => (c?.included ? `${c.agentId}(selected)` : `${c?.agentId ?? "?"}(excluded:${c?.reason ?? "?"})`))
@@ -438,7 +610,10 @@ export function formatTaskDetailLines(task) {
   return { isPreview, degraded, attention, approvals, unvalidated, lines };
 }
 
-export function formatTaskSummary(task, maxResultChars = DEFAULT_MAX_RESULT_CHARS) {
+export function formatTaskSummary<T extends TaskProjection>(
+  task: T,
+  maxResultChars = DEFAULT_MAX_RESULT_CHARS,
+): McpToolResult<T> {
   const { isPreview, degraded, attention, approvals, unvalidated, lines } = formatTaskDetailLines(task);
   const header = isPreview
     ? `preview ${task.previewId} · ${task.agentId ?? "unknown"} · expires ${task.expiresAt ?? "?"}`
@@ -472,5 +647,3 @@ export function formatTaskSummary(task, maxResultChars = DEFAULT_MAX_RESULT_CHAR
     structuredContent: task,
   };
 }
-
-export { DEFAULT_NEXT, NEXT_BY_CODE };

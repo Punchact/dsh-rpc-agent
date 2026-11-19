@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 import test from "node:test";
+import ts from "typescript";
 
 import {
+  AGENTS_SUBCOMMANDS,
+  CLI_COMMANDS,
+  CLI_EXIT_CODE,
+  TASKS_SUBCOMMANDS,
   UsageError,
   failureExitCode,
   formatCliError,
@@ -291,4 +297,105 @@ test("the text listing says when a result is unvalidated or a task is degraded",
       assert.match(out, /task task_b · succeeded · done\/Finished \[resultValid=true\]  v7/);
     },
   );
+});
+
+test("CLI command/subcommand/exit-code tables and formatters reject invalid types at tsc compile time in memory", () => {
+  assert.deepEqual(CLI_EXIT_CODE, { ok: 0, failed: 1, usage: 2, connection: 3 });
+  assert.equal(CLI_COMMANDS.length, 18);
+  assert.equal(TASKS_SUBCOMMANDS.length, 13);
+  assert.equal(AGENTS_SUBCOMMANDS.length, 4);
+
+  const repoRoot = resolve(import.meta.dirname, "..");
+  const configPath = resolve(repoRoot, "tsconfig.json");
+  const parsed = ts.parseJsonConfigFileContent(
+    ts.readConfigFile(configPath, ts.sys.readFile).config,
+    ts.sys,
+    repoRoot,
+  );
+  const options = { ...parsed.options, noEmit: true, incremental: false, composite: false, declaration: false };
+  const validFile = resolve(repoRoot, "src/__cli_valid_probe__.mts");
+  const badFile = resolve(repoRoot, "src/__cli_bad_probe__.mts");
+
+  const validSource = `
+import {
+  CLI_EXIT_CODE,
+  type AgentsSubcommand,
+  type CliCommand,
+  type CliExitCode,
+  type CliFlags,
+  type TasksSubcommand,
+} from "./bin/dsh-rpc.mjs";
+import { formatHistory, type FormatHistoryResult, type HistoryPayloadInput } from "./lib/history-format.mjs";
+import { normalizeTraceLevel, type TraceLevel } from "./lib/trace-format.mjs";
+
+const cmd: CliCommand = "tasks";
+const sub: TasksSubcommand = "dispatch";
+const agentSub: AgentsSubcommand = "probe";
+const code: CliExitCode = CLI_EXIT_CODE.connection;
+const flags: CliFlags = { json: true, trace: "summary" };
+const level: TraceLevel = normalizeTraceLevel(flags.trace, "errors");
+const histInput: HistoryPayloadInput = { sessionId: "s1", cursor: 1, turn: 1, running: false, records: [] };
+const histOut: FormatHistoryResult = formatHistory(histInput, { since: 0 });
+void cmd; void sub; void agentSub; void code; void level; void histOut;
+`;
+
+  const badSource = `
+import {
+  type CliCommand,
+  type CliExitCode,
+  type TasksSubcommand,
+} from "./bin/dsh-rpc.mjs";
+import type { TraceLevel } from "./lib/trace-format.mjs";
+
+const badCmd: CliCommand = "unknown-command";
+const badSub: TasksSubcommand = "destroy";
+const badExit: CliExitCode = 99;
+const badLevel: TraceLevel = "verbose";
+void badCmd; void badSub; void badExit; void badLevel;
+`;
+
+  const sources = new Map([
+    [validFile, validSource],
+    [badFile, badSource],
+  ]);
+  const host = ts.createCompilerHost(options, true);
+  const origGetSourceFile = host.getSourceFile.bind(host);
+  const origFileExists = host.fileExists.bind(host);
+  const origReadFile = host.readFile.bind(host);
+  host.getSourceFile = (fileName, languageVersion, onError, shouldCreate) => {
+    const resolved = resolve(fileName);
+    const virtual = sources.get(resolved);
+    if (virtual !== undefined) return ts.createSourceFile(fileName, virtual, languageVersion, true);
+    return origGetSourceFile(fileName, languageVersion, onError, shouldCreate);
+  };
+  host.fileExists = (fileName) => sources.has(resolve(fileName)) || origFileExists(fileName);
+  host.readFile = (fileName) => sources.get(resolve(fileName)) ?? origReadFile(fileName);
+  host.writeFile = () => {
+    throw new Error("the CLI type probe must never write to disk");
+  };
+
+  const program = ts.createProgram([validFile, badFile], options, host);
+  const collect = (rootFile) => {
+    const sf = program.getSourceFile(rootFile);
+    if (!sf) throw new Error(`tsc did not load probe ${rootFile}`);
+    return ts
+      .getPreEmitDiagnostics(program, sf)
+      .filter((d) => d.file === sf)
+      .map((d) => ({ code: d.code, text: ts.flattenDiagnosticMessageText(d.messageText, " ") }));
+  };
+
+  const validDiags = collect(validFile);
+  assert.deepEqual(
+    validDiags,
+    [],
+    `valid CLI probe must compile cleanly, got: ${validDiags.map((d) => `TS${d.code}:${d.text}`).join("; ")}`,
+  );
+
+  const badDiags = collect(badFile);
+  const summary = badDiags.map((d) => `TS${d.code}:${d.text}`).join(" | ");
+  assert.ok(badDiags.length >= 4, `expected >= 4 tsc errors, got ${badDiags.length}: ${summary}`);
+  assert.ok(badDiags.some((d) => d.text.includes("unknown-command")), `expected unknown-command error: ${summary}`);
+  assert.ok(badDiags.some((d) => d.text.includes("destroy")), `expected destroy TasksSubcommand error: ${summary}`);
+  assert.ok(badDiags.some((d) => d.text.includes("99")), `expected 99 CliExitCode error: ${summary}`);
+  assert.ok(badDiags.some((d) => d.text.includes("verbose")), `expected verbose TraceLevel error: ${summary}`);
 });
