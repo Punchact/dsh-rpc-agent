@@ -25,6 +25,7 @@
   - `capability-card@1` 规范化与哈希，强制必填非空 `limitations[]`，`declared` 与 `verified` 字段分离；`dsh.agents.probe` 只读探测 6 项控制项并记录 `verified` / `partial` / `unknown`（带原因与耗时 `elapsedMs`）。
   - 支持能力修订表（含 `review.diff@1` 基线与 `control_requirements_json` 字段）及策略/降级字段（`policy_revision`、`limitations[]`、`degraded[]`）。
 - `degraded[]` **按能力卡里 `controls.<name>.support` 计算**（`start`/`steer`/`cancel`/`inspect`/`events`/`approval` 六项），而不是只看拍平的 `cancel`；任务详情、列表与预览都带该字段。
+- **TypeScript 构建链（PR 1a，零业务迁移）**：新增 `tsconfig.json`、`scripts/build.mjs`（编译 `src/**/*.mts` + 原文逐字节复制未迁移文件 + SHA-256 保真与文件数断言）、`scripts/check-dist-fidelity.mjs` 与 `scripts/check-entry-parity.mjs`；`check:docs` / `check:surface` / `check:package` 改扫 `dist/` 产物，接入 `npm run verify` 与 CI。
 
 ### 修复
 

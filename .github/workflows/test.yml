@@ -33,6 +33,12 @@ jobs:
       - name: Install dev dependencies
         run: npm ci
 
+      - name: Build dist package
+        run: npm run build
+
+      - name: Entry parity between source and dist
+        run: node scripts/check-entry-parity.mjs
+
       - name: Syntax check every module
         run: |
           for file in index.mjs client.js lib/*.mjs bin/*.mjs test/*.mjs scripts/*.mjs; do

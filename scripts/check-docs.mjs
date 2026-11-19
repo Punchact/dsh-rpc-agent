@@ -11,7 +11,7 @@
 // `node scripts/check-docs.mjs --write` 同步：把这些数字刷进文档（幂等，再跑一次不会有改动）。
 //
 // 匹配用的锚点是固定的；锚点消失也算失败——那样说明这句文档被改写，规则该跟着更新，而不是静默放过。
-import { readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,17 +19,25 @@ import { chainDigest } from "./count-cases.mjs";
 
 const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const read = (rel) => readFileSync(join(REPO, rel), "utf8").replace(/\r\n/g, "\n");
+const readDist = (rel) => {
+  const full = join(REPO, "dist", rel);
+  if (!existsSync(full)) {
+    console.error(`check-docs: 找不到产物文件 dist/${rel} — 请先运行 \`npm run build\``);
+    process.exit(1);
+  }
+  return readFileSync(full, "utf8").replace(/\r\n/g, "\n");
+};
 
-// --- 单源数字 ---------------------------------------------------------------------------
-const methodsSource = read("lib/methods.mjs");
+// --- 单源数字（代码侧锚点一律扫 dist/ 产物） ----------------------------------------------
+const methodsSource = readDist("lib/methods.mjs");
 const rpcNames = [...methodsSource.matchAll(/name:\s*"(dsh\.[a-zA-Z.]+)"/g)].map((m) => m[1]);
 const rpcTotal = rpcNames.length;
-if (rpcTotal === 0) throw new Error("check-docs: no RPC method names found in lib/methods.mjs");
+if (rpcTotal === 0) throw new Error("check-docs: no RPC method names found in dist/lib/methods.mjs");
 
-const mcpSource = read("bin/dsh-rpc-mcp.mjs");
+const mcpSource = readDist("bin/dsh-rpc-mcp.mjs");
 const sliceTable = (constName) => {
   const start = mcpSource.indexOf(`const ${constName} = [`);
-  if (start < 0) throw new Error(`check-docs: ${constName} not found in bin/dsh-rpc-mcp.mjs`);
+  if (start < 0) throw new Error(`check-docs: ${constName} not found in dist/bin/dsh-rpc-mcp.mjs`);
   const end = mcpSource.indexOf("\n];", start);
   return mcpSource.slice(start, end < 0 ? undefined : end);
 };
@@ -42,7 +50,7 @@ const mcpTask = taskOnly.length;
 const mcpAgent = agentOnly.length;
 const mcpTotal = mcpBase + mcpTask + mcpAgent;
 
-const pkg = JSON.parse(read("package.json"));
+const pkg = JSON.parse(readDist("package.json"));
 const chain = pkg.scripts.test.split("&&").map((s) => s.trim());
 const testChainFiles = chain.filter((s) => /^node test\/.+\.test\.mjs$/.test(s)).length;
 const testOnDisk = readdirSync(join(REPO, "test")).filter((f) => f.endsWith(".test.mjs")).length;

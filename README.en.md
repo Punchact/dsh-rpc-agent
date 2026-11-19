@@ -110,11 +110,13 @@ Version history is in [Releases](https://github.com/Punchact/dsh-rpc-agent/relea
 
 **From a local directory (when you are editing the source)**:
 
+Run `npm install && npm run build` first to assemble the `dist/` package directory, then point the local bundle link at `dist/`:
+
 ```js
-plugin_manager({ action: "install_bundle", target: "<absolute-path-to-your-clone>" })
+plugin_manager({ action: "install_bundle", target: "<absolute-path-to-your-clone>/dist" })
 ```
 
-- This install is a **link to that directory**; edits need no reinstall.
+- This install is a **link to `dist/`**; after editing source, run `npm run build` to refresh the output without reinstalling.
 - But the host does not re-`import` on file changes. To pick up new `lib/*.mjs`, toggle the plugin row off and on:
 
 ```js
@@ -756,6 +758,20 @@ Everything the page shows comes from that read-only endpoint; it writes nothing.
 | Plugin row shows `absent` | Expected: the plugin exports no `Config` schema, so `cordis_inspect_query` has no config contract |
 
 ## Development and tests
+
+### Building from source
+
+`dist/` holds the assembled publishable package (`npm run build` compiles `src/**/*.mts`, copies unmigrated files verbatim, and asserts SHA-256 fidelity and file count). Gates and packaging inspect `dist/`:
+
+```powershell
+cd dsh-rpc-plugin
+npm install                    # install devDependencies (including TypeScript)
+npm run build                  # assemble dist/ and assert byte fidelity + manifest count
+npm run verify                 # build + entry parity + npm test + check:package (against dist/)
+```
+
+> [!NOTE]
+> Local development links (such as `install_bundle` or a junction in profile `node_modules`) must point to `<repo>/dist` rather than the repository root; run `npm run build` after source edits before toggling the plugin.
 
 ```powershell
 cd dsh-rpc-plugin

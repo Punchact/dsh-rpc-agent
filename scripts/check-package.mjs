@@ -12,7 +12,8 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, posix, resolve } from "node:path";
 
-const root = resolve(import.meta.dirname, "..");
+const distRoot = resolve(import.meta.dirname, "..", "dist");
+const EXPECTED_FILE_COUNT = 58;
 
 const REQUIRED = [
   "package.json",
@@ -65,13 +66,13 @@ function packList() {
   // A single command string in shell mode: passing an args array alongside `shell` is deprecated.
   const out = useShell
     ? spawnSync(`${command} ${args.join(" ")}`, {
-        cwd: root,
+        cwd: distRoot,
         encoding: "utf8",
         shell: true,
         timeout: 120000,
       })
     : spawnSync(command, npmExec ? [npmExec, ...args] : args, {
-        cwd: root,
+        cwd: distRoot,
         encoding: "utf8",
         timeout: 120000,
       });
@@ -102,6 +103,14 @@ function packList() {
   }
 }
 
+if (!existsSync(distRoot) || !existsSync(resolve(distRoot, "package.json"))) {
+  console.error("check-package: FAIL\n  - dist/ or dist/package.json missing — run `npm run build` first");
+  process.exit(1);
+}
+if (existsSync(resolve(distRoot, "node_modules"))) {
+  fail("dist/node_modules must not exist");
+}
+
 const packed = packList();
 if (!packed || packed.length !== 1) {
   console.error(`check-package: FAIL\n  - ${problems.join("\n  - ")}`);
@@ -110,6 +119,10 @@ if (!packed || packed.length !== 1) {
 
 const manifest = packed[0];
 const shipped = new Set(manifest.files.map((entry) => entry.path.split("\\").join("/")));
+
+if (manifest.entryCount !== EXPECTED_FILE_COUNT) {
+  fail(`expected ${EXPECTED_FILE_COUNT} files in dist tarball, got ${manifest.entryCount}`);
+}
 
 for (const path of REQUIRED) {
   if (!shipped.has(path)) fail(`required file is not in the tarball: ${path}`);
@@ -122,7 +135,7 @@ for (const path of shipped) {
 }
 
 // package.json promises things by path; every promise must resolve inside the tarball.
-const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
+const pkg = JSON.parse(readFileSync(resolve(distRoot, "package.json"), "utf8"));
 
 // A tarball check cannot tell "publishable" from "not publishable": `npm publish --dry-run`
 // exits 0 even when `private` is true (measured 2026-11-05, npm 11.19). npm only refuses at the
@@ -153,13 +166,13 @@ for (const [label, target] of promised) {
 const IMPORT = /(?:from\s+|import\s*\(\s*)["']([^"']+)["']/g;
 for (const path of shipped) {
   if (!path.endsWith(".mjs") && !path.endsWith(".js")) continue;
-  const source = readFileSync(resolve(root, path), "utf8");
+  const source = readFileSync(resolve(distRoot, path), "utf8");
   for (const match of source.matchAll(IMPORT)) {
     const specifier = match[1];
     if (!specifier.startsWith(".")) continue;
     const target = posix.normalize(posix.join(posix.dirname(path), specifier));
     if (!shipped.has(target)) fail(`${path} imports "${specifier}" which is not published (${target})`);
-    else if (!existsSync(resolve(root, target))) fail(`${path} imports ${target} but that file is missing on disk`);
+    else if (!existsSync(resolve(distRoot, target))) fail(`${path} imports ${target} but that file is missing on disk`);
   }
 }
 

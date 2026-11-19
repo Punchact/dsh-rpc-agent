@@ -110,11 +110,13 @@ plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent" })
 
 **从本地目录装（改源码时用）**：
 
+先执行 `npm install && npm run build` 装配 `dist/` 产物包目录，再把开发目录链接指向 `dist/`：
+
 ```js
-plugin_manager({ action: "install_bundle", target: "<absolute-path-to-your-clone>" })
+plugin_manager({ action: "install_bundle", target: "<absolute-path-to-your-clone>/dist" })
 ```
 
-- 这种安装是**指向本目录的链接**，改完源码不需要重装。
+- 这种安装是**指向 `dist/` 产物包的链接**，改完源码后跑一次 `npm run build` 即可更新产物，不需要重装。
 - 但宿主不会因文件变化重新 `import`；要让新的 `lib/*.mjs` 生效，把插件行关一次再开：
 
 ```js
@@ -756,6 +758,20 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 | 插件行状态 `absent` | 正常：插件不导出 `Config` schema，`cordis_inspect_query` 里没有 config 契约 |
 
 ## 开发与验证
+
+### 从源码构建
+
+本仓库用 `dist/` 承载完整可发布包目录（`npm run build` 编译 `src/**/*.mts`、原文复制未迁移文件并断言 SHA-256 保真与文件数）。开发与门禁一律围绕 `dist/` 运行：
+
+```powershell
+cd dsh-rpc-plugin
+npm install                    # 安装开发依赖（含 TypeScript）
+npm run build                  # 装配 dist/ 并校验字节保真与清单完整性
+npm run verify                 # 构建 + 入口一致性 + npm test + check:package（作用于 dist/）
+```
+
+> [!NOTE]
+> 本地开发目录链接（如 `install_bundle` 或 profile `node_modules` 下的 junction）应指向 `<repo>/dist` 而非仓库根目录；改完源码后先 `npm run build` 再重载插件。
 
 ```powershell
 cd dsh-rpc-plugin
