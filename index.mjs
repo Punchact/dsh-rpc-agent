@@ -137,6 +137,7 @@ export async function apply(ctx, input = {}) {
           codex: createCodexAdapter,
         };
       }
+      /** @type {Record<string, import("./lib/adapters/base.mjs").RuntimeAdapter>} */
       adapters = {};
       const extKind = config.tasksExternalAdapter;
       const extCfg = extKind !== "none" ? config.tasksAdapters?.[extKind] : null;

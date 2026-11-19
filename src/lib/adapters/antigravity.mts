@@ -9,33 +9,73 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { TASK_ERROR, taskError } from "../tasks/errors.mjs";
-import { ADAPTER_FAILURE_MESSAGES, reportOf, sanitizeAdapterFailure, validateAdapter } from "./base.mjs";
+import {
+  ADAPTER_FAILURE_MESSAGES,
+  type AgentReport,
+  type RuntimeAdapter,
+  reportOf,
+  sanitizeAdapterFailure,
+  validateAdapter,
+} from "./base.mjs";
 
 export const DEFAULT_ANTIGRAVITY_MODEL = "MODEL_PLACEHOLDER_M525";
 const DEFAULT_RPC_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_RESPONSE_CHARS = 1_000_000;
 const SERVICE_PREFIX = "exa.language_server_pb.LanguageServerService";
 
-function defaultIsPidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
+export interface AntigravityFsOps {
+  readdirSync(path: string): string[];
+  readFileSync(path: string, encoding: BufferEncoding): string;
+  statSync(path: string): { mtimeMs?: number };
+}
+
+export interface CreateAntigravityAdapterOptions {
+  fetch?: typeof globalThis.fetch;
+  daemonDir?: string;
+  isPidAlive?: (pid: unknown) => boolean;
+  now?: () => number;
+  defaultModel?: string;
+  projectId?: string;
+  timeoutMs?: number;
+  maxResponseChars?: number;
+  fsOps?: AntigravityFsOps;
+}
+
+export interface AntigravityAdapter extends RuntimeAdapter {
+  kind: "antigravity";
+}
+
+interface DaemonDescriptor {
+  file: string;
+  mtimeMs: number;
+  pid: number;
+  httpPort: number;
+  httpsPort: number | null;
+  lsVersion: string;
+  csrfToken: string;
+}
+
+function defaultIsPidAlive(pid: unknown): boolean {
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;
-  } catch (error) {
-    return error?.code === "EPERM";
+  } catch (error: unknown) {
+    return (error as { code?: unknown } | null)?.code === "EPERM";
   }
 }
 
-function toWorkspaceUri(rawPath) {
+function toWorkspaceUri(rawPath: unknown): string | null {
   if (typeof rawPath !== "string" || rawPath.trim().length === 0) return null;
   const trimmed = rawPath.trim();
   if (trimmed.startsWith("file://")) return trimmed;
   // Format Windows drive letter consistently as `file:///c%3A/...`
   const url = pathToFileURL(trimmed).href;
-  return url.replace(/^file:\/\/\/([A-Za-z]):/, (_m, drive) => `file:///${drive.toLowerCase()}%3A`);
+  return url.replace(/^file:\/\/\/([A-Za-z]):/, (_m, drive: string) => `file:///${drive.toLowerCase()}%3A`);
 }
 
-function parseJsonSafe(text) {
+function parseJsonSafe(text: unknown): any {
+  if (typeof text !== "string") return null;
   try {
     return JSON.parse(text);
   } catch {
@@ -55,8 +95,8 @@ export function createAntigravityAdapter({
   projectId: defaultProjectId = "",
   timeoutMs = DEFAULT_RPC_TIMEOUT_MS,
   maxResponseChars = DEFAULT_MAX_RESPONSE_CHARS,
-  fsOps = { readdirSync, readFileSync, statSync },
-} = {}) {
+  fsOps = { readdirSync, readFileSync, statSync } as unknown as AntigravityFsOps,
+}: CreateAntigravityAdapterOptions = {}): AntigravityAdapter {
   const effectiveTimeoutMs =
     Number.isInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_RPC_TIMEOUT_MS;
   const effectiveMaxChars =
@@ -64,24 +104,25 @@ export function createAntigravityAdapter({
       ? maxResponseChars
       : DEFAULT_MAX_RESPONSE_CHARS;
 
-  function findAliveDescriptor() {
-    let entries;
+  function findAliveDescriptor(): DaemonDescriptor {
+    let entries: string[];
     try {
       entries = fsOps.readdirSync(daemonDir);
-    } catch (error) {
+    } catch (error: unknown) {
+      const msg = (error as { message?: unknown } | null)?.message ?? error;
       const err = taskError(
         TASK_ERROR.ADAPTER_UNAVAILABLE,
         ADAPTER_FAILURE_MESSAGES.unavailable,
         { reason: "daemon_dir_unreadable" },
       );
       Object.defineProperty(err, "internalDetail", {
-        value: `antigravity daemon directory unavailable (${daemonDir}): ${error?.message ?? error}`,
+        value: `antigravity daemon directory unavailable (${daemonDir}): ${msg}`,
         enumerable: false,
       });
       throw err;
     }
 
-    const candidates = [];
+    const candidates: DaemonDescriptor[] = [];
     for (const name of entries) {
       if (!/^hub_.*\.json$/i.test(name)) continue;
       const fullPath = join(daemonDir, name);
@@ -91,7 +132,7 @@ export function createAntigravityAdapter({
       } catch {
         continue;
       }
-      let raw;
+      let raw: string;
       try {
         raw = fsOps.readFileSync(fullPath, "utf8");
       } catch {
@@ -130,14 +171,14 @@ export function createAntigravityAdapter({
     return candidates[0];
   }
 
-  async function callRpc(descriptor, method, bodyObj) {
+  async function callRpc(descriptor: DaemonDescriptor, method: string, bodyObj?: Record<string, unknown>): Promise<any> {
     if (typeof fetch !== "function") {
       throw taskError(TASK_ERROR.ADAPTER_UNAVAILABLE, ADAPTER_FAILURE_MESSAGES.unavailable, {
         reason: "fetch_missing",
       });
     }
     const url = `http://127.0.0.1:${descriptor.httpPort}/${SERVICE_PREFIX}/${method}`;
-    let res;
+    let res: Response;
     try {
       res = await fetch(url, {
         method: "POST",
@@ -151,31 +192,37 @@ export function createAntigravityAdapter({
         redirect: "error",
         signal: AbortSignal.timeout(effectiveTimeoutMs),
       });
-    } catch (error) {
+    } catch (error: unknown) {
+      const errObj = (error && typeof error === "object" ? error : {}) as {
+        name?: unknown;
+        code?: unknown;
+        message?: unknown;
+      };
       const timedOut =
-        error?.name === "TimeoutError" || error?.name === "AbortError" || error?.code === "ETIMEDOUT";
+        errObj.name === "TimeoutError" || errObj.name === "AbortError" || errObj.code === "ETIMEDOUT";
       const err = taskError(
         TASK_ERROR.ADAPTER_UNAVAILABLE,
         timedOut ? ADAPTER_FAILURE_MESSAGES.timeout : ADAPTER_FAILURE_MESSAGES.unavailable,
         { method, reason: timedOut ? "timeout" : "transport_error" },
       );
       Object.defineProperty(err, "internalDetail", {
-        value: `antigravity RPC ${method} transport error: ${error?.message ?? error}`,
+        value: `antigravity RPC ${method} transport error: ${errObj.message ?? error}`,
         enumerable: false,
       });
       throw err;
     }
 
-    let text;
+    let text: string;
     try {
       text = await res.text();
-    } catch (error) {
+    } catch (error: unknown) {
+      const msg = (error as { message?: unknown } | null)?.message ?? error;
       const err = taskError(TASK_ERROR.ADAPTER_UNAVAILABLE, ADAPTER_FAILURE_MESSAGES.unavailable, {
         method,
         reason: "body_read_error",
       });
       Object.defineProperty(err, "internalDetail", {
-        value: `antigravity RPC ${method} body read error: ${error?.message ?? error}`,
+        value: `antigravity RPC ${method} body read error: ${msg}`,
         enumerable: false,
       });
       throw err;
@@ -197,15 +244,18 @@ export function createAntigravityAdapter({
     return parsed ?? {};
   }
 
-  async function resolveModelEnum(descriptor, requestedModelId) {
+  async function resolveModelEnum(
+    descriptor: DaemonDescriptor,
+    requestedModelId: string | null | undefined,
+  ): Promise<{ model: string; warning: string | null }> {
     if (typeof requestedModelId === "string" && requestedModelId.startsWith("MODEL_PLACEHOLDER_")) {
       return { model: requestedModelId, warning: null };
     }
-    let configs = [];
+    let configs: any[] = [];
     try {
       const data = await callRpc(descriptor, "GetCascadeModelConfigData", {});
       configs = Array.isArray(data?.clientModelConfigs) ? data.clientModelConfigs : [];
-    } catch (error) {
+    } catch (error: unknown) {
       const safe = sanitizeAdapterFailure(error);
       return {
         model: defaultModel,
@@ -225,7 +275,7 @@ export function createAntigravityAdapter({
           entry?.label,
           enumVal,
         ]
-          .filter((x) => typeof x === "string")
+          .filter((x): x is string => typeof x === "string")
           .map((x) => x.trim().toLowerCase());
         if (candidates.includes(target)) {
           return { model: enumVal, warning: null };
@@ -240,8 +290,8 @@ export function createAntigravityAdapter({
     return { model: defaultModel, warning: null };
   }
 
-  function mapStatusToReport(cascadeId, summary, steps) {
-    const observedStatus = summary?.status ?? "CASCADE_RUN_STATUS_UNKNOWN";
+  function mapStatusToReport(cascadeId: string, summary: any, steps: any[]): AgentReport {
+    const observedStatus: string = summary?.status ?? "CASCADE_RUN_STATUS_UNKNOWN";
     const termReason = summary?.latestExecutorTerminationReason ?? null;
     const stepCount = summary?.stepCount ?? (Array.isArray(steps) ? steps.length : 0);
 
@@ -300,7 +350,7 @@ export function createAntigravityAdapter({
     });
   }
 
-  const adapter = {
+  const adapter: AntigravityAdapter = {
     kind: "antigravity",
 
     async probe() {
@@ -322,7 +372,7 @@ export function createAntigravityAdapter({
             approval: false,
           },
         };
-      } catch (error) {
+      } catch (error: unknown) {
         return {
           ok: false,
           reason: sanitizeAdapterFailure(error).message,
@@ -340,7 +390,7 @@ export function createAntigravityAdapter({
       const adapterConfig = agent.adapterConfig ?? agent.adapter_config ?? {};
 
       const descriptor = findAliveDescriptor();
-      const cascadeId = req.cascadeId ?? randomUUID();
+      const cascadeId: string = req.cascadeId ?? randomUUID();
 
       const wsPath = req.workspacePath ?? workspace.rootPath ?? workspace.root_path ?? "";
       const wsUri = toWorkspaceUri(wsPath);
@@ -356,7 +406,7 @@ export function createAntigravityAdapter({
         summary.title ??
         (task.taskId ? `DSH Task ${task.taskId}` : `DSH Cascade ${cascadeId.slice(0, 8)}`);
 
-      const startBody = {
+      const startBody: Record<string, unknown> = {
         cascadeId,
         source: "CORTEX_TRAJECTORY_SOURCE_INTERACTIVE_CASCADE",
         workspaceUris,
@@ -457,7 +507,7 @@ export function createAntigravityAdapter({
       const resp = await callRpc(descriptor, "ForceStopCascadeTree", {
         conversationId: cascadeId,
       });
-      const stoppedConversationIds = Array.isArray(resp?.stoppedConversationIds)
+      const stoppedConversationIds: string[] = Array.isArray(resp?.stoppedConversationIds)
         ? resp.stoppedConversationIds
         : [];
       return {
@@ -479,9 +529,9 @@ export function createAntigravityAdapter({
         callRpc(descriptor, "GetCascadeTrajectorySteps", { cascadeId }),
       ]);
       const summary = allTraj?.trajectorySummaries?.[cascadeId] ?? null;
-      const steps = Array.isArray(stepsResp?.steps) ? stepsResp.steps : [];
+      const steps: any[] = Array.isArray(stepsResp?.steps) ? stepsResp.steps : [];
       const report = mapStatusToReport(cascadeId, summary, steps);
-      const startIndex = Number.isInteger(cursor) && cursor >= 0 ? cursor : 0;
+      const startIndex = typeof cursor === "number" && Number.isInteger(cursor) && cursor >= 0 ? cursor : 0;
       const sliced = steps.slice(startIndex).map((step, offset) => ({
         adapterEventId: `${cascadeId}:step:${startIndex + offset}:${step.status ?? ""}`,
         stepIndex: startIndex + offset,

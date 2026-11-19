@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 import test from "node:test";
+import ts from "typescript";
 
 import {
   ADAPTER_FAILURE_MESSAGES,
   ADAPTER_OPERATIONS,
   ADAPTER_REASON_MESSAGES,
   REPORT_STATES,
+  assertAdapterOperation,
+  isAdapterOperation,
   reportOf,
   sanitizeAdapterFailure,
   validateAdapter,
@@ -130,4 +134,57 @@ test("sanitizeAdapterFailure publishes an actionable whitelisted reason without 
     data: { reason: "locator.cascadeId is required for Antigravity inspect" },
   });
   assert.equal(prose.reason, null);
+});
+
+test("ADAPTER_OPERATIONS enforces exact 7 operations at both runtime and tsc compile time", () => {
+  assert.equal(ADAPTER_OPERATIONS.length, 7);
+  for (const op of ADAPTER_OPERATIONS) {
+    assert.equal(isAdapterOperation(op), true);
+    assert.equal(assertAdapterOperation(op), op);
+  }
+  for (const badOp of ["destroy", "ping", "", null, 8]) {
+    assert.equal(isAdapterOperation(badOp), false);
+    assert.throws(
+      () => assertAdapterOperation(badOp),
+      (err) => isTaskError(err, TASK_ERROR.INVALID_ADAPTER),
+    );
+  }
+
+  const repoRoot = resolve(import.meta.dirname, "..");
+  const configPath = resolve(repoRoot, "tsconfig.json");
+  const parsed = ts.parseJsonConfigFileContent(
+    ts.readConfigFile(configPath, ts.sys.readFile).config,
+    ts.sys,
+    repoRoot,
+  );
+  const virtualFile = resolve(repoRoot, "src/lib/adapters/__typecheck_probe__.mts");
+  const badSource = `
+import type { RuntimeAdapter } from "./base.mjs";
+const forged: RuntimeAdapter = {
+  probe: async () => ({ ok: true, elapsedMs: 0 }),
+  start: async () => ({ accepted: true, locator: {} }),
+  inspect: async () => ({ state: "progress" }),
+  sendInput: async () => ({ accepted: true }),
+  cancel: async () => ({ requestAccepted: true }),
+  events: async () => ({ events: [], nextCursor: 0 }),
+  decideApproval: async () => ({ accepted: true }),
+  forgedEighthOp: async () => ({}),
+};
+void forged;
+`;
+  const host = ts.createCompilerHost(parsed.options);
+  const origGetSourceFile = host.getSourceFile.bind(host);
+  host.getSourceFile = (fileName, languageVersion, ...rest) => {
+    if (resolve(fileName) === virtualFile) {
+      return ts.createSourceFile(fileName, badSource, languageVersion);
+    }
+    return origGetSourceFile(fileName, languageVersion, ...rest);
+  };
+  const program = ts.createProgram([virtualFile], parsed.options, host);
+  const diagnostics = ts.getPreEmitDiagnostics(program, program.getSourceFile(virtualFile));
+  assert.ok(diagnostics.length > 0, "tsc must reject a forged 8th adapter operation");
+  assert.ok(
+    diagnostics.some((d) => d.code === 2353 && String(d.messageText).includes("forgedEighthOp")),
+    `expected TS2353 mentioning forgedEighthOp, got: ${diagnostics.map((d) => `${d.code}:${d.messageText}`).join("; ")}`,
+  );
 });

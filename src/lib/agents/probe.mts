@@ -2,11 +2,45 @@
 // Each control probe runs with its own independent timeout; a timeout, rejection,
 // or non-`true` return becomes `unknown` and never aborts sibling probes.
 
-import { CONTROL_NAMES } from "./card.mjs";
+import type { AdapterProbeResult } from "../adapters/base.mjs";
+import { CONTROL_NAMES, type ControlName } from "./card.mjs";
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 
-function runWithTimeout(fn, timeoutMs) {
+export type ProbeFn = () => Promise<boolean> | boolean | unknown;
+
+export type ProbeMap = Partial<Record<ControlName, ProbeFn>>;
+
+export interface ProberOptions {
+  probes?: ProbeMap | Record<string, ProbeFn>;
+  timeoutMs?: number;
+  now?: () => number;
+}
+
+export interface ProbeUnknownEntry {
+  control: ControlName | string;
+  reason: string;
+}
+
+export interface ProbeAllResult {
+  verified: Partial<Record<ControlName, true>>;
+  unknown: ProbeUnknownEntry[];
+  elapsedMs: number;
+}
+
+export interface Prober {
+  probeAll(controlNames?: readonly ControlName[]): Promise<ProbeAllResult>;
+}
+
+export interface ProbeableAdapter {
+  probe?: () => Promise<
+    AdapterProbeResult | { ok?: boolean; controls?: Partial<Record<ControlName, boolean>> }
+  >;
+}
+
+type TimeoutOutcome = { ok: true } | { ok: false; reason: string };
+
+function runWithTimeout(fn: ProbeFn, timeoutMs: number): Promise<TimeoutOutcome> {
   return new Promise((resolve) => {
     let settled = false;
     const timer = setTimeout(() => {
@@ -29,7 +63,7 @@ function runWithTimeout(fn, timeoutMs) {
             resolve({ ok: false, reason: "rejected" });
           }
         },
-        (err) => {
+        (err: unknown) => {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
@@ -42,33 +76,32 @@ function runWithTimeout(fn, timeoutMs) {
 
 /**
  * Create a probe runner over caller-supplied read-only probe functions.
- *
- * @param {object} [options]
- * @param {Record<string, () => Promise<boolean>|boolean>} [options.probes={}]
- * @param {number} [options.timeoutMs=5000]
- * @param {() => number} [options.now=Date.now]
  */
-export function createProber({ probes = {}, timeoutMs = DEFAULT_TIMEOUT_MS, now = Date.now } = {}) {
+export function createProber({
+  probes = {},
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  now = Date.now,
+}: ProberOptions = {}): Prober {
   const perProbeTimeout = Number.isInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS;
 
   return {
-    async probeAll(controlNames = CONTROL_NAMES) {
+    async probeAll(controlNames: readonly ControlName[] = CONTROL_NAMES): Promise<ProbeAllResult> {
       const startedAt = now();
-      const targets = Array.isArray(controlNames) ? controlNames : CONTROL_NAMES;
+      const targets: readonly ControlName[] = Array.isArray(controlNames) ? controlNames : CONTROL_NAMES;
 
       const results = await Promise.all(
         targets.map(async (control) => {
-          const fn = probes?.[control];
+          const fn = (probes as Record<string, ProbeFn | undefined>)?.[control];
           if (typeof fn !== "function") {
-            return { control, ok: false, reason: "rejected" };
+            return { control, ok: false as const, reason: "rejected" };
           }
           const outcome = await runWithTimeout(fn, perProbeTimeout);
           return { control, ...outcome };
         }),
       );
 
-      const verified = {};
-      const unknown = [];
+      const verified: Partial<Record<ControlName, true>> = {};
+      const unknown: ProbeUnknownEntry[] = [];
       for (const item of results) {
         if (item.ok) {
           verified[item.control] = true;
@@ -98,23 +131,23 @@ export function createProber({ probes = {}, timeoutMs = DEFAULT_TIMEOUT_MS, now 
  * The adapter call is memoised per map instance, so a probe round costs one round-trip
  * instead of six, and a failed call fails every control for that round instead of
  * hammering a dead language server.
- *
- * @param {{ probe?: () => Promise<{ok?: boolean, controls?: Record<string, boolean>}> }} [adapter]
- * @returns {Record<string, () => Promise<boolean>>}
  */
-export function probesFromAdapter(adapter) {
-  let pending = null;
+export function probesFromAdapter(
+  adapter?: ProbeableAdapter | null,
+): Record<ControlName, () => Promise<boolean>> {
+  let pending: Promise<AdapterProbeResult | { ok?: boolean; controls?: Partial<Record<ControlName, boolean>> } | null> | null =
+    null;
   const controlsOf = () => {
     if (!adapter || typeof adapter.probe !== "function") return Promise.resolve(null);
     if (!pending) {
       pending = Promise.resolve()
-        .then(() => adapter.probe())
+        .then(() => adapter.probe!())
         .catch(() => null);
     }
     return pending;
   };
 
-  const probes = {};
+  const probes = {} as Record<ControlName, () => Promise<boolean>>;
   for (const control of CONTROL_NAMES) {
     probes[control] = async () => {
       const result = await controlsOf();

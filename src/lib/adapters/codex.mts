@@ -9,13 +9,112 @@ import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 import { TASK_ERROR, taskError } from "../tasks/errors.mjs";
-import { ADAPTER_FAILURE_MESSAGES, reportOf, sanitizeAdapterFailure, validateAdapter } from "./base.mjs";
+import {
+  ADAPTER_FAILURE_MESSAGES,
+  type AdapterEventEntry,
+  type AgentReport,
+  type RuntimeAdapter,
+  reportOf,
+  sanitizeAdapterFailure,
+  validateAdapter,
+} from "./base.mjs";
 
 const WINDOWS_APPS_ROOT = "C:\\Program Files\\WindowsApps";
 export const MAX_FRAME_CHARS = 4 * 1024 * 1024;
 export const MAX_EVENT_QUEUE = 500;
 export const MAX_PENDING_APPROVALS = 200;
 const MAX_STDERR_CHARS = 4096;
+
+export interface CodexFsOps {
+  existsSync(path: string): boolean;
+  readdirSync(path: string): string[];
+  accessSync(path: string, mode?: number): void;
+  statSync?: (path: string) => { isFile?: () => boolean; size?: number };
+}
+
+export interface ResolveCodexBinaryOptions {
+  explicitBinary?: string;
+  homedir?: string;
+  fsOps?: CodexFsOps;
+}
+
+export interface CodexBinaryCheck {
+  source: "explicit" | "windowsApps" | "sandboxBin";
+  path: string;
+  unreadable?: boolean;
+}
+
+export interface CodexBinaryResolution {
+  path: string;
+  source: "explicit" | "windowsApps" | "sandboxBin";
+  checked: CodexBinaryCheck[];
+}
+
+export interface CodexClientInfo {
+  name: string;
+  version: string;
+  [key: string]: unknown;
+}
+
+export interface CodexHandshakeOptions {
+  spawn: (...args: any[]) => any;
+  path: string;
+  clientInfo: CodexClientInfo;
+  timeoutMs?: number;
+}
+
+export interface CodexHandshakeResult {
+  ok: boolean;
+  reason?: string;
+  serverInfo?: unknown;
+  stderrTail?: string;
+}
+
+export interface CreateCodexAdapterOptions {
+  spawn?: (...args: any[]) => any;
+  spawnSync?: (...args: any[]) => any;
+  binary?: string;
+  now?: () => number;
+  clientInfo?: CodexClientInfo;
+  requestTimeoutMs?: number;
+  probeTimeoutMs?: number;
+  fsOps?: CodexFsOps;
+}
+
+export interface CodexAdapter extends RuntimeAdapter {
+  kind: "codex";
+}
+
+interface PendingRequest {
+  resolve: (value: any) => void;
+  reject: (reason?: any) => void;
+  timer: ReturnType<typeof setTimeout>;
+  method: string;
+}
+
+interface PendingApproval {
+  id: string | number;
+  method: string;
+  params: Record<string, unknown>;
+}
+
+interface CodexSession {
+  child: any;
+  binaryInfo: { path: string; source: string; version: string | null };
+  threadId: string | null;
+  readonly turnId: string | null;
+  eventQueue: AdapterEventEntry[];
+  pendingApprovals: Map<string, PendingApproval>;
+  droppedEvents: number;
+  droppedApprovals: number;
+  unknownMethods: number;
+  protocolError: string | null;
+  stderrTail: string;
+  pushEvent(entry: AdapterEventEntry): void;
+  sendNotification(method: string, params?: unknown): void;
+  sendRequest(method: string, params?: Record<string, unknown>): Promise<any>;
+  close(): void;
+}
 
 const ALLOWED_CODEX_METHODS = new Set([
   "turn/started",
@@ -27,14 +126,14 @@ const ALLOWED_CODEX_METHODS = new Set([
   "item/fileChange/requestApproval",
 ]);
 
-function isAllowedCodexMethod(method) {
+function isAllowedCodexMethod(method: string): boolean {
   if (ALLOWED_CODEX_METHODS.has(method)) return true;
   if (method.startsWith("item/")) return true;
   if (method.endsWith("/request_approval") || method.endsWith("/requestApproval")) return true;
   return false;
 }
 
-function defaultIsReadable(filePath, fsOps) {
+function defaultIsReadable(filePath: string, fsOps: CodexFsOps): boolean {
   try {
     if (!fsOps.existsSync(filePath)) return false;
     fsOps.accessSync(filePath, fsConstants.R_OK);
@@ -57,10 +156,10 @@ function defaultIsReadable(filePath, fsOps) {
 export function resolveCodexBinary({
   explicitBinary = "",
   homedir = os.homedir(),
-  fsOps = { existsSync, readdirSync, accessSync, statSync },
-} = {}) {
-  const checked = [];
-  const isReadable = (p) => defaultIsReadable(p, fsOps);
+  fsOps = { existsSync, readdirSync, accessSync, statSync } as unknown as CodexFsOps,
+}: ResolveCodexBinaryOptions = {}): CodexBinaryResolution {
+  const checked: CodexBinaryCheck[] = [];
+  const isReadable = (p: string) => defaultIsReadable(p, fsOps);
 
   if (typeof explicitBinary === "string" && explicitBinary.trim().length > 0) {
     const candidate = explicitBinary.trim();
@@ -103,24 +202,27 @@ export function resolveCodexBinary({
 }
 
 /**
- * Create a Codex App Server adapter speaking newline-delimited JSON-RPC 2.0 on stdio.
- */
-/**
  * 0.9.2（复核 NOTES）：探针原来只凭「二进制在、`--version` 能跑」就给六项控制全绿——那是自证，
  * 不是证据。真正能证明的是 app-server 肯回答一次 `initialize`：短握手一次，超时即当没有这回事，
  * 进程立刻收掉，不建 thread、不发 turn、不碰工作区。
  */
-async function handshakeAppServer({ spawn, path, clientInfo, timeoutMs = 4_000 }) {
-  let child;
+async function handshakeAppServer({
+  spawn,
+  path,
+  clientInfo,
+  timeoutMs = 4_000,
+}: CodexHandshakeOptions): Promise<CodexHandshakeResult> {
+  let child: any;
   try {
     child = spawn(path, ["app-server", "--listen", "stdio://"], {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
-  } catch (error) {
+  } catch (error: unknown) {
+    const code = (error as { code?: unknown } | null)?.code;
     return {
       ok: false,
-      reason: error?.code && typeof error.code === "string" ? error.code : "spawn_error",
+      reason: code && typeof code === "string" ? code : "spawn_error",
     };
   }
 
@@ -131,7 +233,7 @@ async function handshakeAppServer({ spawn, path, clientInfo, timeoutMs = 4_000 }
     const stdoutDecoder = new StringDecoder("utf8");
     const stderrDecoder = new StringDecoder("utf8");
 
-    const finish = (value) => {
+    const finish = (value: Omit<CodexHandshakeResult, "stderrTail">) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -150,14 +252,14 @@ async function handshakeAppServer({ spawn, path, clientInfo, timeoutMs = 4_000 }
 
     const timer = setTimeout(() => finish({ ok: false, reason: "handshake_timeout" }), timeoutMs);
 
-    child.stdout?.on?.("data", (chunk) => {
-      stdoutBuf += stdoutDecoder.write(chunk);
-      let newline;
+    child.stdout?.on?.("data", (chunk: Buffer | string) => {
+      stdoutBuf += typeof chunk === "string" ? chunk : stdoutDecoder.write(chunk);
+      let newline: number;
       while ((newline = stdoutBuf.indexOf("\n")) >= 0) {
         const line = stdoutBuf.slice(0, newline).trim();
         stdoutBuf = stdoutBuf.slice(newline + 1);
         if (!line) continue;
-        let msg;
+        let msg: any;
         try {
           msg = JSON.parse(line);
         } catch {
@@ -174,11 +276,15 @@ async function handshakeAppServer({ spawn, path, clientInfo, timeoutMs = 4_000 }
         }
       }
     });
-    child.stderr?.on?.("data", (chunk) => {
-      stderrTail = (stderrTail + stderrDecoder.write(chunk)).slice(-MAX_STDERR_CHARS);
+    child.stderr?.on?.("data", (chunk: Buffer | string) => {
+      const text = typeof chunk === "string" ? chunk : stderrDecoder.write(chunk);
+      stderrTail = (stderrTail + text).slice(-MAX_STDERR_CHARS);
     });
-    child.on?.("error", (error) => finish({ ok: false, reason: error?.code ?? "spawn_error" }));
-    child.on?.("exit", (code) => finish({ ok: false, reason: `exited_${code}` }));
+    child.on?.("error", (error: unknown) => {
+      const code = (error as { code?: unknown } | null)?.code;
+      finish({ ok: false, reason: typeof code === "string" ? code : "spawn_error" });
+    });
+    child.on?.("exit", (code: unknown) => finish({ ok: false, reason: `exited_${String(code)}` }));
 
     try {
       child.stdin?.write?.(
@@ -190,6 +296,9 @@ async function handshakeAppServer({ spawn, path, clientInfo, timeoutMs = 4_000 }
   });
 }
 
+/**
+ * Create a Codex App Server adapter speaking newline-delimited JSON-RPC 2.0 on stdio.
+ */
 export function createCodexAdapter({
   spawn = childProcess.spawn,
   spawnSync = childProcess.spawnSync,
@@ -198,22 +307,22 @@ export function createCodexAdapter({
   clientInfo = { name: "dsh-task-hub", version: "0.9.0" },
   requestTimeoutMs = 5_000,
   probeTimeoutMs = 4_000,
-  fsOps = { existsSync, readdirSync, accessSync, statSync },
-} = {}) {
-  const sessions = new Map();
+  fsOps = { existsSync, readdirSync, accessSync, statSync } as unknown as CodexFsOps,
+}: CreateCodexAdapterOptions = {}): CodexAdapter {
+  const sessions = new Map<string, CodexSession>();
 
-  function attachSession(child, binaryInfo) {
+  function attachSession(child: any, binaryInfo: { path: string; source: string; version: string | null }): CodexSession {
     let nextId = 1;
     let stdoutBuf = "";
     const stdoutDecoder = new StringDecoder("utf8");
     const stderrDecoder = new StringDecoder("utf8");
-    const pending = new Map();
-    const eventQueue = [];
-    let latestTurnId = null;
+    const pending = new Map<string | number, PendingRequest>();
+    const eventQueue: AdapterEventEntry[] = [];
+    let latestTurnId: string | null = null;
     let closed = false;
     let eventSeq = 0;
 
-    const session = {
+    const session: CodexSession = {
       child,
       binaryInfo,
       threadId: null,
@@ -300,7 +409,7 @@ export function createCodexAdapter({
       },
     };
 
-    const failProtocol = (reasonCode) => {
+    const failProtocol = (reasonCode: string) => {
       if (session.protocolError) return;
       session.protocolError = reasonCode;
       stdoutBuf = "";
@@ -325,9 +434,9 @@ export function createCodexAdapter({
       session.close();
     };
 
-    const handleLine = (line) => {
+    const handleLine = (line: string) => {
       if (!line.trim()) return;
-      let msg;
+      let msg: any;
       try {
         msg = JSON.parse(line);
       } catch {
@@ -354,7 +463,7 @@ export function createCodexAdapter({
 
       // Response to a pending client request
       if (hasId && msg.method === undefined && pending.has(msg.id)) {
-        const entry = pending.get(msg.id);
+        const entry = pending.get(msg.id)!;
         pending.delete(msg.id);
         clearTimeout(entry.timer);
         if (msg.error) {
@@ -430,7 +539,7 @@ export function createCodexAdapter({
         } else if (msg.method === "turn/completed") {
           const turn = params.turn ?? {};
           const status = turn.status ?? "completed";
-          let report;
+          let report: AgentReport;
           if (status === "interrupted") {
             report = reportOf("dropped", {
               droppedBy: "cancelled",
@@ -470,7 +579,7 @@ export function createCodexAdapter({
       }
     };
 
-    child.stdout.on("data", (chunk) => {
+    child.stdout.on("data", (chunk: Buffer | string) => {
       if (closed || session.protocolError) return;
       stdoutBuf += Buffer.isBuffer(chunk) ? stdoutDecoder.write(chunk) : String(chunk);
       if (stdoutBuf.length > MAX_FRAME_CHARS) {
@@ -487,7 +596,7 @@ export function createCodexAdapter({
 
     // Drain stderr into a bounded tail buffer so pipe backpressure cannot stall codex,
     // without printing or persisting stderr text into the task ledger.
-    child.stderr?.on?.("data", (chunk) => {
+    child.stderr?.on?.("data", (chunk: Buffer | string) => {
       const text = Buffer.isBuffer(chunk) ? stderrDecoder.write(chunk) : String(chunk);
       const combined = session.stderrTail + text;
       session.stderrTail =
@@ -507,7 +616,7 @@ export function createCodexAdapter({
       pending.clear();
     });
 
-    child.on?.("exit", (code, signal) => {
+    child.on?.("exit", (code: unknown, signal: unknown) => {
       closed = true;
       for (const entry of pending.values()) {
         clearTimeout(entry.timer);
@@ -525,17 +634,17 @@ export function createCodexAdapter({
     return session;
   }
 
-  const adapter = {
+  const adapter: CodexAdapter = {
     kind: "codex",
 
     async probe() {
       const startedAt = now();
       // Security (SEC-1): ignore any caller-supplied binary; only trusted plugin config or built-in discovery applies.
       const explicit = typeof defaultBinary === "string" ? defaultBinary.trim() : "";
-      let resolved;
+      let resolved: CodexBinaryResolution;
       try {
         resolved = resolveCodexBinary({ explicitBinary: explicit, fsOps });
-      } catch (error) {
+      } catch (error: unknown) {
         return {
           ok: false,
           reason: sanitizeAdapterFailure(error).message,
@@ -543,7 +652,7 @@ export function createCodexAdapter({
         };
       }
 
-      let version = null;
+      let version: string | null = null;
       if (typeof spawnSync === "function") {
         try {
           const out = spawnSync(resolved.path, ["--version"], { encoding: "utf8", timeout: 3_000 });
@@ -555,7 +664,7 @@ export function createCodexAdapter({
         }
       }
 
-      const handshake =
+      const handshake: CodexHandshakeResult =
         typeof spawn === "function"
           ? await handshakeAppServer({ spawn, path: resolved.path, clientInfo, timeoutMs: probeTimeoutMs })
           : { ok: false, reason: "no_spawn" };
@@ -609,7 +718,7 @@ export function createCodexAdapter({
         ? { path: explicit, source: "explicit" }
         : resolveCodexBinary({ fsOps });
 
-      let version = null;
+      let version: string | null = null;
       if (typeof spawnSync === "function") {
         try {
           const v = spawnSync(resolved.path, ["--version"], { encoding: "utf8", timeout: 3_000 });
@@ -619,17 +728,18 @@ export function createCodexAdapter({
         }
       }
 
-      let child;
+      let child: any;
       try {
         child = spawn(resolved.path, ["app-server", "--listen", "stdio://"], {
           stdio: ["pipe", "pipe", "pipe"],
           windowsHide: true,
         });
-      } catch (error) {
+      } catch (error: unknown) {
+        const code = (error as { code?: unknown } | null)?.code;
         throw taskError(
           TASK_ERROR.ADAPTER_UNAVAILABLE,
           ADAPTER_FAILURE_MESSAGES.unavailable,
-          { reason: error?.code && typeof error.code === "string" ? error.code : "spawn_error" },
+          { reason: code && typeof code === "string" ? code : "spawn_error" },
         );
       }
 
@@ -709,7 +819,7 @@ export function createCodexAdapter({
         });
       }
       if (session.eventQueue.length > 0) {
-        return session.eventQueue[session.eventQueue.length - 1].report;
+        return session.eventQueue[session.eventQueue.length - 1].report!;
       }
       return reportOf("progress", {
         observedStatus: "inProgress",
@@ -759,8 +869,8 @@ export function createCodexAdapter({
     },
 
     async events(arg1, arg2, arg3) {
-      let locator;
-      let cursor;
+      let locator: any;
+      let cursor: any;
       if (arg3 !== undefined) {
         locator = arg2?.locator ?? arg2;
         cursor = arg3;
