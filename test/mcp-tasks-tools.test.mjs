@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 import test from "node:test";
+import ts from "typescript";
 
-import { TASK_TOOLS, callTool, listTools, resetBridgeDefaults, validateToolArgs } from "../dist/bin/dsh-rpc-mcp.mjs";
+import {
+  BASE_TOOLS,
+  CLIENT_TRANSPORT_CODES,
+  TASK_TOOLS,
+  callTool,
+  listTools,
+  resetBridgeDefaults,
+  validateToolArgs,
+} from "../dist/bin/dsh-rpc-mcp.mjs";
 
 function withMockRpc(responder, fn) {
   const prevFetch = globalThis.fetch;
@@ -439,4 +449,116 @@ test("a client transport failure passes through with a next step, an adapter err
       assert.match(adapter.content[0].text, /execution backend (rejected|did not)/);
     },
   );
+});
+
+test("BASE_TOOLS (11), TASK_TOOLS (11), CLIENT_TRANSPORT_CODES, and MCP schema types enforce compile-time contracts in memory", () => {
+  assert.equal(BASE_TOOLS.length, 11);
+  assert.equal(TASK_TOOLS.length, 11);
+  assert.equal(CLIENT_TRANSPORT_CODES.has("EBADPORT"), true);
+  assert.equal(CLIENT_TRANSPORT_CODES.has("ENOENT"), false);
+
+  const repoRoot = resolve(import.meta.dirname, "..");
+  const configPath = resolve(repoRoot, "tsconfig.json");
+  const parsed = ts.parseJsonConfigFileContent(
+    ts.readConfigFile(configPath, ts.sys.readFile).config,
+    ts.sys,
+    repoRoot,
+  );
+  const options = { ...parsed.options, noEmit: true, incremental: false, composite: false, declaration: false };
+  const validFile = resolve(repoRoot, "src/__mcp_valid_probe__.mts");
+  const badFile = resolve(repoRoot, "src/__mcp_bad_probe__.mts");
+
+  const validSource = `
+import {
+  BASE_TOOLS,
+  CLIENT_TRANSPORT_CODES,
+  TASK_TOOLS,
+  type BaseToolName,
+  type ClientTransportCode,
+  type McpCallToolOutcome,
+  type McpToolDefinition,
+  type TaskToolName,
+} from "./bin/dsh-rpc-mcp.mjs";
+import { formatTaskSummary, NEXT_BY_CODE, type KnownNextCode } from "./lib/mcp-format.mjs";
+
+const baseName: BaseToolName = "dsh_ask";
+const taskName: TaskToolName = "dsh_task_submit";
+const code: ClientTransportCode = "ECONNREFUSED";
+const nextKey: KnownNextCode = "EBADPORT";
+const baseList: readonly McpToolDefinition[] = BASE_TOOLS;
+const taskList: readonly McpToolDefinition[] = TASK_TOOLS;
+const hasCode: boolean = CLIENT_TRANSPORT_CODES.has(code);
+const outcome: McpCallToolOutcome = formatTaskSummary({ taskId: "t1", status: "queued", phase: "machine/queued" });
+const hint: string = NEXT_BY_CODE[nextKey];
+void baseName; void taskName; void baseList; void taskList; void hasCode; void outcome; void hint;
+`;
+
+  const badSource = `
+import {
+  CLIENT_TRANSPORT_CODES,
+  type BaseToolName,
+  type ClientTransportCode,
+  type McpToolDefinition,
+} from "./bin/dsh-rpc-mcp.mjs";
+
+const badTool: BaseToolName = "dsh_unknown_tool";
+const badEntry: McpToolDefinition = {
+  name: "dsh_extra",
+  title: "Extra",
+  description: "Extra tool",
+  extraUnknownField: true,
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+};
+const badTransport: ClientTransportCode = "ENOENT";
+CLIENT_TRANSPORT_CODES.add("EBADPORT");
+void badTool; void badEntry; void badTransport;
+`;
+
+  const sources = new Map([
+    [validFile, validSource],
+    [badFile, badSource],
+  ]);
+  const host = ts.createCompilerHost(options, true);
+  const origGetSourceFile = host.getSourceFile.bind(host);
+  const origFileExists = host.fileExists.bind(host);
+  const origReadFile = host.readFile.bind(host);
+  host.getSourceFile = (fileName, languageVersion, onError, shouldCreate) => {
+    const resolved = resolve(fileName);
+    const virtual = sources.get(resolved);
+    if (virtual !== undefined) return ts.createSourceFile(fileName, virtual, languageVersion, true);
+    return origGetSourceFile(fileName, languageVersion, onError, shouldCreate);
+  };
+  host.fileExists = (fileName) => sources.has(resolve(fileName)) || origFileExists(fileName);
+  host.readFile = (fileName) => sources.get(resolve(fileName)) ?? origReadFile(fileName);
+  host.writeFile = () => {
+    throw new Error("the MCP type probe must never write to disk");
+  };
+
+  const program = ts.createProgram([validFile, badFile], options, host);
+  const collect = (rootFile) => {
+    const sf = program.getSourceFile(rootFile);
+    if (!sf) throw new Error(`tsc did not load probe ${rootFile}`);
+    return ts
+      .getPreEmitDiagnostics(program, sf)
+      .filter((d) => d.file === sf)
+      .map((d) => ({ code: d.code, text: ts.flattenDiagnosticMessageText(d.messageText, " ") }));
+  };
+
+  const validDiags = collect(validFile);
+  assert.deepEqual(
+    validDiags,
+    [],
+    `valid MCP probe must compile cleanly, got: ${validDiags.map((d) => `TS${d.code}:${d.text}`).join("; ")}`,
+  );
+
+  const badDiags = collect(badFile);
+  const codes = new Set(badDiags.map((d) => d.code));
+  const summary = badDiags.map((d) => `TS${d.code}:${d.text}`).join(" | ");
+  assert.ok(badDiags.length >= 4, `expected >= 4 tsc errors, got ${badDiags.length}: ${summary}`);
+  assert.ok(codes.has(2322), `expected TS2322 for invalid BaseToolName / ClientTransportCode: ${summary}`);
+  assert.ok(codes.has(2353), `expected TS2353 for extraUnknownField on McpToolDefinition: ${summary}`);
+  assert.ok(codes.has(2339), `expected TS2339 for CLIENT_TRANSPORT_CODES.add (ReadonlySet): ${summary}`);
+  assert.ok(badDiags.some((d) => d.text.includes("dsh_unknown_tool")), `expected dsh_unknown_tool diagnostic: ${summary}`);
+  assert.ok(badDiags.some((d) => d.text.includes("extraUnknownField")), `expected extraUnknownField diagnostic: ${summary}`);
+  assert.ok(badDiags.some((d) => d.text.includes("ENOENT")), `expected ENOENT diagnostic: ${summary}`);
 });

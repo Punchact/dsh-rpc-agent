@@ -13,7 +13,7 @@
 // previous `dist/` untouched.
 
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -52,6 +52,15 @@ if (tsFiles.length > 0) {
   if (res.status !== 0) {
     console.error(`build: tsc 编译失败 (exit=${res.status})`);
     process.exit(res.status ?? 1);
+  }
+  for (const rel of outSet) {
+    if (rel.startsWith("bin/")) {
+      try {
+        chmodSync(join(STAGING, rel), 0o755);
+      } catch {
+        // non-POSIX platforms may ignore executable bits
+      }
+    }
   }
 }
 

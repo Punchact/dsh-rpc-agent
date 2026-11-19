@@ -121,8 +121,12 @@ if (srcIndexExports.length === 0) {
 // 2. First-line shebang of bin/*
 for (const binRel of ["bin/dsh-rpc.mjs", "bin/dsh-rpc-mcp.mjs"]) {
   checkedItems += 1;
-  const srcBin = join(REPO, binRel);
+  const srcBin = resolveSourceEntryPath(binRel);
   const distBin = join(DIST, binRel);
+  if (!srcBin) {
+    problems.push(`缺失 bin 源码: ${binRel}`);
+    continue;
+  }
   if (!existsSync(distBin)) {
     problems.push(`缺失 bin 产物: dist/${binRel}`);
     continue;

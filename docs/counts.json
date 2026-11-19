@@ -1,8 +1,8 @@
 {
   "note": "文档里出现的「用例总数」唯一来源。改了测试用例数之后：先把这个数改掉，再跑 npm run docs:counts 把数字刷进 README / README.en / CHANGELOG 的最新一节；npm run check:docs 会核对。其它数字（RPC 方法数、MCP 工具数、npm test 链上的测试文件数）由脚本从代码与 package.json 现算，不写在这里。",
-  "testCases": 422,
+  "testCases": 424,
   "testFiles": 46,
-  "declaredCases": 422,
-  "testChainDigest": "63518e10dce3485cccb5d88a60e8cfc289269b24ff4dfd7c469b3d5f1111e034",
-  "measuredAt": "2026-11-19T14:59:14.969Z"
+  "declaredCases": 424,
+  "testChainDigest": "fb18e6f21f90cd2b81829f4d10b623a9782d090e70ef809c48e31376fb078e17",
+  "measuredAt": "2026-11-19T15:13:37.475Z"
 }

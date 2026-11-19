@@ -1,9 +1,16 @@
 // Pure projection of a turn's recorded tool calls into bounded human text
 // (and, at `full`, structured JSON) without touching I/O or bridge state.
 
-export const TRACE_LEVELS = Object.freeze(["none", "errors", "summary", "full"]);
+export const TRACE_LEVELS = Object.freeze(["none", "errors", "summary", "full"] as const);
 
-const LEVEL_BUDGETS = Object.freeze({
+export type TraceLevel = (typeof TRACE_LEVELS)[number];
+
+export interface TraceBudget {
+  readonly maxLines: number;
+  readonly maxChars: number;
+}
+
+const LEVEL_BUDGETS: Readonly<Record<TraceLevel, TraceBudget>> = Object.freeze({
   none: Object.freeze({ maxLines: 0, maxChars: 0 }),
   errors: Object.freeze({ maxLines: 4, maxChars: 600 }),
   summary: Object.freeze({ maxLines: 20, maxChars: 1200 }),
@@ -14,20 +21,76 @@ const DEFAULT_OUTPUT_CHARS = 400;
 const PREVIEW_MAX_CHARS = 60;
 const DETAIL_MAX_CHARS = 120;
 
-export function isTraceLevel(value) {
-  if (value === null || value === undefined) return false;
-  return TRACE_LEVELS.includes(String(value).trim().toLowerCase());
+export interface TraceToolInput {
+  callId?: string | null;
+  name?: string | null;
+  ok?: boolean;
+  isError?: boolean;
+  error?: unknown;
+  arguments?: unknown;
+  output?: unknown;
+  seq?: number | null;
+  at?: number | null;
+  endedAt?: number | null;
+  [key: string]: unknown;
 }
 
-export function normalizeTraceLevel(value, fallback = "errors") {
+export interface DescribeTraceOptions {
+  level?: unknown;
+  now?: number;
+  outputChars?: number;
+  status?: string | null;
+  maxLines?: number;
+  maxChars?: number;
+  since?: number | null;
+}
+
+export interface TraceTruncation {
+  lines: boolean;
+  chars: boolean;
+}
+
+export interface StructuredTraceEntry {
+  index: number;
+  callId: string | null;
+  name: string | null;
+  ok: boolean | null;
+  arguments: unknown;
+  output: string;
+  outputTruncated: boolean;
+  isError: boolean;
+  error: unknown;
+  seq: number | null;
+  at: number | null;
+  endedAt: number | null;
+  elapsedMs: number | null;
+}
+
+export interface DescribeTraceResult {
+  level: TraceLevel;
+  total: number;
+  errors: number;
+  running: number;
+  since: { cursor: number; count: number } | null;
+  lines: string[];
+  structured: StructuredTraceEntry[] | null;
+  truncated: TraceTruncation;
+}
+
+export function isTraceLevel(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  return (TRACE_LEVELS as readonly string[]).includes(String(value).trim().toLowerCase());
+}
+
+export function normalizeTraceLevel(value: unknown, fallback: TraceLevel = "errors"): TraceLevel {
   if (value !== null && value !== undefined) {
     const normalized = String(value).trim().toLowerCase();
-    if (TRACE_LEVELS.includes(normalized)) return normalized;
+    if ((TRACE_LEVELS as readonly string[]).includes(normalized)) return normalized as TraceLevel;
   }
   return fallback;
 }
 
-function safeStringify(value) {
+function safeStringify(value: unknown): string {
   try {
     const serialized = JSON.stringify(value);
     return serialized === undefined ? "" : serialized;
@@ -36,26 +99,26 @@ function safeStringify(value) {
   }
 }
 
-function collapseWhitespace(text) {
+function collapseWhitespace(text: unknown): string {
   return String(text ?? "").replace(/\s+/g, " ").trim();
 }
 
-function truncateWithEllipsis(text, limit) {
+function truncateWithEllipsis(text: string, limit: number): string {
   if (limit <= 0) return "";
   if (text.length <= limit) return text;
   return `${text.slice(0, limit - 1)}…`;
 }
 
-export function previewOf(args) {
+export function previewOf(args: unknown): string {
   if (args === null || args === undefined) return "";
   // The bridge stores tool arguments as the raw JSON text it received, so the
   // useful field (command/path) is only visible after parsing.
-  let value = args;
+  let value: unknown = args;
   if (typeof value === "string") {
     const trimmed = value.trim();
     if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
       try {
-        const parsed = JSON.parse(trimmed);
+        const parsed: unknown = JSON.parse(trimmed);
         if (parsed !== null && typeof parsed === "object") value = parsed;
       } catch {
         // not JSON: keep the raw text
@@ -65,16 +128,17 @@ export function previewOf(args) {
   let raw = "";
   if (typeof value === "string") {
     raw = value;
-  } else if (typeof value === "object") {
-    if (!Array.isArray(value) && Object.keys(value).length === 0) return "";
-    if (typeof value.command === "string" && value.command.trim().length > 0) {
-      raw = value.command;
-    } else if (typeof value.path === "string" && value.path.trim().length > 0) {
-      raw = value.path;
-    } else if (typeof value.description === "string" && value.description.trim().length > 0) {
-      raw = value.description;
+  } else if (typeof value === "object" && value !== null) {
+    const obj = value as Record<string, unknown>;
+    if (!Array.isArray(obj) && Object.keys(obj).length === 0) return "";
+    if (typeof obj.command === "string" && obj.command.trim().length > 0) {
+      raw = obj.command;
+    } else if (typeof obj.path === "string" && obj.path.trim().length > 0) {
+      raw = obj.path;
+    } else if (typeof obj.description === "string" && obj.description.trim().length > 0) {
+      raw = obj.description;
     } else {
-      raw = safeStringify(value);
+      raw = safeStringify(obj);
     }
   } else {
     raw = String(value);
@@ -83,32 +147,32 @@ export function previewOf(args) {
   return truncateWithEllipsis(collapsed, PREVIEW_MAX_CHARS);
 }
 
-function isFailedTool(tool) {
+function isFailedTool(tool: TraceToolInput): boolean {
   return tool.ok === false || tool.isError === true || (tool.error !== undefined && tool.error !== null);
 }
 
-function isRunningTool(tool) {
+function isRunningTool(tool: TraceToolInput): boolean {
   return typeof tool.endedAt !== "number" || !Number.isFinite(tool.endedAt);
 }
 
-function toolName(tool) {
+function toolName(tool: TraceToolInput): string {
   return typeof tool.name === "string" && tool.name.trim().length > 0 ? tool.name.trim() : "tool";
 }
 
-function runningSeconds(tool, now) {
+function runningSeconds(tool: TraceToolInput, now: number): number {
   if (typeof tool.at !== "number" || !Number.isFinite(tool.at)) return 0;
   return Math.max(0, Math.round((now - tool.at) / 1000));
 }
 
-function formatDuration(at, endedAt) {
+function formatDuration(at: unknown, endedAt: unknown): string | null {
   if (typeof at !== "number" || !Number.isFinite(at)) return null;
   if (typeof endedAt !== "number" || !Number.isFinite(endedAt)) return null;
   const ms = Math.max(0, endedAt - at);
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
 
-function detailOf(tool) {
-  const candidates = [];
+function detailOf(tool: TraceToolInput): string {
+  const candidates: string[] = [];
   if (tool.error !== undefined && tool.error !== null) {
     candidates.push(typeof tool.error === "string" ? tool.error : safeStringify(tool.error));
   }
@@ -123,7 +187,7 @@ function detailOf(tool) {
   return "";
 }
 
-function resolveBudget(level, options) {
+function resolveBudget(level: TraceLevel, options: DescribeTraceOptions): TraceBudget {
   const base = LEVEL_BUDGETS[level];
   // Caller-supplied maxLines / maxChars may only tighten the level budget, never widen it.
   const maxLines =
@@ -137,7 +201,7 @@ function resolveBudget(level, options) {
   return { maxLines, maxChars };
 }
 
-function joinedLengthWith(lines, extra) {
+function joinedLengthWith(lines: readonly string[], extra: string): number {
   if (lines.length === 0) return extra.length;
   return lines.join("\n").length + 1 + extra.length;
 }
@@ -145,7 +209,7 @@ function joinedLengthWith(lines, extra) {
 // A tool without `endedAt` may be in flight, or may predate the 0.8.1 bridge that
 // records `at`/`endedAt` at all. Claiming "running" for the second case would be a
 // lie, so the label degrades to "unfinished" once the turn itself has finished.
-function inflightSuffix(tool, now, turnFinished) {
+function inflightSuffix(tool: TraceToolInput, now: number, turnFinished: boolean): string {
   if (!turnFinished) {
     if (typeof tool.at === "number" && Number.isFinite(tool.at)) return ` (running, ${runningSeconds(tool, now)}s)`;
     return " (running)";
@@ -154,7 +218,7 @@ function inflightSuffix(tool, now, turnFinished) {
   return hasOutput ? " (no timing)" : " (unfinished)";
 }
 
-function formatSummaryLine(tool, now, turnFinished) {
+function formatSummaryLine(tool: TraceToolInput, now: number, turnFinished: boolean): string {
   const name = toolName(tool);
   const preview = previewOf(tool.arguments);
   const failed = isFailedTool(tool);
@@ -172,13 +236,13 @@ function formatSummaryLine(tool, now, turnFinished) {
   return `✓ ${name} "${preview}"${duration ? ` ${duration}` : ""}`;
 }
 
-function formatFullBlock(tool, now, outputChars, turnFinished) {
+function formatFullBlock(tool: TraceToolInput, now: number, outputChars: number, turnFinished: boolean): string[] {
   const name = toolName(tool);
   const preview = previewOf(tool.arguments);
   const failed = isFailedTool(tool);
   const running = isRunningTool(tool);
 
-  let statusPart;
+  let statusPart: string;
   if (failed) {
     const duration = formatDuration(tool.at, tool.endedAt);
     statusPart = duration ? `✗ ${duration}` : `✗${inflightSuffix(tool, now, turnFinished)}`;
@@ -204,9 +268,13 @@ function formatFullBlock(tool, now, outputChars, turnFinished) {
   return lines;
 }
 
-function fitLinesSimple(candidates, maxLines, maxChars) {
-  const lines = [];
-  const truncated = { lines: false, chars: false };
+function fitLinesSimple(
+  candidates: readonly string[],
+  maxLines: number,
+  maxChars: number,
+): { lines: string[]; truncated: TraceTruncation } {
+  const lines: string[] = [];
+  const truncated: TraceTruncation = { lines: false, chars: false };
   for (const line of candidates) {
     if (lines.length + 1 > maxLines) {
       truncated.lines = true;
@@ -221,9 +289,14 @@ function fitLinesSimple(candidates, maxLines, maxChars) {
   return { lines, truncated };
 }
 
-function fitSummaryLines(header, toolLines, maxLines, maxChars) {
-  const lines = [];
-  const truncated = { lines: false, chars: false };
+function fitSummaryLines(
+  header: string | null,
+  toolLines: readonly string[],
+  maxLines: number,
+  maxChars: number,
+): { lines: string[]; truncated: TraceTruncation } {
+  const lines: string[] = [];
+  const truncated: TraceTruncation = { lines: false, chars: false };
   if (maxLines <= 0 || maxChars <= 0) {
     if (header !== null || toolLines.length > 0) {
       if (maxLines <= 0) truncated.lines = true;
@@ -256,7 +329,7 @@ function fitSummaryLines(header, toolLines, maxLines, maxChars) {
 
   if (shownTools < toolLines.length) {
     let dropped = toolLines.length - shownTools;
-    const trailer = (count) => `… +${count} more (call dsh_history for the full window)`;
+    const trailer = (count: number) => `… +${count} more (call dsh_history for the full window)`;
     while (shownTools > 0 && (lines.length + 1 > maxLines || joinedLengthWith(lines, trailer(dropped)) > maxChars)) {
       lines.pop();
       shownTools -= 1;
@@ -271,11 +344,24 @@ function fitSummaryLines(header, toolLines, maxLines, maxChars) {
   return { lines, truncated };
 }
 
-function buildErrorsLines(keptEntries, total, errorsCount, now, maxLines, maxChars, turnFinished) {
+interface IndexedTool {
+  tool: TraceToolInput;
+  index: number;
+}
+
+function buildErrorsLines(
+  keptEntries: readonly IndexedTool[],
+  total: number,
+  errorsCount: number,
+  now: number,
+  maxLines: number,
+  maxChars: number,
+  turnFinished: boolean,
+): { lines: string[]; truncated: TraceTruncation } {
   const keptFailed = keptEntries.filter((entry) => isFailedTool(entry.tool));
   const keptRunning = keptEntries.filter((entry) => isRunningTool(entry.tool));
 
-  const candidates = [];
+  const candidates: string[] = [];
   if (keptFailed.length > 0) {
     candidates.push(`errors: ${errorsCount} of ${total} tool calls`);
     for (let index = keptFailed.length - 1; index >= 0 && candidates.length < 4; index -= 1) {
@@ -291,7 +377,16 @@ function buildErrorsLines(keptEntries, total, errorsCount, now, maxLines, maxCha
   return fitLinesSimple(candidates, maxLines, maxChars);
 }
 
-function buildFullLines(header, toolLines, keptEntries, now, outputChars, maxLines, maxChars, turnFinished) {
+function buildFullLines(
+  header: string | null,
+  toolLines: readonly string[],
+  keptEntries: readonly IndexedTool[],
+  now: number,
+  outputChars: number,
+  maxLines: number,
+  maxChars: number,
+  turnFinished: boolean,
+): { lines: string[]; truncated: TraceTruncation } {
   if (maxLines <= 0 || maxChars <= 0) {
     const hasContent = header !== null || keptEntries.length > 0;
     return {
@@ -316,7 +411,7 @@ function buildFullLines(header, toolLines, keptEntries, now, outputChars, maxLin
   const truncated = { ...summaryFit.truncated };
 
   const summaryChars = lines.length > 0 ? lines.join("\n").length : 0;
-  const selectedBlocks = [];
+  const selectedBlocks: string[][] = [];
   let selectedLinesCount = 0;
   let selectedCharsCount = 0;
 
@@ -343,7 +438,7 @@ function buildFullLines(header, toolLines, keptEntries, now, outputChars, maxLin
   };
 }
 
-export function describeTrace(tools, options = {}) {
+export function describeTrace(tools: unknown, options: DescribeTraceOptions = {}): DescribeTraceResult {
   const level = normalizeTraceLevel(options.level, "errors");
   const now = typeof options.now === "number" && Number.isFinite(options.now) ? options.now : Date.now();
   const outputChars =
@@ -356,35 +451,36 @@ export function describeTrace(tools, options = {}) {
   const { maxLines, maxChars } = resolveBudget(level, options);
 
   const allTools = (Array.isArray(tools) ? tools : []).filter(
-    (item) => item !== null && typeof item === "object" && !Array.isArray(item),
+    (item): item is TraceToolInput => item !== null && typeof item === "object" && !Array.isArray(item),
   );
   const total = allTools.length;
   const errors = allTools.filter(isFailedTool).length;
   const running = allTools.filter(isRunningTool).length;
 
-  const hasSince = Number.isInteger(options.since) && options.since >= 0;
-  const indexed = allTools.map((tool, index) => ({ tool, index }));
+  const sinceCursor = options.since;
+  const hasSince = typeof sinceCursor === "number" && Number.isInteger(sinceCursor) && sinceCursor >= 0;
+  const indexed: IndexedTool[] = allTools.map((tool, index) => ({ tool, index }));
   const keptEntries = hasSince
-    ? indexed.filter(({ tool }) => Number.isInteger(tool.seq) && tool.seq > options.since)
+    ? indexed.filter(({ tool }) => typeof tool.seq === "number" && Number.isInteger(tool.seq) && tool.seq > sinceCursor)
     : indexed;
-  const since = hasSince ? { cursor: options.since, count: keptEntries.length } : null;
+  const since = hasSince ? { cursor: sinceCursor, count: keptEntries.length } : null;
 
-  let lines = [];
-  let truncated = { lines: false, chars: false };
-  let structured = null;
+  let lines: string[] = [];
+  let truncated: TraceTruncation = { lines: false, chars: false };
+  let structured: StructuredTraceEntry[] | null = null;
 
   if (level === "errors") {
     const built = buildErrorsLines(keptEntries, total, errors, now, maxLines, maxChars, turnFinished);
     lines = built.lines;
     truncated = built.truncated;
   } else if (level === "summary") {
-    const header = hasSince ? `+${keptEntries.length} since cursor ${options.since}` : null;
+    const header = hasSince ? `+${keptEntries.length} since cursor ${sinceCursor}` : null;
     const toolLines = keptEntries.map(({ tool }) => formatSummaryLine(tool, now, turnFinished));
     const built = fitSummaryLines(header, toolLines, maxLines, maxChars);
     lines = built.lines;
     truncated = built.truncated;
   } else if (level === "full") {
-    const header = hasSince ? `+${keptEntries.length} since cursor ${options.since}` : null;
+    const header = hasSince ? `+${keptEntries.length} since cursor ${sinceCursor}` : null;
     const toolLines = keptEntries.map(({ tool }) => formatSummaryLine(tool, now, turnFinished));
     const built = buildFullLines(header, toolLines, keptEntries, now, outputChars, maxLines, maxChars, turnFinished);
     lines = built.lines;
@@ -406,7 +502,7 @@ export function describeTrace(tools, options = {}) {
         outputTruncated,
         isError: tool.isError === true,
         error: tool.error ?? null,
-        seq: Number.isInteger(tool.seq) ? tool.seq : null,
+        seq: typeof tool.seq === "number" && Number.isInteger(tool.seq) ? tool.seq : null,
         at,
         endedAt,
         elapsedMs,

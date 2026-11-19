@@ -13,12 +13,152 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { rpcCall, rpcStream, waitForTurn, WAIT_SLICE_MS } from "../lib/client.mjs";
-import { formatTaskDetailLines, formatTaskListLine } from "../lib/mcp-format.mjs";
+import { rpcCall, rpcStream, waitForTurn, WAIT_SLICE_MS, type ClientConnectionOptions } from "../lib/client.mjs";
+import { formatTaskDetailLines, formatTaskListLine, type TaskProjection } from "../lib/mcp-format.mjs";
 import { transportCode } from "../lib/transport.mjs";
 import { ADAPTER_FAILURE_MESSAGES, sanitizeAdapterFailure } from "../lib/adapters/base.mjs";
 import { endpointPath, readEndpoint, stateDir, tokenPath } from "../lib/auth.mjs";
-import { describeTrace, isTraceLevel, normalizeTraceLevel } from "../lib/trace-format.mjs";
+import { describeTrace, isTraceLevel, normalizeTraceLevel, type TraceLevel } from "../lib/trace-format.mjs";
+
+export const CLI_EXIT_CODE = Object.freeze({
+  ok: 0,
+  failed: 1,
+  usage: 2,
+  connection: 3,
+} as const);
+
+export type CliExitCode = (typeof CLI_EXIT_CODE)[keyof typeof CLI_EXIT_CODE];
+
+export const CLI_COMMANDS = Object.freeze([
+  "ping",
+  "discover",
+  "capabilities",
+  "models",
+  "workspaces",
+  "permissions",
+  "health",
+  "sessions",
+  "create",
+  "ask",
+  "prompt",
+  "wait",
+  "cancel",
+  "history",
+  "tasks",
+  "agents",
+  "call",
+  "env",
+] as const);
+
+export type CliCommand = (typeof CLI_COMMANDS)[number];
+
+export const TASKS_SUBCOMMANDS = Object.freeze([
+  "preview",
+  "submit",
+  "list",
+  "events",
+  "input",
+  "artifact",
+  "get",
+  "cancel",
+  "dispatch",
+  "pump",
+  "reconcile",
+  "resolve",
+  "approve",
+] as const);
+
+export type TasksSubcommand = (typeof TASKS_SUBCOMMANDS)[number];
+
+export const AGENTS_SUBCOMMANDS = Object.freeze([
+  "register",
+  "list",
+  "get",
+  "probe",
+] as const);
+
+export type AgentsSubcommand = (typeof AGENTS_SUBCOMMANDS)[number];
+
+export interface CliFlags {
+  cwd?: string;
+  workspace?: string;
+  session?: string;
+  preset?: string;
+  model?: string;
+  effort?: string;
+  permission?: string;
+  mode?: string;
+  timeout?: string;
+  since?: string;
+  limit?: string;
+  sections?: string;
+  "max-chars"?: string;
+  wait?: string;
+  trace?: string;
+  url?: string;
+  token?: string;
+  task?: string;
+  agent?: string;
+  capability?: string;
+  principal?: string;
+  preview?: string;
+  "idempotency-key"?: string;
+  "expected-version"?: string;
+  reason?: string;
+  status?: string;
+  cursor?: string;
+  "max-steps"?: string;
+  observed?: string;
+  note?: string;
+  result?: string;
+  digest?: string;
+  ttl?: string;
+  input?: string;
+  file?: string;
+  kind?: string;
+  controls?: string;
+  project?: string;
+  title?: string;
+  attempt?: string;
+  approval?: string;
+  decision?: string;
+  "after-seq"?: string;
+  after?: string;
+  text?: string;
+  offset?: string;
+  length?: string;
+  evidence?: string;
+  json?: boolean;
+  stream?: boolean;
+  help?: boolean;
+  verbose?: boolean;
+  queue?: boolean;
+  "verified-only"?: boolean;
+  enabled?: boolean;
+  [key: string]: string | boolean | undefined;
+}
+
+export interface ParsedArgv {
+  flags: CliFlags;
+  positional: string[];
+}
+
+export interface CliErrorFormat {
+  exitCode: CliExitCode;
+  line: string;
+}
+
+export interface CliTurnResult {
+  sessionId?: string | null;
+  turn?: number | null;
+  status?: string | null;
+  text?: string | null;
+  durationMs?: number;
+  tools?: unknown[];
+  timedOut?: boolean;
+  reason?: unknown;
+  [key: string]: unknown;
+}
 
 const HELP = `dsh-rpc ${new Date().getUTCFullYear()} — drive a DeepSeek Harness session from the command line
 
@@ -76,8 +216,16 @@ Endpoint discovery (auto): $DSH_HOME/dsh-rpc/endpoint.json and .../token
   endpoint  : ${endpointPath()}
 `;
 
-const BOOLEAN_FLAGS = new Set(["json", "stream", "help", "verbose", "queue", "verified-only", "enabled"]);
-const VALUE_FLAGS = new Set([
+const BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
+  "json",
+  "stream",
+  "help",
+  "verbose",
+  "queue",
+  "verified-only",
+  "enabled",
+]);
+const VALUE_FLAGS: ReadonlySet<string> = new Set([
   "cwd",
   "workspace",
   "session",
@@ -123,9 +271,9 @@ const VALUE_FLAGS = new Set([
   "after-seq",
 ]);
 
-function parseArgv(argv) {
-  const flags = {};
-  const positional = [];
+function parseArgv(argv: readonly string[]): ParsedArgv {
+  const flags: CliFlags = {};
+  const positional: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     if (token === "--") {
@@ -163,13 +311,20 @@ function parseArgv(argv) {
 
 class UsageError extends Error {}
 
-function connectionOptions(flags) {
-  return { url: flags.url, token: flags.token };
+function connectionOptions(flags: CliFlags): ClientConnectionOptions {
+  return {
+    url: typeof flags.url === "string" ? flags.url : undefined,
+    token: typeof flags.token === "string" ? flags.token : undefined,
+  };
 }
 
-function numberOf(flags, key, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+function numberOf(
+  flags: CliFlags,
+  key: string,
+  { min = 1, max = Number.MAX_SAFE_INTEGER }: { min?: number; max?: number } = {},
+): number | undefined {
   if (flags[key] === undefined) return undefined;
-  const raw = typeof flags[key] === "string" ? flags[key].trim() : "";
+  const raw = typeof flags[key] === "string" ? (flags[key] as string).trim() : "";
   if (!/^-?\d+$/.test(raw)) {
     throw new UsageError(`--${key} must be a safe integer between ${min} and ${max}`);
   }
@@ -180,19 +335,19 @@ function numberOf(flags, key, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
   return value;
 }
 
-function cursorOf(flags, key) {
+function cursorOf(flags: CliFlags, key: string): number | undefined {
   return numberOf(flags, key, { min: 0, max: Number.MAX_SAFE_INTEGER });
 }
 
-function shellDoubleQuote(value) {
+function shellDoubleQuote(value: unknown): string {
   return `"${String(value).replace(/[\\"$`]/g, "\\$&")}"`;
 }
 
-function shellSingleQuote(value) {
+function shellSingleQuote(value: unknown): string {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
-async function readPrompt(positional) {
+async function readPrompt(positional: readonly string[]): Promise<string> {
   if (positional.length === 0) throw new UsageError("missing prompt text");
   if (positional.length === 1 && positional[0] === "-") {
     return readFileSync(0, "utf8");
@@ -200,17 +355,17 @@ async function readPrompt(positional) {
   return positional.join(" ");
 }
 
-function print(text) {
+function print(text: string | null | undefined): void {
   if (text === undefined || text === null || text === "") return;
   process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
 }
 
-function note(text) {
+function note(text: string): void {
   process.stderr.write(`${text}\n`);
 }
 
 /** Human footer describing how the turn ended; kept off stdout. */
-function footer(result) {
+function footer(result: CliTurnResult): string {
   const bits = [`session ${result.sessionId ?? "?"}`];
   if (result.turn !== undefined && result.turn !== null) bits.push(`turn ${result.turn}`);
   bits.push(result.status ?? "unknown");
@@ -220,7 +375,7 @@ function footer(result) {
   return bits.join(" · ");
 }
 
-async function resolveCliTraceLevel(flags) {
+async function resolveCliTraceLevel(flags: CliFlags): Promise<TraceLevel> {
   if (flags.trace !== undefined) {
     if (!isTraceLevel(flags.trace)) {
       throw new UsageError("--trace must be one of: none, errors, summary, full");
@@ -229,14 +384,23 @@ async function resolveCliTraceLevel(flags) {
   }
   if (flags.json) return "none";
   try {
-    const info = await rpcCall("dsh.discover", {}, { ...connectionOptions(flags), timeoutMs: 5_000 });
+    const info = await rpcCall<{ config?: { traceDefault?: unknown } }>(
+      "dsh.discover",
+      {},
+      { ...connectionOptions(flags), timeoutMs: 5_000 },
+    );
     return normalizeTraceLevel(info?.config?.traceDefault, "errors");
   } catch {
     return "errors";
   }
 }
 
-function emitResult(result, flags, traceLevel = "none", since = null) {
+function emitResult(
+  result: CliTurnResult,
+  flags: CliFlags,
+  traceLevel: TraceLevel = "none",
+  since: number | null = null,
+): void {
   if (flags.json) {
     print(JSON.stringify(result, null, 2));
   } else {
@@ -247,7 +411,7 @@ function emitResult(result, flags, traceLevel = "none", since = null) {
       const trace = describeTrace(result?.tools ?? [], {
         level: traceLevel,
         status: result?.status,
-        since: Number.isInteger(since) ? since : null,
+        since: typeof since === "number" && Number.isInteger(since) ? since : null,
       });
       if (trace.lines.length > 0) {
         print(`\ntrace:\n${trace.lines.join("\n")}`);
@@ -260,14 +424,14 @@ function emitResult(result, flags, traceLevel = "none", since = null) {
 const DEFAULT_TURN_TIMEOUT_MS = 600000;
 
 /** The client must out-wait the server's turn budget, or it aborts a live turn. */
-function turnBudget(timeoutMs) {
+function turnBudget(timeoutMs: number | undefined): number {
   return (timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS) + 30_000;
 }
 
-async function runAsk(flags, positional) {
+async function runAsk(flags: CliFlags, positional: readonly string[]): Promise<CliExitCode> {
   const traceLevel = await resolveCliTraceLevel(flags);
   const text = await readPrompt(positional);
-  const params = { text };
+  const params: Record<string, unknown> = { text };
   // Location and preset are creation-time decisions, and the bridge is the only
   // place that knows it. Forwarding them unconditionally means a caller that asks
   // for both a session and a location gets the bridge's refusal, rather than having
@@ -286,17 +450,23 @@ async function runAsk(flags, positional) {
   const budget = { ...connectionOptions(flags), timeoutMs: turnBudget(timeout) };
 
   if (flags.stream) {
-    let final = null;
+    let final: Record<string, unknown> | null = null;
     for await (const frame of rpcStream(params, budget)) {
       if (frame.type === "session") note(`session ${frame.sessionId}`);
       else if (frame.type === "progress") renderProgress(frame.frame, flags);
       else if (frame.type === "result") final = frame;
-      else if (frame.type === "error") throw new Error(frame.error?.message ?? "stream error");
+      else if (frame.type === "error") {
+        const msg =
+          frame.error && typeof frame.error === "object" && typeof (frame.error as { message?: unknown }).message === "string"
+            ? (frame.error as { message: string }).message
+            : "stream error";
+        throw new Error(msg);
+      }
     }
     if (!final) throw new Error("stream ended without a result");
-    const { type, ...result } = final;
-    emitResult(result, flags, traceLevel, null);
-    return exitCodeFor(result);
+    const { type: _type, ...result } = final;
+    emitResult(result as CliTurnResult, flags, traceLevel, null);
+    return exitCodeFor(result as CliTurnResult);
   }
 
   // One request cannot stay quiet past the transport's 300 s ceiling, so a
@@ -304,21 +474,24 @@ async function runAsk(flags, positional) {
   // collected is kept if the wait comes back empty.
   const budgetMs = timeout ?? DEFAULT_TURN_TIMEOUT_MS;
   const slice = Math.min(budgetMs, WAIT_SLICE_MS);
-  const first = await rpcCall(
+  const first = await rpcCall<CliTurnResult>(
     "dsh.sessions.ask",
     { ...params, timeoutMs: slice },
     { ...connectionOptions(flags), timeoutMs: slice + 30_000 },
   );
-  let result = first;
+  let result: CliTurnResult = first;
   if (first?.status === "timeout" && typeof first.sessionId === "string") {
     const left = budgetMs - (first.durationMs ?? slice);
     if (left > 1_000) {
-      const waited = await waitForTurn(first.sessionId, { timeoutMs: left, ...connectionOptions(flags) });
+      const waited = (await waitForTurn(first.sessionId, {
+        timeoutMs: left,
+        ...connectionOptions(flags),
+      })) as CliTurnResult & { waitedMs?: number };
       result = {
         ...first,
         ...waited,
         text: waited.text || first.text,
-        tools: waited.tools?.length > 0 ? waited.tools : first.tools,
+        tools: Array.isArray(waited.tools) && waited.tools.length > 0 ? waited.tools : first.tools,
         durationMs: (first.durationMs ?? 0) + (waited.waitedMs ?? 0),
       };
     }
@@ -327,40 +500,48 @@ async function runAsk(flags, positional) {
   return exitCodeFor(result);
 }
 
-function renderProgress(frame, flags) {
-  if (!flags.verbose || !frame) return;
-  if (frame.type === "snapshot") {
-    note(`snapshot: turn ${frame.turn}${frame.running ? " (running)" : ""}`);
+function renderProgress(frame: unknown, flags: CliFlags): void {
+  if (!flags.verbose || !frame || typeof frame !== "object") return;
+  const f = frame as {
+    type?: unknown;
+    turn?: unknown;
+    running?: unknown;
+    event?: { type?: unknown; data?: { name?: unknown; turn?: unknown } };
+  };
+  if (f.type === "snapshot") {
+    note(`snapshot: turn ${f.turn}${f.running ? " (running)" : ""}`);
     return;
   }
-  if (frame.type !== "event") return;
-  const event = frame.event;
+  if (f.type !== "event") return;
+  const event = f.event;
   if (!event) return;
   if (event.type === "tool/call") note(`→ ${event.data?.name ?? "tool"}`);
   else if (event.type === "turn/start") note(`turn ${event.data?.turn} started`);
 }
 
-function exitCodeFor(result) {
-  return result?.status === "completed" || result?.status === "idle" ? 0 : 1;
+function exitCodeFor(result: CliTurnResult | null | undefined): CliExitCode {
+  return result?.status === "completed" || result?.status === "idle"
+    ? CLI_EXIT_CODE.ok
+    : CLI_EXIT_CODE.failed;
 }
 
 /**
  * `process.exit()` truncates stdout when it is a pipe, which silently eats the
  * tail of a long answer. Wait for both streams to drain, then exit.
  */
-function flushStdio() {
-  const drain = (stream) =>
-    new Promise((resolve) => {
+function flushStdio(): Promise<void[]> {
+  const drain = (stream: NodeJS.WriteStream | undefined): Promise<void> =>
+    new Promise((resolveDrain) => {
       if (!stream || stream.destroyed || stream.writableEnded) {
-        resolve();
+        resolveDrain();
         return;
       }
-      stream.write("", () => resolve());
+      stream.write("", () => resolveDrain());
     });
   return Promise.all([drain(process.stdout), drain(process.stderr)]);
 }
 
-const CONNECTION_FAILURES = new Set([
+const CONNECTION_FAILURES: ReadonlySet<string> = new Set([
   "ECONNREFUSED",
   "ECONNRESET",
   "ENOTFOUND",
@@ -369,22 +550,38 @@ const CONNECTION_FAILURES = new Set([
   "EBADPORT",
 ]);
 
-function failureExitCode(error) {
-  const code = error?.code ?? error?.cause?.code;
-  if (CONNECTION_FAILURES.has(code)) return 3;
-  if (error?.name === "TimeoutError") return 3;
-  return 1;
+function errorCodeOf(error: unknown): string | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const rec = error as { code?: unknown; cause?: { code?: unknown } };
+  if (typeof rec.code === "string") return rec.code;
+  if (rec.cause && typeof rec.cause === "object" && typeof rec.cause.code === "string") {
+    return rec.cause.code;
+  }
+  return undefined;
 }
 
-function formatCliError(error) {
-  const errCode = error?.code ?? error?.cause?.code;
+function failureExitCode(error: unknown): CliExitCode {
+  const code = errorCodeOf(error);
+  if (code && CONNECTION_FAILURES.has(code)) return CLI_EXIT_CODE.connection;
+  if (error && typeof error === "object" && (error as { name?: unknown }).name === "TimeoutError") {
+    return CLI_EXIT_CODE.connection;
+  }
+  return CLI_EXIT_CODE.failed;
+}
+
+function formatCliError(error: unknown): CliErrorFormat {
+  const errCode = errorCodeOf(error);
   const exitCode = failureExitCode(error);
+  const message =
+    error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string"
+      ? (error as { message: string }).message
+      : String(error);
   const line =
     errCode === "EBADPORT"
-      ? `dsh-rpc: ${error?.message ?? error}`
-      : exitCode === 3
-        ? `dsh-rpc: cannot reach the Harness (is it running?) — ${error?.message ?? error}`
-        : `dsh-rpc: ${error?.message ?? error}`;
+      ? `dsh-rpc: ${message}`
+      : exitCode === CLI_EXIT_CODE.connection
+        ? `dsh-rpc: cannot reach the Harness (is it running?) — ${message}`
+        : `dsh-rpc: ${message}`;
   return { exitCode, line };
 }
 
@@ -403,10 +600,13 @@ const HEALTH_PROBE_TIMEOUT_MS = 5000;
  * moves the port. Every attempt is capped by what is left of the budget, so
  * `--wait 5000` cannot take minutes when the address accepts but never answers.
  */
-async function probeHealth(explicitUrl, budgetMs) {
+async function probeHealth(explicitUrl: string | undefined | null, budgetMs: number): Promise<CliExitCode> {
   const startedAt = Date.now();
   const deadline = startedAt + budgetMs;
-  let failure = { kind: "transport", message: "the plugin has not published an endpoint yet" };
+  let failure: { kind: "transport" | "http"; code?: string; message: string } = {
+    kind: "transport",
+    message: "the plugin has not published an endpoint yet",
+  };
 
   for (;;) {
     const target = explicitUrl ?? readEndpoint()?.url;
@@ -420,31 +620,35 @@ async function probeHealth(explicitUrl, budgetMs) {
         if (response.ok) {
           print(body);
           if (budgetMs > 0) note(`ready after ${Date.now() - startedAt}ms`);
-          return 0;
+          return CLI_EXIT_CODE.ok;
         }
         failure = { kind: "http", message: `HTTP ${response.status}` };
       } catch (error) {
         const code = transportCode(error);
+        const msg =
+          error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string"
+            ? (error as { message: string }).message
+            : String(error);
         if (code === "EBADPORT") {
           failure = {
             kind: "transport",
             code: "EBADPORT",
             message:
-              `${error?.message ?? "fetch failed"} (bad port) — the Harness web port is refused by fetch; ` +
+              `${msg || "fetch failed"} (bad port) — the Harness web port is refused by fetch; ` +
               "start the Harness on another port, or pass --url",
           };
           break;
         }
-        failure = { kind: "transport", code, message: error?.message ?? String(error) };
+        failure = { kind: "transport", code, message: msg };
       }
     }
     if (Date.now() >= deadline) break;
     const pause = Math.max(10, Math.min(HEALTH_POLL_MS, deadline - Date.now()));
-    await new Promise((resolve) => setTimeout(resolve, pause));
+    await new Promise((resolvePause) => setTimeout(resolvePause, pause));
   }
 
   note(`health check failed after ${Date.now() - startedAt}ms: ${failure.message}`);
-  return failure.kind === "http" ? 1 : 3;
+  return failure.kind === "http" ? CLI_EXIT_CODE.failed : CLI_EXIT_CODE.connection;
 }
 
 /**
@@ -452,18 +656,18 @@ async function probeHealth(explicitUrl, budgetMs) {
  * must say what to do next instead of leaking the raw RPC error, and may never
  * half-succeed. Returns the hint line, or null when the error is unrelated.
  */
-function mixedVersionHint(message) {
+function mixedVersionHint(message: unknown): string | null {
   if (!/unknown method: dsh\.(tasks|agents)\./.test(typeof message === "string" ? message : "")) {
     return null;
   }
   return "  next: this Harness plugin predates the task centre (0.9.0). Upgrade the plugin inside the DSH profile — the bridge and the plugin ship together.";
 }
 
-async function main(argv) {
+async function main(argv: readonly string[]): Promise<CliExitCode> {
   const { flags, positional } = parseArgv(argv);
   if (flags.help || positional.length === 0) {
     process.stdout.write(HELP);
-    return 0;
+    return CLI_EXIT_CODE.ok;
   }
 
   const [command, ...rest] = positional;
@@ -471,7 +675,15 @@ async function main(argv) {
 
   switch (command) {
     case "ping": {
-      const result = await rpcCall("dsh.ping", {}, options);
+      const result = await rpcCall<{
+        plugin?: string;
+        version?: string;
+        protocol?: string;
+        origin?: string | null;
+        config?: { path?: string; allowRemote?: boolean };
+        state?: { tokenSource?: string; tokenPath?: string | null };
+        activeRuns?: unknown[];
+      }>("dsh.ping", {}, options);
       print(flags.json ? JSON.stringify(result, null, 2) : [
         `plugin     : ${result.plugin} ${result.version} (protocol ${result.protocol})`,
         `origin     : ${result.origin ?? "unknown"}`,
@@ -480,53 +692,65 @@ async function main(argv) {
         `token src  : ${result.state?.tokenSource} → ${result.state?.tokenPath ?? ""}`,
         `active runs: ${result.activeRuns?.length ?? 0}`,
       ].join("\n"));
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "discover": {
-      const result = await rpcCall("dsh.discover", {}, options);
+      const result = await rpcCall<{
+        methods?: Array<{
+          name: string;
+          summary: string;
+          params?: Record<string, string>;
+          returns: string;
+        }>;
+      }>("dsh.discover", {}, options);
       if (flags.json) {
         print(JSON.stringify(result, null, 2));
-        return 0;
+        return CLI_EXIT_CODE.ok;
       }
       for (const method of result.methods ?? []) {
         print(`${method.name}`);
         print(`  ${method.summary}`);
         const params = Object.keys(method.params ?? {});
         if (params.length > 0) {
-          for (const key of params) print(`    ${key}: ${method.params[key]}`);
+          for (const key of params) print(`    ${key}: ${method.params![key]}`);
         } else {
           print("    (no params)");
         }
         print(`  → ${method.returns}`);
       }
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "models": {
       const result = await rpcCall("dsh.models", {}, options);
       print(JSON.stringify(result, null, 2));
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "workspaces": {
-      const result = await rpcCall("dsh.workspaces.list", {}, options);
+      const result = await rpcCall<{
+        items?: Array<{ id: string; title: string; status: string; sessions: number; path: string }>;
+      }>("dsh.workspaces.list", {}, options);
       if (flags.json) {
         print(JSON.stringify(result, null, 2));
-        return 0;
+        return CLI_EXIT_CODE.ok;
       }
       if ((result.items ?? []).length === 0) {
         note("no workspaces are registered yet");
-        return 0;
+        return CLI_EXIT_CODE.ok;
       }
-      for (const item of result.items) {
+      for (const item of result.items ?? []) {
         print(`${item.id}  ${item.title}  [${item.status}, ${item.sessions} sessions]`);
         print(`  ${item.path}`);
       }
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "permissions": {
-      const result = await rpcCall("dsh.permissions.catalog", {}, options);
+      const result = await rpcCall<{
+        defaultPreset?: string | null;
+        options?: Array<{ value: string; name: string; description?: string | null }>;
+      }>("dsh.permissions.catalog", {}, options);
       if (flags.json) {
         print(JSON.stringify(result, null, 2));
-        return 0;
+        return CLI_EXIT_CODE.ok;
       }
       for (const option of result.options ?? []) {
         const mark = option.value === result.defaultPreset ? "*" : " ";
@@ -534,27 +758,30 @@ async function main(argv) {
         if (option.description) print(`    ${option.description}`);
       }
       if (result.defaultPreset) note(`* = default preset (${result.defaultPreset})`);
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "health": {
       // Unauthenticated, so it needs no token — but it still needs an address,
       // and the plugin publishes one; requiring --url here was pure friction.
       const budget = numberOf(flags, "wait") ?? 0;
-      const target = flags.url ?? (budget > 0 ? null : readEndpoint()?.url);
+      const target = (typeof flags.url === "string" ? flags.url : undefined) ?? (budget > 0 ? null : readEndpoint()?.url);
       if (!target && budget === 0) {
         note("health needs --url (the plugin has not published an endpoint yet)");
-        return 2;
+        return CLI_EXIT_CODE.usage;
       }
       return await probeHealth(target, budget);
     }
     case "sessions": {
-      const params = {};
+      const params: Record<string, unknown> = {};
       const limit = numberOf(flags, "limit");
       if (limit) params.limit = limit;
-      const result = await rpcCall("dsh.sessions.list", params, options);
+      const result = await rpcCall<{
+        total?: number;
+        items?: Array<{ sessionId: string; running?: boolean; blank?: boolean; cwd?: string | null }>;
+      }>("dsh.sessions.list", params, options);
       if (flags.json) {
         print(JSON.stringify(result, null, 2));
-        return 0;
+        return CLI_EXIT_CODE.ok;
       }
       for (const item of result.items ?? []) {
         const marks = [item.running ? "running" : "idle", item.blank ? "blank" : null]
@@ -563,62 +790,66 @@ async function main(argv) {
         print(`${item.sessionId}  ${marks}  ${item.cwd ?? ""}`);
       }
       note(`${result.total} session(s)`);
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "create": {
-      const params = {};
+      const params: Record<string, unknown> = {};
       if (flags.cwd) params.cwd = flags.cwd;
       if (flags.workspace) params.workspaceId = flags.workspace;
       if (flags.preset) params.agentPreset = flags.preset;
       if (flags.model) params.model = flags.model;
       if (flags.effort) params.reasoningEffort = flags.effort;
       if (flags.permission) params.permissionPreset = flags.permission;
-      const result = await rpcCall("dsh.sessions.create", params, options);
+      const result = await rpcCall<{ sessionId: string }>("dsh.sessions.create", params, options);
       print(flags.json ? JSON.stringify(result, null, 2) : result.sessionId);
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "ask":
       return runAsk(flags, rest);
     case "prompt": {
       if (!flags.session) throw new UsageError("prompt needs --session <id>");
       const text = await readPrompt(rest);
-      const params = { sessionId: flags.session, text };
+      const params: Record<string, unknown> = { sessionId: flags.session, text };
       if (flags.model) params.model = flags.model;
       if (flags.effort) params.reasoningEffort = flags.effort;
       if (flags.permission) params.permissionPreset = flags.permission;
       if (flags.mode) params.mode = flags.mode;
-      const result = await rpcCall("dsh.sessions.prompt", params, options);
+      const result = await rpcCall<{ requestId: string }>("dsh.sessions.prompt", params, options);
       print(flags.json ? JSON.stringify(result, null, 2) : result.requestId);
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "wait": {
-      if (!flags.session) throw new UsageError("wait needs --session <id>");
+      if (typeof flags.session !== "string" || !flags.session) throw new UsageError("wait needs --session <id>");
       const timeout = numberOf(flags, "timeout");
       const since = cursorOf(flags, "since");
       const traceLevel = await resolveCliTraceLevel(flags);
-      const result = await waitForTurn(flags.session, {
+      const result = (await waitForTurn(flags.session, {
         timeoutMs: timeout ?? DEFAULT_TURN_TIMEOUT_MS,
         since,
         ...options,
-      });
+      })) as CliTurnResult;
       emitResult(result, flags, traceLevel, since ?? null);
       return exitCodeFor(result);
     }
     case "cancel": {
       if (!flags.session) throw new UsageError("cancel needs --session <id>");
-      const result = await rpcCall("dsh.sessions.cancel", { sessionId: flags.session }, options);
+      const result = await rpcCall<{ sessionId: string }>("dsh.sessions.cancel", { sessionId: flags.session }, options);
       print(flags.json ? JSON.stringify(result, null, 2) : `cancelled ${result.sessionId}`);
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "history": {
       if (!flags.session) throw new UsageError("history needs --session <id>");
-      const params = { sessionId: flags.session };
+      const params: Record<string, unknown> = { sessionId: flags.session };
       const limit = numberOf(flags, "limit");
       if (limit) params.limit = limit;
-      const result = await rpcCall("dsh.sessions.history", params, options);
+      const result = await rpcCall<{
+        records?: Array<{ seq?: unknown; type?: unknown }>;
+        turn?: number;
+        running?: boolean;
+      }>("dsh.sessions.history", params, options);
       if (flags.json) {
         print(JSON.stringify(result, null, 2));
-        return 0;
+        return CLI_EXIT_CODE.ok;
       }
       print(
         `${result.records?.length ?? 0} event(s), turn ${result.turn}, ${result.running ? "running" : "idle"}`,
@@ -626,10 +857,10 @@ async function main(argv) {
       for (const record of result.records ?? []) {
         print(`  ${String(record.seq).padStart(5)} ${record.type}`);
       }
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "capabilities": {
-      const params = {};
+      const params: Record<string, unknown> = {};
       if (flags.sections !== undefined) {
         const parts = String(flags.sections)
           .split(",")
@@ -646,24 +877,24 @@ async function main(argv) {
         params.max_chars = raw;
       }
       if (flags.session) params.session_id = flags.session;
-      const result = await rpcCall("dsh.capabilities", params, options);
+      const result = await rpcCall<{ text?: string; missing?: string[] }>("dsh.capabilities", params, options);
       if (flags.json) {
         print(JSON.stringify(result, null, 2));
-        return 0;
+        return CLI_EXIT_CODE.ok;
       }
       print(result.text ?? "");
       if (Array.isArray(result.missing) && result.missing.length > 0) {
         note(`ignored unknown sections: ${result.missing.join(", ")}`);
       }
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "call": {
       const [method, rawParams] = rest;
       if (!method) throw new UsageError("call needs a method name");
-      let params = {};
+      let params: Record<string, unknown> = {};
       if (rawParams !== undefined) {
         try {
-          params = JSON.parse(rawParams);
+          params = JSON.parse(rawParams) as Record<string, unknown>;
         } catch {
           throw new UsageError("call params must be valid JSON");
         }
@@ -673,18 +904,21 @@ async function main(argv) {
       // here, and a wait goes through the sliced loop like every other wait.
       const timeout = numberOf(flags, "timeout");
       if (method === "dsh.sessions.wait" && typeof params?.sessionId === "string") {
-        const jsonTimeout = Number.isInteger(params.timeoutMs) && params.timeoutMs > 0 ? params.timeoutMs : undefined;
+        const jsonTimeout =
+          typeof params.timeoutMs === "number" && Number.isInteger(params.timeoutMs) && params.timeoutMs > 0
+            ? params.timeoutMs
+            : undefined;
         const result = await waitForTurn(params.sessionId, {
           timeoutMs: timeout ?? jsonTimeout ?? DEFAULT_TURN_TIMEOUT_MS,
-          since: Number.isInteger(params.since) ? params.since : undefined,
+          since: typeof params.since === "number" && Number.isInteger(params.since) ? params.since : undefined,
           ...connectionOptions(flags),
         });
         print(JSON.stringify(result, null, 2));
-        return 0;
+        return CLI_EXIT_CODE.ok;
       }
       const result = await rpcCall(method, params, timeout ? { ...connectionOptions(flags), timeoutMs: timeout } : options);
       print(JSON.stringify(result, null, 2));
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "env": {
       const endpoint = readEndpoint();
@@ -694,7 +928,7 @@ async function main(argv) {
       if (!process.env.DSH_RPC_TOKEN && !flags.token) {
         print(`export DSH_RPC_TOKEN="$(cat ${shellSingleQuote(tokenPath().replace(/\\/g, "/"))})"`);
       }
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "tasks":
       return await runTasksCommand(flags, rest, options);
@@ -705,8 +939,11 @@ async function main(argv) {
   }
 }
 
-function parseJsonFlag(raw, name) {
+function parseJsonFlag(raw: unknown, name: string): unknown {
   if (raw === undefined) return undefined;
+  if (typeof raw !== "string") {
+    throw new UsageError(`--${name} must be valid JSON`);
+  }
   try {
     return JSON.parse(raw);
   } catch {
@@ -714,17 +951,21 @@ function parseJsonFlag(raw, name) {
   }
 }
 
-async function runTasksCommand(flags, rest, options) {
+async function runTasksCommand(
+  flags: CliFlags,
+  rest: readonly string[],
+  options: ClientConnectionOptions = {},
+): Promise<CliExitCode> {
   const [sub, ...args] = rest;
   if (!sub) throw new UsageError("tasks needs a subcommand: preview|submit|list|get|cancel|dispatch|pump|reconcile|approve|resolve");
-  const firstId = flags.task ?? args[0];
+  const firstId = typeof flags.task === "string" ? flags.task : args[0];
   if (flags["after-seq"] !== undefined) {
     cursorOf(flags, "after-seq");
   }
 
   switch (sub) {
     case "preview": {
-      const params = {
+      const params: Record<string, unknown> = {
         principalId: flags.principal ?? "local-operator",
         capabilityRevisionId: flags.capability,
         workspaceId: flags.workspace ?? "local",
@@ -735,16 +976,20 @@ async function runTasksCommand(flags, rest, options) {
       if (flags.digest) params.requestDigest = flags.digest;
       if (flags.ttl !== undefined) params.ttlMs = numberOf(flags, "ttl", { min: 1000, max: 3_600_000 });
       if (flags.input !== undefined) params.input = parseJsonFlag(flags.input, "input");
-      const result = await rpcCall("dsh.tasks.preview", params, options);
+      const result = await rpcCall<{ previewId: string; agentId: string; expiresAt: string }>(
+        "dsh.tasks.preview",
+        params,
+        options,
+      );
       print(
         flags.json
           ? JSON.stringify(result, null, 2)
           : `preview ${result.previewId}  agent=${result.agentId}  expires=${result.expiresAt}`,
       );
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "submit": {
-      const params = {
+      const params: Record<string, unknown> = {
         idempotencyKey: flags["idempotency-key"] ?? `cli_${randomUUID()}`,
       };
       if (flags.preview) params.previewId = flags.preview;
@@ -754,26 +999,35 @@ async function runTasksCommand(flags, rest, options) {
       if (flags.capability) params.capabilityRevisionId = flags.capability;
       if (flags.input !== undefined) params.input = parseJsonFlag(flags.input, "input");
       else if (args.length > 0) params.input = { prompt: args.join(" ") };
-      const result = await rpcCall("dsh.tasks.submit", params, options);
+      const result = await rpcCall<{
+        taskId: string;
+        status: string;
+        phase?: string | null;
+        deduplicated?: boolean;
+      }>("dsh.tasks.submit", params, options);
       print(
         flags.json
           ? JSON.stringify(result, null, 2)
           : `task ${result.taskId} · ${result.status} · ${result.phase ?? "?"}${result.deduplicated ? " (deduplicated)" : ""}`,
       );
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "list": {
-      const params = {};
+      const params: Record<string, unknown> = {};
       if (flags.status) params.status = flags.status;
       if (flags.workspace) params.workspaceId = flags.workspace;
       if (flags.principal) params.principalId = flags.principal;
       if (flags.cursor) params.cursor = flags.cursor;
       const limit = numberOf(flags, "limit", { min: 1, max: 200 });
       if (limit) params.limit = limit;
-      const result = await rpcCall("dsh.tasks.list", params, options);
+      const result = await rpcCall<{
+        items?: TaskProjection[];
+        hasMore?: boolean;
+        nextCursor?: string | null;
+      }>("dsh.tasks.list", params, options);
       if (flags.json) {
         print(JSON.stringify(result, null, 2));
-        return 0;
+        return CLI_EXIT_CODE.ok;
       }
       for (const item of result.items ?? []) {
         // 0.9.3 复核第三轮：列表也要说出「未校验 / 降级 / 在等谁」，别让读文字的人
@@ -781,18 +1035,22 @@ async function runTasksCommand(flags, rest, options) {
         print(`${formatTaskListLine(item)}  v${item.stateVersion ?? "?"}`);
       }
       note(`${(result.items ?? []).length} task(s)${result.hasMore ? ` (next cursor: ${result.nextCursor})` : ""}`);
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "events": {
       if (!firstId) throw new UsageError("tasks events needs <taskId> or --task <id>");
-      const params = { taskId: firstId };
+      const params: Record<string, unknown> = { taskId: firstId };
       if (flags.after) params.afterSeq = numberOf(flags, "after", { min: 0, max: Number.MAX_SAFE_INTEGER });
       const limit = numberOf(flags, "limit", { min: 1, max: 500 });
       if (limit) params.limit = limit;
-      const result = await rpcCall("dsh.tasks.events", params, options);
+      const result = await rpcCall<{
+        events?: Array<{ seq: number; type: string; attemptId?: string | null; at: string }>;
+        hasMore?: boolean;
+        nextAfterSeq?: number;
+      }>("dsh.tasks.events", params, options);
       if (flags.json) {
         print(JSON.stringify(result, null, 2));
-        return 0;
+        return CLI_EXIT_CODE.ok;
       }
       for (const event of result.events ?? []) {
         const attempt = event.attemptId ? ` · ${event.attemptId}` : "";
@@ -801,13 +1059,13 @@ async function runTasksCommand(flags, rest, options) {
       note(
         `${(result.events ?? []).length} event(s)${result.hasMore ? ` (next afterSeq: ${result.nextAfterSeq})` : ""}`,
       );
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "input": {
       if (!firstId) throw new UsageError("tasks input needs <taskId> or --task <id>");
       const text = flags.text !== undefined ? String(flags.text) : args.slice(1).join(" ");
       if (!text.trim()) throw new UsageError("tasks input needs --text <answer> (or the answer as trailing text)");
-      const params = {
+      const params: Record<string, unknown> = {
         taskId: firstId,
         text: text.trim(),
         idempotencyKey: flags["idempotency-key"] ?? `cli_input_${randomUUID()}`,
@@ -815,27 +1073,41 @@ async function runTasksCommand(flags, rest, options) {
       if (flags.attempt) params.attemptId = String(flags.attempt);
       if (flags.question) params.questionId = String(flags.question);
       if (flags.principal) params.principalId = flags.principal;
-      const result = await rpcCall("dsh.tasks.input", params);
+      const result = await rpcCall<{
+        taskId: string;
+        inputId: string;
+        deliveryStatus: string;
+        deduplicated?: boolean;
+      }>("dsh.tasks.input", params);
       print(
         flags.json
           ? JSON.stringify(result, null, 2)
           : `task ${result.taskId} · input ${result.inputId} · ${result.deliveryStatus}${result.deduplicated ? " (deduplicated)" : ""}`,
       );
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "artifact": {
       if (!firstId) throw new UsageError("tasks artifact needs <taskId> <artifactId>");
       const artifactId = args[1];
       if (!artifactId) throw new UsageError("tasks artifact needs <taskId> <artifactId>");
-      const params = { taskId: firstId, artifactId };
+      const params: Record<string, unknown> = { taskId: firstId, artifactId };
       const offset = numberOf(flags, "offset", { min: 0, max: Number.MAX_SAFE_INTEGER });
       if (offset) params.offset = offset;
       const length = numberOf(flags, "length", { min: 1, max: 1000000 });
       if (length) params.length = length;
-      const result = await rpcCall("dsh.tasks.readArtifact", params);
+      const result = await rpcCall<{
+        artifactId: string;
+        kind: string;
+        sizeBytes: number;
+        encoding: string;
+        content?: string;
+        offset: number;
+        bytesRead: number;
+        truncated?: boolean;
+      }>("dsh.tasks.readArtifact", params);
       if (flags.json) {
         print(JSON.stringify(result, null, 2));
-        return 0;
+        return CLI_EXIT_CODE.ok;
       }
       print(
         `artifact ${result.artifactId} · ${result.kind} · ${result.sizeBytes} bytes · ${result.encoding}`,
@@ -844,16 +1116,16 @@ async function runTasksCommand(flags, rest, options) {
       note(
         `offset=${result.offset} bytesRead=${result.bytesRead}${result.truncated ? " (truncated; raise --length or use --offset)" : ""}`,
       );
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "get": {
       if (!firstId) throw new UsageError("tasks get needs <taskId> or --task <id>");
-      const params = { taskId: firstId };
+      const params: Record<string, unknown> = { taskId: firstId };
       if (flags.principal) params.principalId = flags.principal;
-      const result = await rpcCall("dsh.tasks.get", params, options);
+      const result = await rpcCall<TaskProjection>("dsh.tasks.get", params, options);
       if (flags.json) {
         print(JSON.stringify(result, null, 2));
-        return 0;
+        return CLI_EXIT_CODE.ok;
       }
       print(`task ${result.taskId} · ${result.status} · ${result.phase ?? "?"} · v${result.stateVersion}`);
       const detail = formatTaskDetailLines(result);
@@ -866,37 +1138,48 @@ async function runTasksCommand(flags, rest, options) {
       } else if (result.resultValid === true) {
         print("resultValid: true");
       }
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "cancel": {
       if (!firstId) throw new UsageError("tasks cancel needs <taskId> or --task <id>");
       const expectedStateVersion = numberOf(flags, "expected-version");
       if (!expectedStateVersion) throw new UsageError("tasks cancel needs --expected-version <N>");
-      const params = {
+      const params: Record<string, unknown> = {
         taskId: firstId,
         expectedStateVersion,
         idempotencyKey: flags["idempotency-key"] ?? `cli_cancel_${randomUUID()}`,
       };
       if (flags.reason) params.reason = flags.reason;
       if (flags.principal) params.principalId = flags.principal;
-      const result = await rpcCall("dsh.tasks.cancel", params, options);
+      const result = await rpcCall<{
+        taskId: string;
+        status: string;
+        stateVersion: number;
+        notice?: string | null;
+      }>("dsh.tasks.cancel", params, options);
       print(
         flags.json
           ? JSON.stringify(result, null, 2)
           : `task ${result.taskId} · ${result.status} · v${result.stateVersion}${result.notice ? ` (${result.notice})` : ""}`,
       );
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "dispatch": {
       if (!firstId) throw new UsageError("tasks dispatch needs <taskId> or --task <id>");
-      const params = { taskId: firstId };
+      const params: Record<string, unknown> = { taskId: firstId };
       const promptArgs = flags.task ? args : args.slice(1);
       if (promptArgs.length > 0) params.prompt = promptArgs.join(" ");
       if (flags.model) params.model = flags.model;
       if (flags.project) params.projectId = flags.project;
       if (flags.title) params.title = flags.title;
-      const result = await rpcCall("dsh.tasks.dispatch", params, options);
-      const knownSafeMessages = new Set(Object.values(ADAPTER_FAILURE_MESSAGES));
+      const result = await rpcCall<{
+        taskId: string;
+        status: string;
+        stateVersion: number;
+        dispatchFailed?: boolean;
+        error?: string;
+      }>("dsh.tasks.dispatch", params, options);
+      const knownSafeMessages = new Set<string>(Object.values(ADAPTER_FAILURE_MESSAGES));
       const safeError =
         result.dispatchFailed && result.error
           ? knownSafeMessages.has(result.error)
@@ -909,11 +1192,11 @@ async function runTasksCommand(flags, rest, options) {
           ? JSON.stringify(safeResult, null, 2)
           : `task ${safeResult.taskId} · ${safeResult.status} · v${safeResult.stateVersion}${safeResult.dispatchFailed ? ` (failed: ${safeResult.error})` : ""}`,
       );
-      return safeResult.dispatchFailed ? 1 : 0;
+      return safeResult.dispatchFailed ? CLI_EXIT_CODE.failed : CLI_EXIT_CODE.ok;
     }
     case "pump": {
       if (!firstId) throw new UsageError("tasks pump needs <taskId> or --task <id>");
-      const params = { taskId: firstId };
+      const params: Record<string, unknown> = { taskId: firstId };
       const maxSteps = numberOf(flags, "max-steps", { min: 1, max: 1000 });
       if (maxSteps) params.maxSteps = maxSteps;
       const timeout = numberOf(flags, "timeout", { min: 1, max: 3_600_000 });
@@ -927,37 +1210,46 @@ async function runTasksCommand(flags, rest, options) {
           params.cursor = rawCur;
         }
       }
-      const result = await rpcCall("dsh.tasks.pump", params, options);
+      const result = await rpcCall<{
+        taskId: string;
+        status: string;
+        stepsProcessed: number;
+      }>("dsh.tasks.pump", params, options);
       print(
         flags.json
           ? JSON.stringify(result, null, 2)
           : `task ${result.taskId} · ${result.status} · steps=${result.stepsProcessed}`,
       );
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "reconcile": {
       if (!firstId) throw new UsageError("tasks reconcile needs <taskId> or --task <id>");
       if (!flags.observed) throw new UsageError("tasks reconcile needs --observed succeeded|failed|cancelled");
-      const evidence = { observedState: flags.observed };
+      const evidence: Record<string, unknown> = { observedState: flags.observed };
       if (flags.note) evidence.note = flags.note;
       if (flags.result !== undefined) evidence.result = parseJsonFlag(flags.result, "result");
-      const result = await rpcCall("dsh.tasks.reconcile", { taskId: firstId, evidence }, options);
+      const result = await rpcCall<{
+        taskId: string;
+        from: string;
+        status: string;
+        attemptsClosed: number;
+      }>("dsh.tasks.reconcile", { taskId: firstId, evidence }, options);
       print(
         flags.json
           ? JSON.stringify(result, null, 2)
           : `task ${result.taskId} · ${result.from} -> ${result.status} · closed=${result.attemptsClosed}`,
       );
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "resolve": {
       if (!firstId) throw new UsageError("tasks resolve needs <taskId> or --task <id>");
       const expected = numberOf(flags, "expected-version", { min: 1 });
       if (!expected) throw new UsageError("tasks resolve needs --expected-version <stateVersion>");
       const disposition = flags.decision;
-      if (!["accept", "reject", "cancel", "requeue"].includes(disposition)) {
+      if (typeof disposition !== "string" || !["accept", "reject", "cancel", "requeue"].includes(disposition)) {
         throw new UsageError("tasks resolve needs --decision accept|reject|cancel|requeue");
       }
-      const params = {
+      const params: Record<string, unknown> = {
         taskId: firstId,
         expectedStateVersion: expected,
         disposition,
@@ -966,13 +1258,18 @@ async function runTasksCommand(flags, rest, options) {
       if (flags.note) params.note = flags.note;
       if (flags.evidence !== undefined) params.evidenceRef = parseJsonFlag(flags.evidence, "evidence");
       if (flags.principal) params.resolvedBy = flags.principal;
-      const result = await rpcCall("dsh.tasks.resolve", params, options);
+      const result = await rpcCall<{
+        taskId: string;
+        status: string;
+        disposition: string;
+        stateVersion: number;
+      }>("dsh.tasks.resolve", params, options);
       print(
         flags.json
           ? JSON.stringify(result, null, 2)
           : `task ${result.taskId} · ${result.status} · ${result.disposition} · v${result.stateVersion}`,
       );
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "approve": {
       if (!firstId) throw new UsageError("tasks approve needs <taskId> or --task <id>");
@@ -984,72 +1281,98 @@ async function runTasksCommand(flags, rest, options) {
       if (decision !== "allow" && decision !== "deny") {
         throw new UsageError("tasks approve needs --decision allow|deny");
       }
-      const params = { taskId: firstId, attemptId, approvalId, decision };
+      const params: Record<string, unknown> = { taskId: firstId, attemptId, approvalId, decision };
       if (flags.reason) params.reason = flags.reason;
       if (flags["idempotency-key"]) params.idempotencyKey = flags["idempotency-key"];
-      const result = await rpcCall("dsh.tasks.decideApproval", params, options);
+      const result = await rpcCall<{
+        taskId: string;
+        approvalId: string;
+        decision: string;
+        status: string;
+        stateVersion: number;
+      }>("dsh.tasks.decideApproval", params, options);
       print(
         flags.json
           ? JSON.stringify(result, null, 2)
           : `task ${result.taskId} · approval ${result.approvalId} -> ${result.decision} · ${result.status} · v${result.stateVersion}`,
       );
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     default:
       throw new UsageError(`unknown tasks subcommand: ${sub}`);
   }
 }
 
-async function runAgentsCommand(flags, rest, options) {
+async function runAgentsCommand(
+  flags: CliFlags,
+  rest: readonly string[],
+  options: ClientConnectionOptions = {},
+): Promise<CliExitCode> {
   const [sub, ...args] = rest;
   if (!sub) throw new UsageError("agents needs a subcommand: register|list|probe");
 
   switch (sub) {
     case "register": {
-      let payload;
+      let payload: unknown;
       if (flags.file) {
+        if (typeof flags.file !== "string") {
+          throw new UsageError(`cannot read --file ${String(flags.file)}`);
+        }
         try {
           payload = JSON.parse(readFileSync(flags.file, "utf8"));
         } catch (err) {
-          throw new UsageError(`cannot read --file ${flags.file}: ${err?.message ?? err}`);
+          const msg =
+            err && typeof err === "object" && typeof (err as { message?: unknown }).message === "string"
+              ? (err as { message: string }).message
+              : String(err);
+          throw new UsageError(`cannot read --file ${flags.file}: ${msg}`);
         }
       } else if (args[0]) {
         payload = parseJsonFlag(args[0], "card");
       } else {
         throw new UsageError("agents register needs --file <card.json> or inline JSON");
       }
-      const params = payload?.card ? payload : { card: payload };
+      const obj = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : null;
+      const params: Record<string, unknown> = obj?.card ? { ...obj } : { card: payload };
       if (flags.enabled !== undefined) params.enabled = Boolean(flags.enabled);
-      const result = await rpcCall("dsh.agents.register", params, options);
+      const result = await rpcCall<{ agentId: string; probeStatus: string }>("dsh.agents.register", params, options);
       print(
         flags.json
           ? JSON.stringify(result, null, 2)
           : `agent ${result.agentId} · probeStatus=${result.probeStatus}`,
       );
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "list": {
-      const params = {};
+      const params: Record<string, unknown> = {};
       if (flags.kind) params.kind = flags.kind;
       if (flags["verified-only"]) params.verifiedOnly = true;
-      const result = await rpcCall("dsh.agents.list", params, options);
+      const result = await rpcCall<{
+        total?: number;
+        items?: Array<{ agentId: string; kind: string; probeStatus?: string }>;
+      }>("dsh.agents.list", params, options);
       if (flags.json) {
         print(JSON.stringify(result, null, 2));
-        return 0;
+        return CLI_EXIT_CODE.ok;
       }
       for (const item of result.items ?? []) {
         print(`agent ${item.agentId} · ${item.kind} · ${item.probeStatus}`);
       }
       note(`${result.total ?? (result.items ?? []).length} agent(s)`);
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "get": {
       const agentId = flags.agent ?? args[0];
       if (!agentId) throw new UsageError("agents get needs <agentId> or --agent <id>");
-      const result = await rpcCall("dsh.agents.get", { agentId }, options);
+      const result = await rpcCall<{
+        agentId: string;
+        adapterKind: string;
+        probeStatus?: string | null;
+        capabilityRevisions?: Array<{ capability: string; version: string | number; revisionId: string; cancelPolicy: string }>;
+      }>("dsh.agents.get", { agentId }, options);
       if (flags.json) {
         print(JSON.stringify(result, null, 2));
-        return 0;
+        return CLI_EXIT_CODE.ok;
       }
       print(
         `agent ${result.agentId} · ${result.adapterKind} · probeStatus=${result.probeStatus ?? "unknown"} · revisions=${(result.capabilityRevisions ?? []).length}`,
@@ -1057,25 +1380,29 @@ async function runAgentsCommand(flags, rest, options) {
       for (const rev of result.capabilityRevisions ?? []) {
         print(`  ${rev.capability}@${rev.version} · ${rev.revisionId} · cancel=${rev.cancelPolicy}`);
       }
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     case "probe": {
       const agentId = flags.agent ?? args[0];
       if (!agentId) throw new UsageError("agents probe needs <agentId> or --agent <id>");
-      const params = { agentId };
+      const params: Record<string, unknown> = { agentId };
       if (flags.controls) {
         params.controls = String(flags.controls)
           .split(",")
           .map((s) => s.trim())
           .filter(Boolean);
       }
-      const result = await rpcCall("dsh.agents.probe", params, options);
+      const result = await rpcCall<{
+        agentId: string;
+        probeStatus: string;
+        unknown?: unknown[];
+      }>("dsh.agents.probe", params, options);
       print(
         flags.json
           ? JSON.stringify(result, null, 2)
           : `agent ${result.agentId} · ${result.probeStatus} · unknown=${(result.unknown ?? []).length}`,
       );
-      return 0;
+      return CLI_EXIT_CODE.ok;
     }
     default:
       throw new UsageError(`unknown agents subcommand: ${sub}`);
@@ -1091,17 +1418,21 @@ if (IS_MAIN) {
       await flushStdio();
       process.exit(code);
     })
-    .catch(async (error) => {
+    .catch(async (error: unknown) => {
       if (error instanceof UsageError) {
         note(`dsh-rpc: ${error.message}`);
         note("run `dsh-rpc --help` for usage");
         await flushStdio();
-        process.exit(2);
+        process.exit(CLI_EXIT_CODE.usage);
       }
       const { exitCode: code, line } = formatCliError(error);
       note(line);
-      if (error?.data) note(`  ${JSON.stringify(error.data)}`);
-      const hint = mixedVersionHint(error?.message);
+      if (error && typeof error === "object" && "data" in error && (error as { data?: unknown }).data) {
+        note(`  ${JSON.stringify((error as { data?: unknown }).data)}`);
+      }
+      const hint = mixedVersionHint(
+        error && typeof error === "object" && "message" in error ? (error as { message?: unknown }).message : undefined,
+      );
       if (hint) note(hint);
       await flushStdio();
       process.exit(code);
