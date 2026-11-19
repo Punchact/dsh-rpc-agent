@@ -795,3 +795,18 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 **残余边界**（如实记）：插件改不了宿主的端口选择，所以这仍是「报得清楚」而不是「不可能发生」；`EBADPORT` 也不是操作系统错误码，判断它必须看文档，不能按 `E[A-Z]+` 的直觉处理。测试侧另外修了根因：`listen()` 与 `deadPort()` 都跳过名单里的端口，否则「被拒绝的连接」会被当成「没人监听的握手」来测。
 
 **怎么钉住**：`test/client.test.mjs` 的「a blocked port is named instead of left as an undefined code」（`EBADPORT` 命名、消息含 `bad port` 与 `--url`、不出现 `nothing is listening`、`hits === 0` 证明没有重试）；`test/index-wiring.test.mjs` 的「a Host that binds a fetch-blocked port is warned about at startup」；复现脚本可重跑（`node audit-tmp/smoke-090/flake-32001.mjs 300`）。
+
+## 55. 决策 0.9.3-b：只读文本齐全与 `EBADPORT` 下游贯穿
+
+**现象**。两件事合在同一节收口：① 0.9.2 复核二轮指出只读文本仍有三处落差——`formatTaskSummary` 不输出 `degraded[]` / `pending.attention` / `pending.approvals`，`dsh_task_preview` 套用任务摘要打出 `task ? · unknown · unknown`，以及 `dsh_task_list` 与 CLI `tasks get` 非 JSON 文本看不出 `resultValid`；② PR #34 复核指出 `EBADPORT` 的下游还有五处断档——`transportCode` 没加 `codes.length === 0` 前置，`isFetchBlockedPort` 对 `"5060abc"` 会返 true，`withEndpointRetry` 遇到宿主从坏端口重启到好端口的竞态会放弃重试，`dsh-rpc health --wait` 自己调 `fetch` 仍打 `"fetch failed"` 并空等完预算、CLI 退出码没把 `EBADPORT` 归进 `3`，以及 MCP 任务/代理工具在 `callTool` catch 里把 `!Number.isInteger(error?.code)` 的客户端传输错喂进 `sanitizeAdapterFailure` 覆写成 `"request rejected by adapter"`。另 `wait` / `abort` / `cli-mcp-regressions` 三个测试套件也存在裸 `listen(0)` 撞坏端口的风险。
+
+**为什么不能放着**。① 只读调用方不解析 `structuredContent` 或 `--json` 时，不知道任务已被降级、在等谁回答/审批，也不知预览还不是任务；② 诊断只到 `lib/client.mjs` 就停住时，排障入口（`health --wait` 与 MCP 任务工具）仍旧输出不透明的 `"fetch failed"` 或误导性的 `"request rejected by adapter"`。
+
+**怎么改**。
+- 只读文本统一源：`lib/mcp-format.mjs` 导出 `formatTaskDetailLines`、`formatTaskListLine` 与 `formatTaskSummary`，预览单独用 `preview <previewId> · <agentId> · expires ...` 标题；`formatTaskSummary` 正文补齐 `degraded`、`pending.attention`（类型/问题号/提示/选项）与 `pending.approvals`，并在 `meta` 块带 `degraded=N` / `attention=N` / `approvals=N` 保证正文被 `capText` 截断后仍可见；`dsh_task_list` 与 CLI `tasks get` 非 JSON 同步输出 `resultValid`（未校验显式写 `unvalidated`）。
+- `EBADPORT` 收紧与重放边界：`transportCode` 仅在 `codes.length === 0` 时认 `bad port`；`isFetchBlockedPort` 对字符串要求 `/^\d+$/`；`withEndpointRetry` 在 `EBADPORT` 且 `endpoint.json` 已切到新 URL（`second.url !== first.url`）时重放一次，URL 未变则原样抛 `EBADPORT`（不冒充 `"nothing is listening"`）；`index.mjs` 按端口号去重启动告警。
+- 下游出口补齐：`probeHealth` 改走 `transportCode()`，命中 `EBADPORT` 立即跳出并提示换端口或 `--url`；`CONNECTION_FAILURES` 纳入 `EBADPORT`（退出码 `3`，但 CLI 错误文案不打印 `"is it running?"`）；`lib/client.mjs` 为客户端传输异常标 `transport = true`，`bin/dsh-rpc-mcp.mjs` 透传传输错误（保留 `code`、原消息与 `NEXT_BY_CODE.EBADPORT` 提示），只净化执行方/服务端异常；抽共用 `test/helpers/stub-server.mjs` 让 `client` / `wait` / `abort` / `cli-mcp-regressions` 统一跳过 `FETCH_BLOCKED_PORTS`。
+
+**残余边界**（如实记）：插件仍然不能替宿主选端口（由 `@deepseek-ai/dsh-host-webserver` 决定）；Antigravity 适配器直连本地语言服务器 `fetch` 故意维持 `ADAPTER_UNAVAILABLE` 脱敏收敛。
+
+**怎么钉住**：`test/mcp-summary.test.mjs`、`test/mcp-tasks-tools.test.mjs`、`test/cli-tasks.test.mjs`、`test/client.test.mjs`、`test/index-wiring.test.mjs` 与 `test/helpers/stub-server.mjs` 均已补齐确定性回归（含截断保真、预览标题、端口切换重放、按端口去重告警、`health --wait` 快速失败、MCP 传输透传与 `listenSafe` 跳过坏端口桩测）。
