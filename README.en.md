@@ -76,7 +76,7 @@ Repository and package name are both `dsh-rpc-agent`; the commands (`dsh-rpc`, `
 - **Self-describing**: `dsh_capabilities` returns an eight-section snapshot (runtime, permission presets, callable tools, MCP prefixes, sessions, workspaces, plugins), so a planner does not have to guess what this machine offers.
 - **No pretend knowledge**: when an outer client caps tool calls below the bridge budget, the bridge says so and recommends polling in slices instead of letting a long job look like a failure.
 - **Managed external agent tasks (Task centre, `tasksEnabled: false` by default)**: a 15-table SQLite ledger, 11-state machine, and capability cards/read-only probes driving DSH itself, Antigravity, and Codex App Server; see [docs/task-center.md](./docs/task-center.md).
-- **Regression tests guard the sharp edges**: 36 test files (346 cases) + catalog smoke (346/346 pass locally, including the 15 `approvals` cases) + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
+- **Regression tests guard the sharp edges**: 43 test files (375 cases) + catalog smoke (375/375 pass locally, including the 15 `approvals` cases) + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
 
 ## Install and update
 
@@ -156,7 +156,7 @@ Cursor / Codex use the equivalent config form (backslashes in JSON must be escap
 
 On the local-checkout route, replace the path with `<path-to-your-clone>\bin\dsh-rpc-mcp.mjs`. The rest of this document writes `node bin/...`, which means "run from inside the package".
 
-**Eleven tools** are exposed by default (**6** additional task-centre tools — `dsh_tasks_{submit,list,get,cancel}` and `dsh_agents_{list,probe}` — are mounted when `tasksEnabled: true`, **17** total):
+**Eleven tools** are exposed by default (**8** additional task tools — `dsh_task_{submit,list,get,cancel,preview,events,read_artifact,input}` — and **3** agent tools — `dsh_agents_{list,probe,get}` — are mounted when `tasksEnabled: true`, **22** total):
 
 | Tool | Purpose |
 | --- | --- |
@@ -286,16 +286,18 @@ Every method lives under the `dsh.` namespace; the CLI aliases `ping` / `discove
 | `dsh.sessions.cancel` | `sessionId` | `{accepted, sessionId}` |
 | `dsh.sessions.history` | `sessionId, limit?, since?, kinds?, maxChars?` | `{cursor, turn, running, messageCount, records[], truncated?}` |
 | `dsh.capabilities` | `sections?, maxChars?, sessionId?` | `{sections[], text, truncated, missing[]}`, read-only eight-section snapshot |
-| `dsh.tasks.preview` | `principalId, workspaceId?, agentId?, capabilityRevisionId?, input?, ttlMs?` | `{previewId, requestDigest, agentId, expiresAt, …}` |
+| `dsh.tasks.preview` | `principalId, workspaceId?, agentId?, capabilityRevisionId?, input?, ttlMs?` | `{previewId, requestDigest, agentId, candidates[], degraded[], expiresAt, …}`; the revision must belong to that instance and a stale probe is refused |
 | `dsh.tasks.submit` | `idempotencyKey` (required), `previewId?` (binds the parameters and principal it was issued for), `capabilityRevisionId?`, `workspaceId?`, `agentId?`, `input?` | `{taskId, status, phase, stateVersion, …}` |
 | `dsh.tasks.get` / `list` | `taskId` / `status?, workspaceId?, principalId?, limit?, cursor?` | Task details (with `phase` and open `attention`) or paginated list |
+| `dsh.tasks.events` | `taskId, afterSeq?, limit?` | The task's own event stream (`{taskId, events[], nextAfterSeq, hasMore}`; `taskId` + `seq` is the dedupe key) |
 | `dsh.tasks.cancel` | `taskId, expectedStateVersion, idempotencyKey, reason?` | `{taskId, status, stateVersion, notice?}` |
 | `dsh.tasks.dispatch` / `pump` | `taskId, …` / `taskId, maxSteps?, deadlineMs?, cursor?` | Dispatches to an adapter or drives bounded events/inspect pumping |
 | `dsh.tasks.reconcile` | `taskId, evidence: { observedState, note?, result? }` | Settles `needs_reconcile`/`cancel_requested` and closes active attempts |
+| `dsh.tasks.resolve` | `taskId, expectedStateVersion, idempotencyKey, disposition: accept\|reject\|cancel\|requeue, evidenceRef?, note?` | Operator sign-off that settles `review_pending` / `needs_reconcile`; a running task with an open `review` attention (unvalidated result) is promoted to `review_pending` first (`review.promoted`) and then settled (RPC + CLI only, never MCP) |
 | `dsh.tasks.decideApproval` | `taskId, attemptId, approvalId, decision: "allow"\|"deny", reason?` | `{approvalId, decision, status, stateVersion, operationId}` |
 | `dsh.agents.register` / `list` / `probe` | `card` / filters / `agentId, controls?` | Capability-card registration, listing, and read-only control probing |
 
-(**29** JSON-RPC methods total; run `dsh.discover` or `dsh-rpc discover` for full parameter schemas.)
+(**34** JSON-RPC methods total; run `dsh.discover` or `dsh-rpc discover` for full parameter schemas.)
 
 Semantics that are easy to trip over:
 
@@ -435,7 +437,7 @@ Rules worth knowing:
 
 ### Task centre
 
-Asynchronous work delegated to external agents (DSH itself, Antigravity, or Codex App Server) no longer relies on human relay or chat memory: the durable task ledger lives in a local SQLite database (`$DSH_HOME/storages/task-center/tasks.db`), and every executor's controls and weaknesses are inspectable through a **capability card (`capability-card@1`)** and read-only probes rather than treated as a black box. Disabled by default; enabling it exposes CLI, JSON-RPC, and 6 gated MCP tools (operations manual: [docs/task-center.md](./docs/task-center.md); backup and rollback: [docs/backup-restore-rollback.md](./docs/backup-restore-rollback.md)).
+Asynchronous work delegated to external agents (DSH itself, Antigravity, or Codex App Server) no longer relies on human relay or chat memory: the durable task ledger lives in a local SQLite database (`$DSH_HOME/storages/task-center/tasks.db`), and every executor's controls and weaknesses are inspectable through a **capability card (`capability-card@1`)** and read-only probes rather than treated as a black box. Disabled by default; enabling it exposes CLI, JSON-RPC, and 11 gated MCP tools (operations manual: [docs/task-center.md](./docs/task-center.md); backup and rollback: [docs/backup-restore-rollback.md](./docs/backup-restore-rollback.md)).
 
 **Circuit-breaker & configuration switches** (set under `config` in `cordis.patch.yml`):
 
@@ -469,7 +471,7 @@ node bin/dsh-rpc.mjs tasks get <taskId> --json
 **Reading derived `phase` and `attention`**:
 
 `phase` is computed on demand on every read and never persisted:
-- Waiting on a person: `person/delivery` (undelivered input retrying) → `person/approval` (pending approval) → `person/answer` (pending decision/input question) → `person/reconcile` (`needs_reconcile` after lease expiry or unsupported cancel) → `person/review` (awaiting acceptance or schema-invalid output).
+- Waiting on a person: `person/delivery` (undelivered input retrying) → `person/approval` (pending approval) → `person/reconcile` (`needs_reconcile` after lease expiry, an unconfirmed cancel or a broken dispatch; it outranks questions because once the executor's own “stopped” is untrusted, its leftover question is not the operator's to answer) → `person/answer` (pending decision/input question) → `person/review` (awaiting acceptance or schema-invalid output).
 - Waiting on a machine: `machine/queued` (`queued`/`dispatching`) → `machine/working` (active execution).
 - Finished: `done` (`succeeded`/`failed`/`cancelled`).
 - When there are no open `attention` rows, `phase` never claims it is waiting on you.
@@ -730,6 +732,8 @@ Everything the page shows comes from that read-only endpoint; it writes nothing.
 - **The trace has a budget, and structure only at `full`**: `errors` / `summary` / `full` cap at 4 lines 600 chars, 20 lines 1200 chars and 40 lines 8000 chars; anything dropped leaves `… +N more`. Use `trace: "full"` or `dsh_history` for every record.
 - **`dsh_history` calls out an old plugin**: when the bridge talks to a plugin older than 0.8.1, `since` / `kinds` / `max_chars` are silently ignored; the header then switches to a `note:` saying the window was neither filtered nor capped instead of pretending otherwise. Upgrading the plugin removes it.
 - **`maxResultChars` cannot fix an outer 413**: it caps a single turn's prose (20000 chars by default). When the calling agent's own sidecar (for example Codex `codex-auto-review`) is blown up by accumulated context, capping one result will not save it — that has to be handled on the caller side.
+- **`principalId` is a namespace, not an authorization boundary**: the task ledger uses it for partitioning and for `(principalId, idempotencyKey)` idempotency, and checks ownership on `get` / `cancel` when it is passed; `list` / `input` / `readArtifact` / `resolve` never read it. The real boundary is still the loopback token plus the local OS user (see the token-exposure note above). Cross-principal isolation would require making it a mandatory argument checked by every method — that is not implemented.
+- **Only the DSH adapter has real-machine evidence**: the DSH adapter has been exercised end to end against a live host (normal chain, cancel chain, honesty checks); the Antigravity and Codex adapters currently have offline-suite and static-contract evidence only, with no real execution party attached (plan items A07/A14/A18 remain unverified).
 
 ## Troubleshooting
 
@@ -749,14 +753,14 @@ Everything the page shows comes from that read-only endpoint; it writes nothing.
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 36 test files, 346 cases, plus catalog smoke; no running Harness needed
+npm test                       # 43 test files, 375 cases, plus catalog smoke; no running Harness needed
 node test/host.test.mjs        # 1 case: real WebServer integration (needs npm ci first)
 node test/e2e.mjs              # 14 cases: end to end against a real Harness (--cwd takes an absolute path only)
 node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a real Harness
 ```
 
 <details>
-<summary>What each of the thirty-six test files covers</summary>
+<summary>What each of the forty-two test files covers</summary>
 
 | Suite | Cases | Covers |
 | --- | --- | --- |
@@ -771,9 +775,15 @@ node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a 
 | `tasks-state` | 5 | 11-state transition table, illegal transitions, optimistic locks, terminal append-only events |
 | `tasks-engine` | 8 | Idempotency keys, cancel/complete races, schema-validation gate, derived phase precedence, restart durability |
 | `tasks-degraded` | 4 | Degraded permission: controls the card marks `unsupported` (`start`/`steer`/`cancel`/`inspect`/`events`/`approval`) map to a readable consequence; task detail/list carry `degraded[]` |
+| `tasks-breaker` | 2 | With `tasksEnabled=false` the RPC family answers `-32601` and `discover` stops advertising it; enabled, the methods are reachable |
 | `agents-card` | 5 | `capability-card@1` normalization, empty `limitations` rejection, `verified` merging |
+| `agents-capability-revisions` | 5 | one immutable revision per declared capability at registration: parsing, `required` for writes, idempotent re-register, new revision when the card changes |
 | `agents-probe` | 1 | Read-only probe timeout/throw isolation and `unknown` recording |
 | `tasks-preview` | 3 | One-shot preview consumption, digest match, TTL expiry, principal isolation, and `degraded[]` from the capability card shape |
+| `tasks-events-and-preview` | 4 | task event cursor, revision ownership, stale probe, candidate exclusion reasons |
+| `tasks-input` | 3 | input delivery: idempotency key, payload conflict, question ownership, terminal and stale-attempt refusals |
+| `tasks-artifact` | 3 | artifact claims in a report: path/size/hash checks, refusals surfaced not swallowed, windowed reads with base64 fallback |
+| `agents-get` | 2 | one executor's card and its published capability revisions (blank id and missing agent) |
 | `tasks-reconcile` | 4 | `needs_reconcile` settlement, closing lingering side-effect attempts, requeue unlock |
 | `adapters-base` | 4 | Seven-operation adapter contract, six-state report validation, failure sanitising and the curated reason list |
 | `adapters-redact` | 5 | Credential-shaped redaction (Bearer/Basic/Cookie/userinfo/PAT/AK), cookie pairs masked without breaking JSON, truncation, depth limit, and token budgets left intact |
@@ -783,7 +793,7 @@ node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a 
 | `methods-dsh-ops` | 2 | `createDshAdapterOps` error containment, auto-wiring, `registerAgent`, `decideApproval` |
 | `tasks-dispatch` | 10 | `startTask`/`pump`/`drainEffects`, lease reclamation, atomic `maxConcurrent` gate, failure sanitising |
 | `config-breakers` | 3 | Five circuit-breaker defaults, valid bounds, `ConfigError` rejections |
-| `index-wiring` | 2 | Off leaves DB untouched, on initializes/seeds, external adapter init degradation |
+| `index-wiring` | 3 | Off leaves DB untouched, on initializes/seeds, external adapter init degradation |
 | `mcp-tasks-tools` | 6 | 6 gated task MCP tools visibility, disabled rejections, `reconcile`/`decideApproval` exclusion, argument validation and prototype-key refusal |
 | `cli-tasks` | 5 | `tasks` / `agents` flag parsing, `UsageError` (exit 2), JSON-RPC calls, version-skew hint |
 | `cli-agents-approve` | 3 | `tasks approve` flag checks, `dsh.tasks.decideApproval`, and `agents` CLI commands |
@@ -799,7 +809,7 @@ node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a 
 
 </details>
 
-`npm test` runs these thirty-six test files plus the catalog smoke in a fixed order; `npm run test:host` runs the real-WebServer integration test; `npm run test:e2e` / `npm run test:edge` need a live Harness.
+`npm test` runs these forty-two test files plus the catalog smoke in a fixed order; `npm run test:host` runs the real-WebServer integration test; `npm run test:e2e` / `npm run test:edge` need a live Harness.
 
 > [!TIP]
 > **If `node --test` hits `spawn EPERM` in a restricted sandbox**: run individual files via `node <file>` or pass `node --test --test-isolation=none <file>`.
@@ -811,7 +821,7 @@ A few worth calling out:
 - **Edge** probes the protocol layer: batches, notifications, id shapes, auth headers, oversized bodies (a genuine 413, not a dropped connection), parameter-injection defences, timeout clamping, concurrent asks, `limit` semantics.
 - **Port drift** (manual): point `endpoint.json` at a dead port and run `dsh-rpc ping`; expect exit code 3 and a readable error mentioning `nothing is listening`, `pid` and `health --wait`.
 
-Local verification (2026-11-19, 0.9.0, real repository): all 36 test files in the `npm test` chain pass (**346/346** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.mjs` (`methods: 29` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`). Formatting (UTF-8 without BOM, LF) is a review convention here, not an automated gate.
+Local verification (2026-11-19, 0.9.0, real repository): all 43 test files in the `npm test` chain pass (**375/375** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.mjs` (`methods: 34` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`). Formatting (UTF-8 without BOM, LF) is a review convention here, not an automated gate.
 
 ## License
 

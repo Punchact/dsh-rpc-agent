@@ -55,7 +55,7 @@ test("MCP hides task tools when tasksEnabled=false and refuses direct calls with
         assert.equal(names.includes(taskTool.name), false, `${taskTool.name} must be hidden when disabled`);
       }
 
-      const callRes = await callTool("dsh_tasks_submit", { workspace_id: "local" });
+      const callRes = await callTool("dsh_task_submit", { workspace_id: "local" });
       assert.equal(callRes.isError, true);
       assert.match(callRes.content[0].text, /task centre is disabled/i);
       assert.doesNotMatch(callRes.content[0].text, /unknown tool/i);
@@ -93,18 +93,23 @@ test("MCP exposes task tools when tasksEnabled=true, never exposes reconcile/dec
       const tools = await listTools();
       const names = tools.map((t) => t.name);
       for (const want of [
-        "dsh_tasks_submit",
-        "dsh_tasks_list",
-        "dsh_tasks_get",
-        "dsh_tasks_cancel",
+        "dsh_task_submit",
+        "dsh_task_list",
+        "dsh_task_get",
+        "dsh_task_cancel",
+        "dsh_task_preview",
+        "dsh_task_events",
+        "dsh_task_read_artifact",
+        "dsh_task_input",
         "dsh_agents_list",
         "dsh_agents_probe",
+        "dsh_agents_get",
       ]) {
         assert.ok(names.includes(want), `missing ${want}`);
       }
       assert.equal(names.some((n) => /reconcile|decideApproval|decide_approval/i.test(n)), false);
 
-      const res = await callTool("dsh_tasks_submit", {
+      const res = await callTool("dsh_task_submit", {
         workspace_id: "local",
         agent_id: "ag-1",
         capability_revision_id: "cap-1",
@@ -127,7 +132,7 @@ test("MCP falls back to probing dsh.tasks.list when dsh.discover omits tasksEnab
     },
     async () => {
       const tools = await listTools();
-      assert.equal(tools.some((t) => t.name === "dsh_tasks_submit"), false);
+      assert.equal(tools.some((t) => t.name === "dsh_task_submit"), false);
     },
   );
 });
@@ -154,7 +159,7 @@ test("MCP validates task/session inputs upfront and sanitizes adapter errors", a
     },
     async (calls) => {
       const beforeCount = calls.length;
-      const badArrayInput = await callTool("dsh_tasks_submit", {
+      const badArrayInput = await callTool("dsh_task_submit", {
         workspace_id: "local",
         agent_id: "ag-1",
         capability_revision_id: "cap-1",
@@ -162,7 +167,7 @@ test("MCP validates task/session inputs upfront and sanitizes adapter errors", a
       });
       assert.equal(badArrayInput.isError, true);
 
-      const badNullInput = await callTool("dsh_tasks_submit", {
+      const badNullInput = await callTool("dsh_task_submit", {
         workspace_id: "local",
         agent_id: "ag-1",
         capability_revision_id: "cap-1",
@@ -170,12 +175,12 @@ test("MCP validates task/session inputs upfront and sanitizes adapter errors", a
       });
       assert.equal(badNullInput.isError, true);
 
-      const badLimitLow = await callTool("dsh_tasks_list", { limit: 0 });
+      const badLimitLow = await callTool("dsh_task_list", { limit: 0 });
       assert.equal(badLimitLow.isError, true);
-      const badLimitHigh = await callTool("dsh_tasks_list", { limit: 201 });
+      const badLimitHigh = await callTool("dsh_task_list", { limit: 201 });
       assert.equal(badLimitHigh.isError, true);
 
-      const badTaskId = await callTool("dsh_tasks_get", { task_id: "   " });
+      const badTaskId = await callTool("dsh_task_get", { task_id: "   " });
       assert.equal(badTaskId.isError, true);
 
       const badSessionId = await callTool("dsh_ask", { prompt: "hi", session_id: "  " });
@@ -194,14 +199,14 @@ test("MCP validates task/session inputs upfront and sanitizes adapter errors", a
 
       // W7 #6: generic schema validation rejects unknown keys, string limit, array for string field
       const beforeW7 = calls.length;
-      const unknownField = await callTool("dsh_tasks_submit", {
+      const unknownField = await callTool("dsh_task_submit", {
         workspace_id: "local",
         unknown_extra: 1,
       });
       assert.equal(unknownField.isError, true);
       assert.match(unknownField.content[0].text, /invalid arguments: unknown_extra/);
 
-      const stringLimit = await callTool("dsh_tasks_list", { limit: "10" });
+      const stringLimit = await callTool("dsh_task_list", { limit: "10" });
       assert.equal(stringLimit.isError, true);
       assert.match(stringLimit.content[0].text, /invalid arguments: limit/);
 
@@ -247,7 +252,7 @@ test("MCP tells a 0.8.x plugin apart from a disabled 0.9.0 one instead of sugges
         );
       }
 
-      const res = await callTool("dsh_tasks_list", {});
+      const res = await callTool("dsh_task_list", {});
       assert.equal(res.isError, true);
       const body = res.content.map((parts) => parts.text).join("\n");
       assert.match(body, /does not implement the task centre/i);

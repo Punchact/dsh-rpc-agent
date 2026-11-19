@@ -27,6 +27,65 @@ async function setupEngine(dbPath = ":memory:") {
   return { store, engine };
 }
 
+test("a stop nobody confirmed is reconcile-due even while the dispatch lease is open", () => {
+  // 0.9.0 live (acceptance run 10): `needs_reconcile` after `cancel.unconfirmed` still had a live
+  // dispatch lease, and the phase read `machine/working` — the operator was told a machine was
+  // working while nobody could vouch for the stop. The signal outranks the lease.
+  const now = Date.parse("2026-11-18T12:00:00Z");
+  const phase = derivePhase(
+    { status: "needs_reconcile", leaseExpiresAt: "2026-11-18T12:05:00Z" },
+    [],
+    { type: "cancel.unconfirmed" },
+    { nowMs: now },
+  );
+  assert.equal(phase.phase, "person/reconcile", "an unconfirmed stop must not read as an active machine");
+  assert.equal(phase.label, "Needs reconciliation");
+});
+
+test("two ready reports for one task ask one review question", async () => {
+  const { store, engine } = await setupEngine();
+  try {
+    const t = await engine.submit({
+      idempotencyKey: "dup-review-1",
+      capabilityRevisionId: "rev-review-1",
+      workspaceId: "ws-lab",
+      agentId: "ag-cancel-ok",
+    });
+    const att = await engine.recordAttemptStart({ taskId: t.taskId, expectedStateVersion: 1 });
+    const report = { state: "ready", result: { raw: "no schema" }, resultValid: false };
+
+    const first = await applyReport(store, {
+      taskId: t.taskId,
+      attemptId: att.attemptId,
+      adapterEventId: "ev-ready-dup-a",
+      report,
+    });
+    const second = await applyReport(store, {
+      taskId: t.taskId,
+      attemptId: att.attemptId,
+      adapterEventId: "ev-ready-dup-b",
+      report,
+    });
+    assert.equal(first.reportInvalid, true);
+    assert.equal(second.reportInvalid, true);
+    assert.equal(second.questionId, first.questionId, "the same problem must reuse the open question");
+
+    const detail = await engine.get({ taskId: t.taskId });
+    assert.equal(detail.status, "running");
+    assert.equal(detail.pending.attention.length, 1, "one problem, one question");
+    assert.equal(detail.pending.attention[0].kind, "review");
+
+    const events = await engine.events({ taskId: t.taskId, afterSeq: 0 });
+    assert.equal(
+      events.events.filter((evt) => evt.type === "report.invalid").length,
+      2,
+      "both reports stay on the record even though the question is reused",
+    );
+  } finally {
+    store.close();
+  }
+});
+
 test("submit enforces per-(principalId, idempotencyKey) idempotency and detects payload conflict", async () => {
   const { store, engine } = await setupEngine();
   try {
@@ -294,13 +353,26 @@ test("derivePhase covers all §5.4 rules and enforces top-to-bottom precedence",
     "person/approval",
   );
 
-  // 3. person/answer for open decision or input
+  // 3. person/reconcile outranks leftover questions once the stop is untrusted (0.9.0 live:
+  //    `needs_reconcile` + open `input` attention + lastEvent `cancel.unconfirmed` reported
+  //    `person/answer`, hiding the reconcile duty).
+  assert.equal(
+    derivePhase(
+      { status: "needs_reconcile" },
+      [{ kind: "input", status: "open" }],
+      { type: "cancel.unconfirmed" },
+      { nowMs: now },
+    ).phase,
+    "person/reconcile",
+  );
+
+  // 4. person/answer for open decision or input (when nothing reconcile-due is pending)
   assert.equal(
     derivePhase({ status: "waiting_input" }, [{ kind: "decision", status: "open" }], null, { nowMs: now }).phase,
     "person/answer",
   );
 
-  // 4. person/reconcile only when lease expired (or cancel.unsupported); active lease stays machine/working
+  // 5. person/reconcile only when lease expired (or a cancel/dispatch signal); active lease stays machine/working
   assert.equal(
     derivePhase(
       { status: "needs_reconcile", leaseExpiresAt: "2026-11-18T12:05:00Z" },
@@ -320,18 +392,18 @@ test("derivePhase covers all §5.4 rules and enforces top-to-bottom precedence",
     "person/reconcile",
   );
 
-  // 5. person/review
+  // 6. person/review
   assert.equal(derivePhase({ status: "review_pending" }, [], null, { nowMs: now }).phase, "person/review");
 
-  // 6. machine/queued
+  // 7. machine/queued
   assert.equal(derivePhase({ status: "queued" }, [], null, { nowMs: now }).phase, "machine/queued");
   assert.equal(derivePhase({ status: "dispatching" }, [], null, { nowMs: now }).phase, "machine/queued");
 
-  // 7. machine/working (also when waiting_input has no open attention: never falsely displays person/*)
+  // 8. machine/working (also when waiting_input has no open attention: never falsely displays person/*)
   assert.equal(derivePhase({ status: "running" }, [], null, { nowMs: now }).phase, "machine/working");
   assert.equal(derivePhase({ status: "waiting_input" }, [], null, { nowMs: now }).phase, "machine/working");
 
-  // 8. done
+  // 9. done
   assert.equal(derivePhase({ status: "succeeded" }, [], null, { nowMs: now }).phase, "done");
   assert.equal(derivePhase({ status: "failed" }, [], null, { nowMs: now }).phase, "done");
   assert.equal(derivePhase({ status: "cancelled" }, [], null, { nowMs: now }).phase, "done");
@@ -398,9 +470,12 @@ test("reopening the same SQLite file preserves task state, state_version, and mo
 test("RPC dispatcher wires dsh.tasks.submit/get/list/cancel and updates METHOD_CATALOG", async () => {
   const { store, engine } = await setupEngine();
   try {
+    // The breaker is on by default, and a disabled task centre hides its own
+    // methods — so a test of the wiring has to enable it, exactly like a real
+    // deployment would.
     const methods = createMethods(
       { sessionController: {}, webServer: { getOrigin: () => "http://127.0.0.1:0" }, taskStore: store, taskEngine: engine },
-      resolveConfig({}),
+      resolveConfig({ tasksEnabled: true }),
       { get: () => undefined },
       {},
     );
@@ -486,4 +561,95 @@ test("withdrawing a queued task that was never dispatched is final immediately (
   } finally {
     store.close();
   }
+});
+
+test("resolve adjudicates an unvalidated ready result through review.promoted", async () => {
+  const { store, engine } = await setupEngine();
+  try {
+    const t = await engine.submit({
+      idempotencyKey: "adjudicate-1",
+      capabilityRevisionId: "rev-review-1",
+      workspaceId: "ws-lab",
+      agentId: "ag-cancel-ok",
+    });
+    const att = await engine.recordAttemptStart({ taskId: t.taskId, expectedStateVersion: 1 });
+    const report = await applyReport(store, {
+      taskId: t.taskId,
+      attemptId: att.attemptId,
+      adapterEventId: "ev-unschema",
+      report: { state: "ready", result: { raw: "no schema" }, resultValid: false },
+    });
+    assert.equal(report.reportInvalid, true);
+
+    const before = await engine.get({ taskId: t.taskId });
+    assert.equal(before.status, "running");
+    assert.equal(before.pending.attention.length, 1);
+    assert.equal(before.pending.attention[0].kind, "review");
+
+    // The open review attention is the operator's licence to adjudicate: the resolve
+    // must promote to review_pending first, then apply the disposition.
+    const resolved = await engine.resolve({
+      taskId: t.taskId,
+      expectedStateVersion: before.stateVersion,
+      idempotencyKey: "adjudicate-accept-1",
+      disposition: "accept",
+      note: "operator read the raw reply and accepted it",
+    });
+    assert.equal(resolved.status, "succeeded");
+    assert.equal(resolved.resultValid, false);
+    assert.equal(resolved.pending.attention.length, 0);
+
+    const evts = await engine.events({ taskId: t.taskId, afterSeq: 0 });
+    const types = evts.events.map((e) => e.type);
+    const promotedAt = types.indexOf("review.promoted");
+    const resolvedAt = types.indexOf("task.resolved");
+    assert.ok(promotedAt >= 0, "review.promoted must be recorded");
+    assert.ok(resolvedAt > promotedAt, "the promotion must precede the resolution");
+    const promoted = evts.events[promotedAt];
+    assert.equal(promoted.payload.promotedFrom, "running");
+    assert.equal(promoted.payload.resultValid, false);
+    assert.equal(promoted.payload.questionId, before.pending.attention[0].questionId);
+  } finally {
+    store.close();
+  }
+});
+
+test("resolve keeps refusing a running task that has no open review attention", async () => {
+  const { store, engine } = await setupEngine();
+  try {
+    const t = await engine.submit({
+      idempotencyKey: "adjudicate-2",
+      capabilityRevisionId: "rev-review-1",
+      workspaceId: "ws-lab",
+      agentId: "ag-cancel-ok",
+    });
+    const att = await engine.recordAttemptStart({ taskId: t.taskId, expectedStateVersion: 1 });
+    await assert.rejects(
+      () =>
+        engine.resolve({
+          taskId: t.taskId,
+          expectedStateVersion: att.stateVersion,
+          idempotencyKey: "adjudicate-accept-2",
+          disposition: "accept",
+        }),
+      /cannot be resolved/,
+    );
+    const detail = await engine.get({ taskId: t.taskId });
+    assert.equal(detail.status, "running");
+  } finally {
+    store.close();
+  }
+});
+
+test("needs_reconcile after an unconfirmed stop reports person/reconcile", () => {
+  const now = Date.parse("2026-11-19T12:00:00Z");
+  for (const type of ["cancel.unconfirmed", "cancel.failed", "dispatch.orphaned"]) {
+    assert.equal(
+      derivePhase({ status: "needs_reconcile" }, [], { type }, { nowMs: now }).phase,
+      "person/reconcile",
+      `${type} must route to person/reconcile`,
+    );
+  }
+  // A needs_reconcile with no reconcile signal at all keeps waiting on the machine rung.
+  assert.equal(derivePhase({ status: "needs_reconcile" }, [], null, { nowMs: now }).phase, "machine/working");
 });

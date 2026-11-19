@@ -96,6 +96,7 @@ test("hashCard is deterministic regardless of object key order", () => {
   const c2 = {
     verified: c1.verified,
     limitations: [...c1.limitations],
+    capabilities: [...c1.capabilities],
     limits: { maxInputChars: 50_000, maxConcurrent: 1, maxRuntimeMs: 600_000 },
     controls: {
       events: c1.controls.events,

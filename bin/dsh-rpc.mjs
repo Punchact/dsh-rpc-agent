@@ -38,7 +38,7 @@ COMMANDS
   wait --session ID         wait for the turn already running on a session
   cancel --session ID       cancel the in-flight turn
   history --session ID      show the recent event window
-  tasks <subcommand>        manage task-center tasks (preview|submit|list|get|cancel|dispatch|pump|reconcile|approve)
+  tasks <subcommand>        manage task-center tasks (preview|submit|list|get|cancel|dispatch|pump|reconcile|approve|resolve)
   agents <subcommand>       manage agent capability cards (register|list|probe)
   call <method> [json]      raw JSON-RPC call (json params optional)
   env                       print the endpoint and token as shell exports
@@ -684,7 +684,7 @@ function parseJsonFlag(raw, name) {
 
 async function runTasksCommand(flags, rest, options) {
   const [sub, ...args] = rest;
-  if (!sub) throw new UsageError("tasks needs a subcommand: preview|submit|list|get|cancel|dispatch|pump|reconcile");
+  if (!sub) throw new UsageError("tasks needs a subcommand: preview|submit|list|get|cancel|dispatch|pump|reconcile|approve|resolve");
   const firstId = flags.task ?? args[0];
   if (flags["after-seq"] !== undefined) {
     cursorOf(flags, "after-seq");
@@ -747,6 +747,69 @@ async function runTasksCommand(flags, rest, options) {
         print(`task ${item.taskId} · ${item.status} · ${item.phase ?? "?"}  v${item.stateVersion}`);
       }
       note(`${(result.items ?? []).length} task(s)${result.hasMore ? ` (next cursor: ${result.nextCursor})` : ""}`);
+      return 0;
+    }
+    case "events": {
+      if (!firstId) throw new UsageError("tasks events needs <taskId> or --task <id>");
+      const params = { taskId: firstId };
+      if (flags.after) params.afterSeq = numberOf(flags, "after", { min: 0, max: Number.MAX_SAFE_INTEGER });
+      const limit = numberOf(flags, "limit", { min: 1, max: 500 });
+      if (limit) params.limit = limit;
+      const result = await rpcCall("dsh.tasks.events", params, options);
+      if (flags.json) {
+        print(JSON.stringify(result, null, 2));
+        return 0;
+      }
+      for (const event of result.events ?? []) {
+        const attempt = event.attemptId ? ` · ${event.attemptId}` : "";
+        print(`#${event.seq} ${event.type}${attempt} · ${event.at}`);
+      }
+      note(
+        `${(result.events ?? []).length} event(s)${result.hasMore ? ` (next afterSeq: ${result.nextAfterSeq})` : ""}`,
+      );
+      return 0;
+    }
+    case "input": {
+      if (!firstId) throw new UsageError("tasks input needs <taskId> or --task <id>");
+      const text = flags.text !== undefined ? String(flags.text) : args.slice(1).join(" ");
+      if (!text.trim()) throw new UsageError("tasks input needs --text <answer> (or the answer as trailing text)");
+      const params = {
+        taskId: firstId,
+        text: text.trim(),
+        idempotencyKey: flags["idempotency-key"] ?? `cli_input_${randomUUID()}`,
+      };
+      if (flags.attempt) params.attemptId = String(flags.attempt);
+      if (flags.question) params.questionId = String(flags.question);
+      if (flags.principal) params.principalId = flags.principal;
+      const result = await rpcCall("dsh.tasks.input", params);
+      print(
+        flags.json
+          ? JSON.stringify(result, null, 2)
+          : `task ${result.taskId} · input ${result.inputId} · ${result.deliveryStatus}${result.deduplicated ? " (deduplicated)" : ""}`,
+      );
+      return 0;
+    }
+    case "artifact": {
+      if (!firstId) throw new UsageError("tasks artifact needs <taskId> <artifactId>");
+      const artifactId = args[1];
+      if (!artifactId) throw new UsageError("tasks artifact needs <taskId> <artifactId>");
+      const params = { taskId: firstId, artifactId };
+      const offset = numberOf(flags, "offset", { min: 0, max: Number.MAX_SAFE_INTEGER });
+      if (offset) params.offset = offset;
+      const length = numberOf(flags, "length", { min: 1, max: 1000000 });
+      if (length) params.length = length;
+      const result = await rpcCall("dsh.tasks.readArtifact", params);
+      if (flags.json) {
+        print(JSON.stringify(result, null, 2));
+        return 0;
+      }
+      print(
+        `artifact ${result.artifactId} · ${result.kind} · ${result.sizeBytes} bytes · ${result.encoding}`,
+      );
+      print(result.content ?? "");
+      note(
+        `offset=${result.offset} bytesRead=${result.bytesRead}${result.truncated ? " (truncated; raise --length or use --offset)" : ""}`,
+      );
       return 0;
     }
     case "get": {
@@ -843,6 +906,31 @@ async function runTasksCommand(flags, rest, options) {
       );
       return 0;
     }
+    case "resolve": {
+      if (!firstId) throw new UsageError("tasks resolve needs <taskId> or --task <id>");
+      const expected = numberOf(flags, "expected-version", { min: 1 });
+      if (!expected) throw new UsageError("tasks resolve needs --expected-version <stateVersion>");
+      const disposition = flags.decision;
+      if (!["accept", "reject", "cancel", "requeue"].includes(disposition)) {
+        throw new UsageError("tasks resolve needs --decision accept|reject|cancel|requeue");
+      }
+      const params = {
+        taskId: firstId,
+        expectedStateVersion: expected,
+        disposition,
+        idempotencyKey: flags["idempotency-key"] ?? `cli_resolve_${randomUUID()}`,
+      };
+      if (flags.note) params.note = flags.note;
+      if (flags.evidence !== undefined) params.evidenceRef = parseJsonFlag(flags.evidence, "evidence");
+      if (flags.principal) params.resolvedBy = flags.principal;
+      const result = await rpcCall("dsh.tasks.resolve", params, options);
+      print(
+        flags.json
+          ? JSON.stringify(result, null, 2)
+          : `task ${result.taskId} · ${result.status} · ${result.disposition} · v${result.stateVersion}`,
+      );
+      return 0;
+    }
     case "approve": {
       if (!firstId) throw new UsageError("tasks approve needs <taskId> or --task <id>");
       const attemptId = flags.attempt;
@@ -910,6 +998,22 @@ async function runAgentsCommand(flags, rest, options) {
         print(`agent ${item.agentId} · ${item.kind} · ${item.probeStatus}`);
       }
       note(`${result.total ?? (result.items ?? []).length} agent(s)`);
+      return 0;
+    }
+    case "get": {
+      const agentId = flags.agent ?? args[0];
+      if (!agentId) throw new UsageError("agents get needs <agentId> or --agent <id>");
+      const result = await rpcCall("dsh.agents.get", { agentId }, options);
+      if (flags.json) {
+        print(JSON.stringify(result, null, 2));
+        return 0;
+      }
+      print(
+        `agent ${result.agentId} · ${result.adapterKind} · probeStatus=${result.probeStatus ?? "unknown"} · revisions=${(result.capabilityRevisions ?? []).length}`,
+      );
+      for (const rev of result.capabilityRevisions ?? []) {
+        print(`  ${rev.capability}@${rev.version} · ${rev.revisionId} · cancel=${rev.cancelPolicy}`);
+      }
       return 0;
     }
     case "probe": {

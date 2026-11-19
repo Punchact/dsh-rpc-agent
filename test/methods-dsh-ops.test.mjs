@@ -180,7 +180,7 @@ test("createMethods auto-wires dsh adapter when tasksEnabled=true and validates 
     const reg = await methods.registerAgent({
       adapterKind: "dsh",
       projectId: "proj_alpha",
-      card: validCard("ag_dsh", "dsh"),
+      card: { ...validCard("ag_dsh", "dsh"), capabilities: [{ capabilityId: "dsh.test", version: 1 }] },
     });
     assert.equal(reg.agentId, "ag_dsh");
     assert.equal(reg.projectId, "proj_alpha");
@@ -188,7 +188,7 @@ test("createMethods auto-wires dsh adapter when tasksEnabled=true and validates 
     const preview = await createPreview(store, {
       principalId: "local-operator",
       requestDigest: "dig_m_1",
-      capabilityRevisionId: "cap_1",
+      capabilityRevisionId: reg.capabilityRevisions[0].revisionId,
       workspaceId: "local",
       agentId: "ag_dsh",
     });
@@ -196,7 +196,7 @@ test("createMethods auto-wires dsh adapter when tasksEnabled=true and validates 
       previewId: preview.previewId,
       idempotencyKey: "idem_m_1",
       principalId: "local-operator",
-      capabilityRevisionId: "cap_1",
+      capabilityRevisionId: reg.capabilityRevisions[0].revisionId,
       workspaceId: "local",
       agentId: "ag_dsh",
       input: { prompt: "run dsh baseline" },

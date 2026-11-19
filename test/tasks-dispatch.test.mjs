@@ -305,6 +305,7 @@ test("startTask keeps the runtime locator when the ledger refuses the attempt", 
 
 test("RPC wiring exposes dsh.tasks.dispatch/pump and config validates tasksAdapters and tasksDispatchMaxSteps", async () => {
   const cfg = resolveConfig({
+    tasksEnabled: true,
     tasksAdapters: { antigravity: { enabled: true, projectId: "p1" } },
     tasksDispatchMaxSteps: 25,
   });

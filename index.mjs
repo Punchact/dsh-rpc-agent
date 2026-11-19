@@ -31,7 +31,7 @@ import { PLUGIN_NAME, PLUGIN_VERSION } from "./lib/version.mjs";
 export const name = "dsh-rpc";
 export const inject = ["webServer", "sessionController"];
 
-export function apply(ctx, input = {}) {
+export async function apply(ctx, input = {}) {
   const log = scopedLogger(ctx);
   const config = resolveConfig(input);
 
@@ -81,25 +81,55 @@ export function apply(ctx, input = {}) {
   let taskDispatcher = null;
   let adapters = null;
 
+  // What the task centre actually did at startup. ping() reports this verbatim:
+  // a breaker that is on but whose store never opened has to be visible, not
+  // inferred from an empty list.
+  const taskCentre = {
+    enabled: config.tasksEnabled === true,
+    mode: "off",
+    dbPath: null,
+    ready: false,
+    seedError: null,
+    startError: null,
+  };
+
   if (config.tasksEnabled) {
     try {
       const dbPath = config.tasksDbPath || join(dshHome(), "storages", "task-center", "tasks.db");
       taskStore = openStore({ path: dbPath });
+      taskCentre.mode = "file";
+      taskCentre.dbPath = dbPath;
 
       // A DSH install has one human operator; seed baseline identity + local workspace
-      // so preview/submit work immediately without a separate onboarding step.
-      seedBaselineEntities(taskStore, {
-        principal: { principalId: "local-operator", kind: "operator" },
-        workspace: { workspaceId: "local", rootPath: config.defaultCwd || process.cwd() },
-      }).catch((err) => {
-        ctx.logger?.warn?.(`[dsh-rpc] task bootstrap seeding failed: ${err?.message ?? String(err)}`);
-      });
+      // so preview/submit work immediately without a separate onboarding step. This is
+      // awaited: a failed seed must be reported by ping(), not left as a background
+      // rejection that turns every submit into "principal not found".
+      try {
+        await seedBaselineEntities(taskStore, {
+          principal: { principalId: "local-operator", kind: "operator" },
+          workspace: { workspaceId: "local", rootPath: config.defaultCwd || process.cwd() },
+        });
+      } catch (err) {
+        taskCentre.seedError = err?.message ?? String(err);
+        ctx.logger?.warn?.(`[dsh-rpc] task bootstrap seeding failed: ${taskCentre.seedError}`);
+      }
 
-      const factories = ctx?.taskAdapterFactories ??
-        ctx?.get?.("taskAdapterFactories") ?? {
+      // ctx.get() is strict in the Host: asking for a service nobody provides
+      // throws, which used to abort the whole task-centre startup and leave the
+      // plugin on a silent in-memory store. Treat a missing service as "no
+      // injection" instead of a fatal error.
+      let factories = null;
+      try {
+        factories = ctx?.taskAdapterFactories ?? ctx?.get?.("taskAdapterFactories") ?? null;
+      } catch {
+        factories = null;
+      }
+      if (!factories || typeof factories !== "object") {
+        factories = {
           antigravity: createAntigravityAdapter,
           codex: createCodexAdapter,
         };
+      }
       adapters = {};
       const extKind = config.tasksExternalAdapter;
       const extCfg = extKind !== "none" ? config.tasksAdapters?.[extKind] : null;
@@ -139,6 +169,8 @@ export function apply(ctx, input = {}) {
         debugRawAdapterErrors: config.tasksAdapterDebugDetail === true,
       });
 
+      taskCentre.ready = true;
+
       const drainTimer = setInterval(() => {
         taskDispatcher.drainEffects({ limit: 50 }).catch(() => {});
       }, 5_000);
@@ -163,7 +195,10 @@ export function apply(ctx, input = {}) {
         ctx.on("dispose", cleanupTasks);
       }
     } catch (err) {
-      log.warn?.(`[dsh-rpc] task center disabled due to startup error: ${err?.message ?? String(err)}`);
+      taskCentre.mode = "failed";
+      taskCentre.ready = false;
+      taskCentre.startError = err?.message ?? String(err);
+      log.warn?.(`[dsh-rpc] task center disabled due to startup error: ${taskCentre.startError}`);
       try {
         taskStore?.close?.();
       } catch {
@@ -185,6 +220,7 @@ export function apply(ctx, input = {}) {
       taskEngine,
       taskDispatcher,
       adapters,
+      taskCentre,
     },
     config,
     ctx,

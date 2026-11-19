@@ -186,7 +186,7 @@ Host 抛 `RemoteError(code, message, details)`（`isDSHRemoteError === true`）�
 
 以上数字均为 2026-11-05 在本机实跑，命令见 README §10。
 
-> **现行口径（2026-11-19，0.9.0）**：本表是 2026-11-05 的历史快照，不改写。当前的数量以 README「开发与验证」为准——`npm test` 固定顺序跑 36 个 `*.test.mjs` 共 346 例，外加 `catalog.smoke.mjs`（29 个 RPC 方法）。表中三行随版本长大：`methods` 41 → 85 例，`client` 6 → 8 例；`edge` 仍是 24 项，但**本机 23/24**——第 21 项「create without a cwd reports the directory the Host attached」要求宿主替无 `cwd` 的请求补上工作目录，本机 0.8.1 宿主返回 `null`，属既有环境差异；**CI 不跑 `test:edge`（`.github/workflows/test.yml` 只有 `npm test` / `test:host` / `check:package`），故“CI 下通过”没有证据**，这一项目前只有本机 23/24 的实测。
+> **现行口径（2026-11-19，0.9.0）**：本表是 2026-11-05 的历史快照，不改写。当前的数量以 README「开发与验证」为准——`npm test` 固定顺序跑 43 个 `*.test.mjs` 共 375 例，外加 `catalog.smoke.mjs`（34 个 RPC 方法）。表中三行随版本长大：`methods` 41 → 85 例，`client` 6 → 8 例；`edge` 仍是 24 项，但**本机 23/24**——第 21 项「create without a cwd reports the directory the Host attached」要求宿主替无 `cwd` 的请求补上工作目录，本机 0.8.1 宿主返回 `null`，属既有环境差异；**CI 不跑 `test:edge`（`.github/workflows/test.yml` 只有 `npm test` / `test:host` / `check:package`），故“CI 下通过”没有证据**，这一项目前只有本机 23/24 的实测。
 
 ## 8. 后续可做
 
@@ -558,7 +558,7 @@ compression: gzip
 
 ## 29. 决策 0.9.0-b：派生阶段现算不落库（避免第二真相）
 
-- **决策**：对外展示的 `phase`（`person/delivery`、`person/approval`、`person/answer`、`person/reconcile`、`person/review`、`machine/queued`、`machine/working`、`done`）每次读取通过纯函数 `derivePhase(task, attentionRows, lastEvent)` 按固定优先级现场派生，不在 `tasks` 表额外存 `phase` 列。
+- **决策**：对外展示的 `phase`（`person/delivery`、`person/approval`、`person/answer`、`person/reconcile`、`person/review`、`machine/queued`、`machine/working`、`done`；0.9.0-q 起核对期提前到遗留问题之前，当前顺序见 §44）每次读取通过纯函数 `derivePhase(task, attentionRows, lastEvent)` 按固定优先级现场派生，不在 `tasks` 表额外存 `phase` 列。
 - **为什么**：若在数据库同时维护 `status`、`attention.status` 和 `phase` 两个/三个可变列，只要任何一条分支（如审批过期、人工核对关闭 attention、重连推进）忘了同步改写 `phase`，界面就会出现「状态是 `running` 或 `attention` 已空，但 `phase` 还显示在等你审批」的分裂真相。纯函数现算确保「谁在等谁」永远严格派生自唯一真相源。
 - **反例或代价**：每次 `get` 需读取任务行、关联的 `attention` 行与末条事件再计算一次（同一次读事务内几微秒级别），且无法直接写 `WHERE phase = 'person/approval'` 的单列索引查询；若未来列表需按 `phase` 过滤，应写等价 SQL 谓词或物化视图，而不是把可写状态拆成两份。
 
@@ -584,7 +584,7 @@ compression: gzip
 
 - **决策**：`tasksEnabled` 默认 `false`、`tasksExternalAdapter` 默认 `"none"`、`tasksMaxConcurrent` 默认 `1`、`tasksRequireReconcileOnUnknown` 默认 `true`、`tasksPreviewTtlMs` 默认 `300000`。新能力必须通过 `cordis.patch.yml` 显式开启。
 - **为什么**：`0.9.0` 的消费者既有直接做会话问答的既有客户端，也有渐进接入任务中心的操作者。如果一升级就自动创建 SQLite 库、起 5 秒后台定时器、挂载 6 个新 MCP 工具或默认把并发放宽到多路外部进程，就会改变老用户的磁盘、端口、工具列表预算并放大外部进程失控半径。默认全关确保 0.8.x 用户的升级回归面为零，打开后也先被并发=1 与未知即转核对两条安全带兜住。
-- **反例或代价**：新装 `0.9.0` 的用户不能"开箱直接调用 `dsh_tasks_submit`"，必须按手册修改 `cordis.patch.yml` 并重启一次宿主，多出一步显式激活动作。
+- **反例或代价**：新装 `0.9.0` 的用户不能"开箱直接调用 `dsh_task_submit`"，必须按手册修改 `cordis.patch.yml` 并重启一次宿主，多出一步显式激活动作。
 
 ## 34. 决策 0.9.0-g：取消确认、幂等载荷与租约围栏
 
@@ -624,3 +624,93 @@ compression: gzip
 - **入口校验改用 `Object.hasOwn`**：`"__proto__" in props` 在任何普通对象上都为真，于是 `additionalProperties: false` 把 `__proto__` 当成合法属性放行——一旦下游用 `Object.assign` 复制参数就是原型污染。现在 `__proto__` / `constructor` / `prototype` 直接拒绝，属性存在性一律用 `hasOwn`。
 - **递归上限从 2 提到 8**：原来的 `depth < 2` 让三层以下的 `minimum` / `type` 约束完全不检查——schema 写多深就漏多深。现在按 `MAX_SCHEMA_DEPTH = 8` 递归，超限直接报错而不是静默跳过。
 - **已知残留（如实记）**：①任务结果原样落账（见 README「已知边界」），要脱敏只能在输出侧；②`inputSchema` 只覆盖我们发布的工具，客户端带进来的 `__proto__` 已被拒，其余未知键在 `additionalProperties` 未声明时会透传给 Host——那属于 Host 的校验范围。
+
+## 38. 决策 0.9.0-k：人工签收必须是 RPC/CLI 的入口，不是「能力」
+
+0.9.0 真机冒烟走到「报告 ready → review_pending」这一步才发现没有出口：`engine.resolve` 存在，但 RPC 与 CLI 都没暴露它，任务能跑完却无法签收。取舍记三条：
+
+1. **签收属于人，不属于调用方**。`dsh.tasks.resolve` 只出现在 RPC 与 CLI，MCP 工具面刻意不加——否则驱动方可以自己给自己验收，`review_pending` 就退化成自我盖章。MCP 侧只通过 `dsh_tasks_get` 给出待处理项与可直接执行的命令，让人去执行。
+2. **必须带 `expectedStateVersion`**。签收是对「我看到的那一版结果」的承诺；不带版本就等于替别人签收，因此缺这个参数直接报 `VALIDATION_FAILED`，不做默认推断。
+3. **签收也要幂等**。`(principalId, idempotencyKey)` 去重，重放比较「意图」（处置结论 + 证据引用），同键异载荷抛 `STATE_CONFLICT`——和取消走同一套规则，避免「重试一次就换了个结论」。
+
+**如实记**：这条是冒烟补出来的，不是设计时就想清楚的。方案 §6.1 写了这个方法，实现漏了，五路评审（t1/t2/t3/t4/t5）也没抓到——因为所有验证都停在 engine 层，没有人从外部把完整流程走一遍。
+
+## 39. 决策 0.9.0-l：能力修订由注册发布，且不可变
+
+1. **发布的唯一入口是注册**：`dsh.agents.register` 不只是登记实例，它把卡片里声明的每个能力发布成一条 `capability_revisions` 行。理由：预览与提交都必须引用修订 id，若没有发布入口，干净主机上的任务中心连一个任务都发不出来——这正是 0.9.0 首次真机冒烟发现的第一个「能启动但走不通」的洞。
+2. **修订 id 由卡片哈希派生**：`cap_<sha256(cardHash|capability|version)[:24]>`。同一张卡重复注册得到同一个 id（`INSERT OR IGNORE` 幂等），卡片任何变化都产生新 id 并保留旧行——作业引用历史版本，不因注册而漂移。
+3. **写类能力必须 `required`**：`sideEffectKind: "write"` 且显式写 `cancelPolicy: "optional"` 直接拒斥（不是静默改写），与 §4.2 规则 4 一致；只读能力的缺省是 `optional`，允许无取消能力的执行方入池并走 `degraded[]`。
+4. **可发现性**：`dsh.agents.list` 回显每个实例的 `capabilityRevisions`（能力 id、版本、修订 id），调用方无需读库就能知道能提交什么。
+5. **如实记录**：这条是冒烟补出来的——五路评审与 349 例单测都没抓到，因为它们的断言起点总是「已经有一个修订 id」。验证流程缺的从来不是覆盖度，而是「从零开始」。
+
+## 40. 决策 0.9.0-m：任务事件是排障路径，预览必须校验归属
+
+1. **`dsh.tasks.events` 只走 RPC/CLI**：引擎的 `events()` 一直存在，但没有入口，外部只能靠「再取一次 task detail」猜发生了什么。事件是排障与审计路径，不是驱动路径，所以不进 MCP 工具面（MCP 面固定 6 个任务工具），也不改 `tasksEnabled` 之外的语义。
+2. **预览校验修订归属**：`capabilityRevisionId` 存在 ≠ 该实例能执行它。预览现在要求实现「能力修订被这个实例声明过」，否则报 `CAPABILITY_VERSION_MISSING`；这条和 §4.4 的候选筛选是同一条规则的两半——**能被声明才谈得上被选中**。
+3. **探测过期即拒**：`probe_expires_at` 过期的实例，其能力声明不再算证据（`PROBE_STALE`）。这条不区分 `verified` / `unverified`，只区分「证据还有效」与「证据已失效」。
+4. **候选要给出排除原因**：`candidates[]` 现在同时包含选中项（`SELECTED`）与同类实例的排除项（`AGENT_DISABLED` / `PROBE_STALE`），调用方看到的是路由决定，不是黑箱。
+5. **探测不得改写已发布的能力集合**：`dsh.agents.probe` 只刷新证据与 `verified`，保留 `capabilityRevisions` 与 `projectId`。这一条是重启前静态排查时才发现的：旧实现会把修订一起抹掉，于是「注册 → 探测 → 预览」在真机上必然失败——单测按「先 seed 修订再预览」的顺序写，恰好绕过了它。
+6. **如实记录**：这三处（事件入口、预览归属/探测、探测抹声明）都不是评审或单测能发现的，它们的共同前提是「已经有一个可用的修订 id」。真机冒烟的价值就在这里。
+
+
+## 41. 决策 0.9.0-o：轮询必须幂等，未确认的停止必须升级
+
+首次真机端到端（2026-11-19，0.9.0 装在 desktop profile 上、`tasksEnabled: true`）跑出三条缺陷，全部是离线套件不会出现的：
+
+1. **`inspect` 轮询缺稳定标识**。DSH 适配器的 `inspect()` 由会话状态现场生成报告，没有 `adapterEventId`；`pump` 每轮轮询一次，于是同一份 `ready` 报告被反复当作新报告应用——实录 46 次 `report.invalid`，每次都新开一条 `attention.kind=review`（累计 74 条），任务卡在 `waiting_input`。修法：适配器按「会话 + 状态 + 轮次」派生固定的 `adapterEventId`（状态真变才换号），`pump` 在 inspect 分支把它传给 `applyReport`，账本按 `(attempt, adapterEventId)` 去重。
+2. **同一问题重复开单**。即便上游重发，人工问题也该幂等。修法：`attentionOnceInTx` 先按 `(task_id, kind, prompt)` 找 open 行，命中就复用，不再插入。
+3. **未确认的停止会挂死**。适配器只回 `requestAccepted` 时，任务停在 `cancel_requested` 等一个已死会话永远不会发出的事件——真机上第二次取消就是这个状态（`cancel_requested v=4` 三十秒不变）。修法：`drainEffects` 在取消效果完成而 `confirmedStopped !== true` 时，把任务升级到 `needs_reconcile` 并记 `cancel.unconfirmed`（§5.2「失联→核对」的落点）。
+
+**由此得到的规矩**：任何「轮询就能拿到」的外部状态，进账本前必须有稳定标识；任何「已受理但未确认」的副作用，必须有升级路径，而不是只留一个等待态。这三条离线套件都抓不到，因为假适配器不会像真执行方那样反复描述同一个状态。
+
+## 42. 决策 0.9.0-n：问答、产物与执行方读回是三条独立入口
+
+`dsh.tasks.input` / `dsh.tasks.readArtifact` / `dsh.agents.get` 的边界：
+
+1. **回答走 effects 队列，不直接调适配器**：`recordInput` 只写 `inputs` 行（`queued`）与一条 `op_type='input'` 的 effect，真正投递发生在 `drainEffects`。取消、审批、回答三种写入共用同一条带租约的出箱路径，进程死掉可重试、可去重。
+2. **载荷冲突必须报错**：同一 `(task_id, idempotency_key)` 命中但 `text` 不同时抛 `IDEMPOTENCY_CONFLICT`；静默重放会让调用方以为新回答生效了。
+3. **问题归属与终态先判**：投递成功后该问题置 `answered`，再答同一条问题按 `QUESTION_CLOSED` 拒；任务终态、无 active attempt、attempt 不匹配各有独立原因码，不做“通用拒绝”。
+4. **产物只记能校验的**：报告里的 `artifacts[]` 逐个 stat + 哈希，通过的入 `artifacts` 表并发 `artifact.indexed`，不过的发 `artifact.refused`（只带 `name` 与 `reason`，不回显路径）。读回走窗口（`offset`/`length`，默认 20000、上限 1000000 字节），UTF-8 往返不一致就回 base64，不猜文本。
+5. **执行方的修订按卡片里的声明读**：`capability_revisions` 没有 `agent_id` 列——实例拥有哪几条写在它自己的 `capabilities_json.capabilityRevisions` 里；`getAgent` 先读卡片再解析行，避免用不存在的列过滤（首次实现真的这么写错了，测试当场抓到）。
+6. **不进 MCP 的两条**：`resolve` 是人工签收、`decideApproval` 是人工审批，都必须由人显式发；`input`/`readArtifact` 按方案提供 MCP 工具，但不承载审批与签收。
+
+## 43. 决策 0.9.0-p：未校验的结果必须有人工裁决入口
+
+0.9.0 真机端到端跑出第四处缺口，性质与前三处不同：不是漏了一行代码，而是方案自己没说清「人工判定」怎么动手。
+
+- **现象**：DSH 适配器按诚实规则（`lib/adapters/dsh.mjs:100-107`、`:182-191`）永远报 `ready` + `resultValid: false`；`lib/tasks/engine.mjs` 的 `resolve` 只接受 `review_pending` / `needs_reconcile`。两条规则各自都对，叠在一起的结果是默认适配器的正常链永远到不了 `succeeded`——人工既不能签收，也不能判负，只能看着任务停在 `running` 加一条 review 问题。
+- **取舍一：把「人工裁决」做成 `resolve` 的一种适用状态，而不是新增方法**。方案 §5.3 写的是「ready 校验失败 → 保持 running + 记 `report.invalid` + 投 `attention.kind = review` 待人工判定」，缺的是动词。新增方法与 `resolve` 语义重复，还多一个要门控、要写文档、要进熔断名单的入口。
+- **取舍二：先推 `review_pending` 再落终态，不做一步直达**。一步直达会让「校验过的成功」与「人工裁定未校验结果的成功」在事件流里长得一模一样。现在多一条 `review.promoted` 事件（带 `questionId`、`promotedFrom`、`resultValid: false`），审计能分清；代价是版本号 +2、多一条事件。
+- **取舍三：没有 review 问题时仍然拒收**。放宽只在「有登记在案的人工问题」时生效，否则 `resolve` 就成了绕过状态机的后门；回归用例 `resolve keeps refusing a running task that has no open review attention` 把这条钉住。
+- **附带修掉一处投影错误**：`derivePhase` 的 `reconcileDue` 原先只认 `lease.expired` 与 `cancel.unsupported`，`cancel.unconfirmed` 升级后阶段仍显示 `machine/working`——真机上「等你核对」的任务被显示成「机器在干活」。现在 `cancel.unconfirmed` / `cancel.failed` / `dispatch.orphaned` 都算核对信号。
+- **边界**：`resultValid: false` 会一路带到任务详情与签收记录里，不因为人工接受就改成 `true`。人工接受的是「这份未校验的产出」，不是「它通过了校验」。
+
+## 44. 决策 0.9.0-q：审批记录先分「要不要决定」，核对期排在遗留问题之前
+
+0.9.0 第五、六处缺陷同源：都把「不是阻塞信号的东西」当成「在等一个不会来的人」。
+
+- **现象一（`approval/policy` 假阻塞）**：真机会话历史第 2 条是 `approval/policy`，data 为 `{ policy: "ask" }`——它记录的是这个会话的审批策略，不是待批请求；权威的待批数据在 `dsh.approvals.pending`（当时返回 `{ pending: [], count: 0, timedOut: true, mode: "off" }`）。适配器按 `type.startsWith("approval/")` 一律回 `blocked` + approval attention，于是一个已经 `turn/end completed` 的会话被挂进 `waiting_input`，人工面对的是一条无法回答的问题。
+- **取舍一：按事件后缀分类，不用「有没有 pending」判**。`approval/requested` / `approval/request` 阻塞，其余（`policy` / `resolved` / 未知后缀）一律 `progress`，把「是否待批」留给会话状态这条当期快照（`statusToReport` 的 `waiting_approval`）。事件流只追加、不回撤，拿不到「已解决」的否定证据；状态是快照，可以。
+- **取舍二：未知后缀不阻塞**。宁可少挂一次（状态路径会补上），也不要凭一条读不懂的审批记录把任务钉死——0.9.0 的教训是「假阻塞」比「晚一拍发现」代价更高。
+- **现象二（核对期被问题挤走）**：`needs_reconcile` + 未关闭的 `input` 问题 + `lastEvent = cancel.unconfirmed` 的任务，先命中了 answer 档，显示 `person/answer`。执行方自己的「已停止」都不可信了，它的遗留问题自然也不该由人来答。
+- **取舍三：核对期排在问题之前（仍在 delivery 与 approval 之后）**。顺序为 `person/delivery → person/approval → person/reconcile → person/answer → person/review`：审批是当期状态里真实存在的待决动作，留在前面；核对期一旦成立就压过遗留问题，因为下一步动作是核对而不是应答。
+- **回归钉法**：`approval records that need no decision never block a task`（`test/adapters-dsh.test.mjs`）与 `derivePhase` 的 precedence 用例（`test/tasks-engine.test.mjs`：`needs_reconcile` + open input + `cancel.unconfirmed` → `person/reconcile`）。
+
+## 45. 决策 0.9.0-r：一个问题只问一次，核对期不被租约压住
+
+0.9.0 第七、八处缺陷都出自「同一条判断被写了两遍」：一处少了幂等，一处多了前置条件。
+
+- **现象一（同一个问题问两遍）**：`pump` 两次读到「已就绪但产出不合 schema」时，走的是 ready 分支里的裸 `INSERT INTO attention`——`attentionOnceInTx` 的幂等在别的分支有，这一条漏了。真机上 `q_2c53faca…`（06:21:33.614Z）与 `q_a4180425…`（06:21:33.800Z）相差 186 毫秒并存，直到签收才一起关掉；人看到的是两个一模一样的待办。
+- **取舍一：问题去重，报告留档**。问题去重按 `(任务, 类型, 提问)`，但两条 `report.invalid` 都保留——报告是**发生过的事实**，问题是**要人做的动作**。事实可以重复（每次轮询都真的看到了），动作不能重复（人只需要点头一次）。
+- **现象二（核对期被租约压住）**：任务因「停止没被确认」进了 `needs_reconcile`，派发期写的 `effects.lease_expires_at` 还在未来，而 `derivePhase` 的核对期分支要求 `leaseExpiresRaw == null`——于是阶段还是 `machine/working`，人看到「机器还在干活」，实际在等他对账。
+- **取舍二：停止不可信信号自成核对理由**。租约回答的是「谁在跑这一单」，无从回答「它说停了能不能信」。`cancel.unsupported` / `cancel.unconfirmed` / `cancel.failed` / `dispatch.orphaned` 任一出现即算核对到期，租约到期仍是另一条独立理由，两条都不再互相要求前置条件。
+- **回归钉法**：`two ready reports for one task ask one review question`（只开一单、两条 `report.invalid` 都在）与 `a stop nobody confirmed is reconcile-due even while the dispatch lease is open`（活动租约 + `cancel.unconfirmed` → `person/reconcile`，标签 `Needs reconciliation`），均在 `test/tasks-engine.test.mjs`。
+
+## 46. 决策 0.9.0-s：principalId 是命名空间，鉴权边界仍在进程之外
+
+全面复盘时挨着方案 A06（身份隔离）逐方法读了一遍实现，结论要写在文档里，而不是等验收时才发现口径不同。
+
+- **现状**：`lib/tasks/engine.mjs` 的 `get()` 与 `cancel()` 在调用方传了 `principalId` 时比对 `detail.principalId`，不一致按 `notFound` 处理；`list()` 只把 `params.principalId` 当过滤条件；`input()` / `readArtifact()` 直接调 `recordInput(store, params)` / `readArtifact(store, params)`，完全不看 `principalId`；`resolve()` 的入参里没有这个字段。也就是说：`principalId` 目前负责**分区、幂等作用域与审计归属**，不构成**跨主体授权**。
+- **为什么现在就写成这样**：这套任务中心的第一批使用方是本机同一个人的若干 agent（Codex 出规划、DSH 执行、Antigravity 兜底）。它们同属一个 OS 用户、共用同一个 loopback token，进程边界之上没有可信的身份来源；在这一层做「伪隔离」只会增加参数与分支，不增加任何实际抵抗力。
+- **真正的边界在哪**：token 文件（`$DSH_HOME/dsh-rpc/token` 或 `DSH_RPC_TOKEN`）加本机文件系统权限。谁能读到 token，谁就能调全部方法——这一点在 README 的「已知边界」里已经对等披露，包括子会话能读到 token 的实测结论。
+- **将来要真隔离，得先有身份来源**：把 `principalId` 变成每个方法都强制、且由传输层注入（不能由调用方自选）的参数，再配一个主体→token 的映射；在那之前，A06 只能算「未实现」，不能算「已通过」。这条已写进 README 的「已知边界」，避免使用者以为它不是同一个人的 agent 就天然被隔离。

@@ -114,7 +114,12 @@ test("dsh adapter inspect maps all session statuses to honest 6-state reports", 
   const adapter = createDshAdapter({ ops });
   const locator = { kind: "dsh", sessionId: "sess_map_1" };
 
-  assert.equal((await adapter.inspect(locator)).state, "progress");
+  const firstPoll = await adapter.inspect(locator);
+  assert.equal(firstPoll.report.state, "progress");
+  // §5.3 idempotency: the id must describe the observed state, not the moment of asking,
+  // otherwise every poll looks like news to the ledger (live run: 46 duplicate questions).
+  assert.match(firstPoll.adapterEventId, /^status:sess_map_1:/);
+  assert.equal((await adapter.inspect(locator)).adapterEventId, firstPoll.adapterEventId);
 
   nextStatus = {
     ok: true,
@@ -122,29 +127,29 @@ test("dsh adapter inspect maps all session statuses to honest 6-state reports", 
     running: true,
     pendingApproval: { approvalId: "apr_1", toolName: "bash", prompt: "Allow bash?" },
   };
-  const blockedApproval = await adapter.inspect(locator);
+  const blockedApproval = (await adapter.inspect(locator)).report;
   assert.equal(blockedApproval.state, "blocked");
   assert.equal(blockedApproval.attention.kind, "approval");
   assert.equal(blockedApproval.attention.approvalId, "apr_1");
 
   nextStatus = { ok: true, status: "completed", running: false, turn: 1 };
-  const readyUnvalidated = await adapter.inspect(locator);
+  const readyUnvalidated = (await adapter.inspect(locator)).report;
   assert.equal(readyUnvalidated.state, "ready");
   // Must stay false until an explicit schema-validated result exists.
   assert.equal(readyUnvalidated.resultValid, false);
 
   nextStatus = { ok: true, status: "failed", running: false, error: "model crashed" };
-  const failed = await adapter.inspect(locator);
+  const failed = (await adapter.inspect(locator)).report;
   assert.equal(failed.state, "failed");
   assert.equal(failed.reason, "model crashed");
 
   nextStatus = { ok: true, status: "cancelled", running: false };
-  const cancelled = await adapter.inspect(locator);
+  const cancelled = (await adapter.inspect(locator)).report;
   assert.equal(cancelled.state, "dropped");
   assert.equal(cancelled.droppedBy, "cancelled");
 
   nextStatus = { ok: true, status: "mystery_state", running: false };
-  const unknown = await adapter.inspect(locator);
+  const unknown = (await adapter.inspect(locator)).report;
   assert.equal(unknown.state, "blocked");
   assert.equal(unknown.failureClass, "unknown_status");
 });
@@ -283,4 +288,34 @@ test("dsh adapter integrates end-to-end with createTaskEngine and createDispatch
   } finally {
     store.close();
   }
+});
+
+test("approval records that need no decision never block a task (0.9.0 live: approval/policy parked a finished task)", async () => {
+  const { ops } = makeOps({
+    async sessionHistory(params) {
+      return {
+        ok: true,
+        sessionId: params.sessionId,
+        cursor: 4,
+        records: [
+          // The session's approval policy at start: `{ policy: "ask" }` records how approvals
+          // would be requested, not that one is pending.
+          { seq: 2, type: "approval/policy", data: { policy: "ask" } },
+          // A resolution row can only exist after a decision, so it cannot be pending either.
+          { seq: 3, type: "approval/resolved", data: { approvalId: "apr_1", decision: "allow-once" } },
+          { seq: 4, type: "turn/end", data: { reason: { kind: "completed" } } },
+        ],
+      };
+    },
+  });
+  const adapter = createDshAdapter({ ops });
+  const res = await adapter.events({ kind: "dsh", sessionId: "sess_policy_1" }, 1);
+
+  assert.equal(res.events.length, 3);
+  for (const evt of res.events.slice(0, 2)) {
+    assert.equal(evt.report.state, "progress", `${evt.adapterEventId} must not block`);
+    assert.equal(evt.report.attention, undefined, `${evt.adapterEventId} must not open an attention`);
+  }
+  assert.equal(res.events[0].report.evidence.policy, "ask");
+  assert.equal(res.events[2].report.state, "ready");
 });

@@ -169,7 +169,9 @@ test("reconcileTask rejects tasks outside needs_reconcile / cancel_requested wit
 });
 
 test("RPC wiring covers dsh.agents.{register,list,probe}, dsh.tasks.{preview,reconcile}, and W2 config bounds", async () => {
-  const cfg = resolveConfig({});
+  // Enabled, because a disabled task centre deliberately hides its methods;
+  // the bounds assertions below are independent of the breaker.
+  const cfg = resolveConfig({ tasksEnabled: true });
   assert.equal(describeConfig(cfg).tasksDbPath, null);
   assert.equal(describeConfig(cfg).tasksProbeTimeoutMs, 5_000);
   assert.equal(describeConfig(cfg).tasksPreviewTtlMs, 300_000);
@@ -208,6 +210,7 @@ test("RPC wiring covers dsh.agents.{register,list,probe}, dsh.tasks.{preview,rec
     const reg = await dispatch("dsh.agents.register", {
       card: {
         identity: { agentId: "ag-codex", name: "Codex", kind: "codex", version: "0.169.0" },
+        capabilities: [{ capabilityId: "review.diff", version: 1 }],
         controls: {
           start: { support: "required", evidence: "thread/start" },
           steer: { support: "optional", evidence: "turn/steer" },
@@ -243,7 +246,7 @@ test("RPC wiring covers dsh.agents.{register,list,probe}, dsh.tasks.{preview,rec
 
     const pv = await dispatch("dsh.tasks.preview", {
       principalId: "local-operator",
-      capabilityRevisionId: "cap-review-1",
+      capabilityRevisionId: reg.capabilityRevisions[0].revisionId,
       workspaceId: "ws-lab",
       agentId: "ag-codex",
       input: { diff: "abc" },
