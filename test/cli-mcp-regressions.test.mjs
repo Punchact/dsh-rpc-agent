@@ -89,7 +89,13 @@ test("raw call --timeout overrides the JSON timeoutMs", async () => {
     "call", "dsh.sessions.wait", JSON.stringify({ sessionId: "s", timeoutMs: 1234 }), "--timeout", "2345",
   ]);
   assert.equal(result.code, 0, result.stderr);
-  assert.equal(calls.at(-1).params.timeoutMs, 2345);
+  // A wait goes through the sliced loop, so the request carries whatever was left of the
+  // budget when it was written — the full 2345 minus the elapsed first tick. Assert the
+  // override took effect (not the JSON 1234) without pinning a millisecond.
+  const forwarded = calls.at(-1).params.timeoutMs;
+  assert.equal(typeof forwarded, "number");
+  assert.ok(forwarded > 1234, `--timeout must override the JSON value, got ${forwarded}`);
+  assert.ok(forwarded <= 2345, `a wait must never ask for more than its budget, got ${forwarded}`);
 });
 
 test("wait accepts since zero and forwards it", async () => {

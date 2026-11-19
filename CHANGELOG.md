@@ -25,7 +25,7 @@
 
 ### 修复
 
-- `scripts.test` 新增并接入 20 个任务中心与 CLI/适配器测试套件（全链 42 个测试文件、366 例，本机 366/366 通过；CI 结果见 PR #30），并更新 `catalog.smoke.mjs` 校验 34 个 RPC 方法。
+- `scripts.test` 新增并接入 20 个任务中心与 CLI/适配器测试套件（全链 43 个测试文件、369 例，本机 369/369 通过；CI 结果见 PR #30），并更新 `catalog.smoke.mjs` 校验 34 个 RPC 方法。
 - `dispatch.mjs` 修复了租约到期回收与原子 `maxConcurrent` 门控竞态，防止同一写事务之外并发超发或将任务卡死在 `dispatching` / `in_flight`。
 - **取消确认后立刻收口**：适配器回报 `confirmedStopped: true`（DSH 会话真停了、Antigravity 回执里含该 cascadeId）时，同一次出箱排水内把任务从 `cancel_requested` 推进到 `cancelled` 并写 `cancel.confirmed`；此前只把 effect 标完成，任务会悬在 `cancel_requested` 等一个已停会话永远不会发出的事件。Codex 的 `turn/interrupt` 只算受理，故不设该标志。
 - **幂等键不再掩盖改过的请求**：`cancel` / `resolve` 的重放分支会比较请求意图（取消原因；处置结论 + 证据引用），同键异载荷抛 `STATE_CONFLICT`（`reason: "idempotency_payload_mismatch"`）。`expectedStateVersion` 属并发护栏、重试时本就会变，不参与比较。
@@ -42,12 +42,13 @@
 - **开态启动不再被未注册服务拖垮（第二次真机冒烟发现）**：`index.mjs` 原用 `ctx?.get?.("taskAdapterFactories")` 找注入点，而 Cordis 的 `ctx.get(name, strict)` 对未注册服务会抛错，任务中心启动块整体中断后 `taskStore`/`taskEngine` 退回内存库——表现为 `dsh.tasks.submit` 报 `principal not found`、文件库里只剩 schema。现在缺服务视为未注入（try/catch 兜底）、基线身份播种改为 `await` 并记 `seedError`、启动失败记 `startError`，并让 `dsh.ping` 输出 `taskCentre {enabled, mode, ready, dbPath, store, seedError, startError}`；新增回归用例（`ctx.get` 抛错时仍启动、播种真正落盘）。
 - **安全复评第三轮（t3c）收紧**：凭据形态补 `Basic` / `Cookie` / URL userinfo / `github_pat_` / `AKIA` 五类（Cookie 止于分号，避免吞掉整行）；`redactDeep` 只对字符串凭据替换、放过 `maxTokens`/`tokenCount` 这类计数键，深度截断标记改为 `[truncated: depth]`；MCP 入口校验改用 `Object.hasOwn` 并显式拒绝 `__proto__`/`constructor`/`prototype`，递归上限由 2 提到 8；Cookie 头按逐对遮盖（整行遮盖会吞掉同一行后面的 URL），Bearer 只认"长且非纯字母"的串（`Bearer of bad news` 是句子不是凭据），键名补 `sessionKey` / `x-api-key` / `passphrase` / `credential`。**边界如实记**：任务结果按产出原样落账，脱敏只覆盖适配器失败文本与调试日志——结果是交付物，改写结果等于篡改。
 - **补上任务事件入口（重启前补齐的第四处缺口）**：方案 §6.1 要求 `dsh.tasks.events`，引擎里也早就有 `events()`，但 RPC/CLI 从未暴露——任务中心自己的日志从外部读不到。现在 `dsh.tasks.events`（`taskId` + `afterSeq` + `limit`）与 `dsh-rpc tasks events` 都在，MCP 面不加（事件属于排障路径，不是驱动路径）。
+- **首轮真机端到端跑出来的三条缺陷（离线套件都看不到）**：①`inspect` 轮询没有稳定事件标识，同一个会话状态被当成新报告反复应用——真机上实录 46 次 `report.invalid`、74 条重复人工问题，任务卡在 `waiting_input`；现由适配器按「会话 + 状态 + 轮次」派生固定 `adapterEventId`，只在状态真变时换号，`pump` 把它交给账本去重。②同一问题重复开单——人工问题改为按 `(任务, 类型, 提问)` 幂等，已开的不再新建。③**执行方只回「请求已受理」而没确认停止时，任务会永远停在 `cancel_requested`**——现在升级为 `needs_reconcile` 并记 `cancel.unconfirmed`，交人工核对，不再等一个已停会话永远不会发出的事件。
 - **预览不再接受「不相干的能力修订」（重启前补齐的第五处缺口）**：`dsh.tasks.preview` 过去只校验修订存在，不校验它属于所选实例、也不校验探测是否过期，还会把候选列表留空。现在：修订必须在该实例声明的 `capabilityRevisions` 里（否则 `CAPABILITY_VERSION_MISSING`）、探测过期即拒（`PROBE_STALE`），并把同类其它实例的排除原因（`AGENT_DISABLED` / `PROBE_STALE`）与选中项一起写进 `candidates[]`。
 - **顺带修掉一个会吃掉声明的 bug**：`dsh.agents.probe` 重写 `capabilities_json` 时会丢掉已发布的能力修订，导致「注册→探测→预览」直接失败；现在探测只更新证据，不动已发布的能力集合与项目绑定。
 - **注册即发布能力修订（首次真机冒烟发现）**：`dsh.agents.register` 过去只写 `agents` 行，`capability_revisions` 永远为空，而 `dsh.tasks.preview` / `dsh.tasks.submit` 都要求修订 id —— 干净主机上任务中心实际不可用。现在卡片的 `capabilities[]` 在注册时发布为不可变修订（id 由卡片哈希 + 能力派生，同卡幂等、换卡换版本），写类能力必须把 `cancelPolicy` 标 `required`，`dsh.agents.list` 会回显每个实例的 `capabilityRevisions`。
 - **人工问答与产物读取接上**：新增 `dsh.tasks.input`（执行中回答，走 effects 队列投递，带幂等键、载荷冲突、问题归属与陈旧 attempt 拒收）、`dsh.tasks.readArtifact`（按窗口读取已索引产物，非 UTF-8 回 base64）、`dsh.agents.get`（读回单个执行方的卡片与已发布能力修订）。报告里声明的产物按路径/大小/哈希逐条校验后入索引，校验不过的写 `artifact.refused` 事件而不是静默丢弃。
 - **MCP 工具名对齐方案**：`dsh_tasks_*` 更正为 `dsh_task_*`，并补齐 `dsh_task_preview`、`dsh_task_events`、`dsh_task_read_artifact`、`dsh_task_input`、`dsh_agents_get`（共 22 个工具；`resolve`、`decideApproval` 仍不进 MCP）。
-- **测试与文档口径校正**：`scripts.test` 全链 42 个测试文件、**366 例**；`docs/design.md` 的 §7 历史快照后补了「现行口径（2026-11-19）」注，注明 `methods 41 → 85`、`client 6 → 8`、`edge 24 项但本机 23/24`（第 21 项 `create without a cwd` 因宿主返回 `cwd: null` 失败，属既有行为，非本 PR 引入）。
+- **测试与文档口径校正**：`scripts.test` 全链 43 个测试文件、**369 例**；`docs/design.md` 的 §7 历史快照后补了「现行口径（2026-11-19）」注，注明 `methods 41 → 85`、`client 6 → 8`、`edge 24 项但本机 23/24`（第 21 项 `create without a cwd` 因宿主返回 `cwd: null` 失败，属既有行为，非本 PR 引入）。
 
 ### 行为变化
 

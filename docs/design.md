@@ -186,7 +186,7 @@ Host 抛 `RemoteError(code, message, details)`（`isDSHRemoteError === true`）�
 
 以上数字均为 2026-11-05 在本机实跑，命令见 README §10。
 
-> **现行口径（2026-11-19，0.9.0）**：本表是 2026-11-05 的历史快照，不改写。当前的数量以 README「开发与验证」为准——`npm test` 固定顺序跑 42 个 `*.test.mjs` 共 366 例，外加 `catalog.smoke.mjs`（34 个 RPC 方法）。表中三行随版本长大：`methods` 41 → 85 例，`client` 6 → 8 例；`edge` 仍是 24 项，但**本机 23/24**——第 21 项「create without a cwd reports the directory the Host attached」要求宿主替无 `cwd` 的请求补上工作目录，本机 0.8.1 宿主返回 `null`，属既有环境差异；**CI 不跑 `test:edge`（`.github/workflows/test.yml` 只有 `npm test` / `test:host` / `check:package`），故“CI 下通过”没有证据**，这一项目前只有本机 23/24 的实测。
+> **现行口径（2026-11-19，0.9.0）**：本表是 2026-11-05 的历史快照，不改写。当前的数量以 README「开发与验证」为准——`npm test` 固定顺序跑 42 个 `*.test.mjs` 共 369 例，外加 `catalog.smoke.mjs`（34 个 RPC 方法）。表中三行随版本长大：`methods` 41 → 85 例，`client` 6 → 8 例；`edge` 仍是 24 项，但**本机 23/24**——第 21 项「create without a cwd reports the directory the Host attached」要求宿主替无 `cwd` 的请求补上工作目录，本机 0.8.1 宿主返回 `null`，属既有环境差异；**CI 不跑 `test:edge`（`.github/workflows/test.yml` 只有 `npm test` / `test:host` / `check:package`），故“CI 下通过”没有证据**，这一项目前只有本机 23/24 的实测。
 
 ## 8. 后续可做
 
@@ -652,6 +652,16 @@ compression: gzip
 5. **探测不得改写已发布的能力集合**：`dsh.agents.probe` 只刷新证据与 `verified`，保留 `capabilityRevisions` 与 `projectId`。这一条是重启前静态排查时才发现的：旧实现会把修订一起抹掉，于是「注册 → 探测 → 预览」在真机上必然失败——单测按「先 seed 修订再预览」的顺序写，恰好绕过了它。
 6. **如实记录**：这三处（事件入口、预览归属/探测、探测抹声明）都不是评审或单测能发现的，它们的共同前提是「已经有一个可用的修订 id」。真机冒烟的价值就在这里。
 
+
+## 42. 决策 0.9.0-o：轮询必须幂等，未确认的停止必须升级
+
+首次真机端到端（2026-11-19，0.9.0 装在 desktop profile 上、`tasksEnabled: true`）跑出三条缺陷，全部是离线套件不会出现的：
+
+1. **`inspect` 轮询缺稳定标识**。DSH 适配器的 `inspect()` 由会话状态现场生成报告，没有 `adapterEventId`；`pump` 每轮轮询一次，于是同一份 `ready` 报告被反复当作新报告应用——实录 46 次 `report.invalid`，每次都新开一条 `attention.kind=review`（累计 74 条），任务卡在 `waiting_input`。修法：适配器按「会话 + 状态 + 轮次」派生固定的 `adapterEventId`（状态真变才换号），`pump` 在 inspect 分支把它传给 `applyReport`，账本按 `(attempt, adapterEventId)` 去重。
+2. **同一问题重复开单**。即便上游重发，人工问题也该幂等。修法：`attentionOnceInTx` 先按 `(task_id, kind, prompt)` 找 open 行，命中就复用，不再插入。
+3. **未确认的停止会挂死**。适配器只回 `requestAccepted` 时，任务停在 `cancel_requested` 等一个已死会话永远不会发出的事件——真机上第二次取消就是这个状态（`cancel_requested v=4` 三十秒不变）。修法：`drainEffects` 在取消效果完成而 `confirmedStopped !== true` 时，把任务升级到 `needs_reconcile` 并记 `cancel.unconfirmed`（§5.2「失联→核对」的落点）。
+
+**由此得到的规矩**：任何「轮询就能拿到」的外部状态，进账本前必须有稳定标识；任何「已受理但未确认」的副作用，必须有升级路径，而不是只留一个等待态。这三条离线套件都抓不到，因为假适配器不会像真执行方那样反复描述同一个状态。
 
 ## 41. 决策 0.9.0-n：问答、产物与执行方读回是三条独立入口
 
