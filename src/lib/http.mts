@@ -7,7 +7,175 @@ import { CODE, RpcError, assertRequest, describeError, failure, isNotification, 
 import { extractToken, tokenMatches } from "./auth.mjs";
 import { PLUGIN_NAME, PLUGIN_VERSION, PROTOCOL_VERSION } from "./version.mjs";
 
-const LOOPBACK_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+export interface RpcDispatchContext {
+  signal?: AbortSignal;
+  clientAbort?: () => boolean;
+  onEvent?: (frame: unknown) => void;
+}
+
+export interface PingActiveRun {
+  sessionId?: string;
+  runId: string;
+  prompt?: unknown;
+  state?: string;
+  ageMs?: number;
+}
+
+export interface PingSnapshot {
+  origin?: string | null;
+  pid?: number;
+  node?: string;
+  state?: {
+    tokenSource?: string;
+    endpointPath?: string | null;
+  };
+  config?: unknown;
+  activeRuns?: PingActiveRun[];
+  [key: string]: unknown;
+}
+
+export interface CreatedSessionSnapshot {
+  sessionId: string;
+  cwd?: string;
+  agentPreset?: string | null;
+  [key: string]: unknown;
+}
+
+export type RpcHandler = (params: Record<string, unknown>, context: RpcDispatchContext) => unknown | Promise<unknown>;
+
+export interface RpcMethodsTable {
+  tasksEnabled?: boolean;
+  ping: (params?: Record<string, unknown>) => PingSnapshot | Promise<PingSnapshot>;
+  discover: (params: Record<string, unknown>) => unknown;
+  capabilities: (params: Record<string, unknown>) => unknown;
+  models: (params: Record<string, unknown>) => unknown;
+  listWorkspaces: (params: Record<string, unknown>) => unknown;
+  createWorkspace: (params: Record<string, unknown>) => unknown;
+  permissionCatalog: (params: Record<string, unknown>) => unknown;
+  approvalsPending: (params: Record<string, unknown>, context: RpcDispatchContext) => unknown;
+  approvalsResolve: (params: Record<string, unknown>) => unknown;
+  listSessions: (params: Record<string, unknown>) => unknown;
+  createSession: (params: Record<string, unknown>) => CreatedSessionSnapshot | Promise<CreatedSessionSnapshot>;
+  configure: (params: Record<string, unknown>) => unknown;
+  ask: (params: Record<string, unknown>, context: RpcDispatchContext) => Record<string, unknown> | Promise<Record<string, unknown>>;
+  prompt: (params: Record<string, unknown>) => unknown;
+  wait: (params: Record<string, unknown>, context: RpcDispatchContext) => unknown;
+  cancel: (params: Record<string, unknown>) => unknown;
+  history: (params: Record<string, unknown>) => unknown;
+  submitTask: (params: Record<string, unknown>) => unknown;
+  getTask: (params: Record<string, unknown>) => unknown;
+  listTasks: (params: Record<string, unknown>) => unknown;
+  taskEvents: (params: Record<string, unknown>) => unknown;
+  inputTask: (params: Record<string, unknown>) => unknown;
+  readArtifactTask: (params: Record<string, unknown>) => unknown;
+  getAgent: (params: Record<string, unknown>) => unknown;
+  cancelTask: (params: Record<string, unknown>) => unknown;
+  previewTask: (params: Record<string, unknown>) => unknown;
+  reconcileTask: (params: Record<string, unknown>) => unknown;
+  dispatchTask: (params: Record<string, unknown>) => unknown;
+  pumpTask: (params: Record<string, unknown>) => unknown;
+  decideApprovalTask: (params: Record<string, unknown>) => unknown;
+  resolveTask: (params: Record<string, unknown>) => unknown;
+  registerAgent: (params: Record<string, unknown>) => unknown;
+  listAgents: (params: Record<string, unknown>) => unknown;
+  probeAgent: (params: Record<string, unknown>) => unknown;
+}
+
+export type RpcDispatcher = (
+  method: string,
+  params: Record<string, unknown>,
+  context?: RpcDispatchContext,
+) => Promise<unknown>;
+
+export interface HttpRequestLike {
+  method?: string;
+  headers: Record<string, string | string[] | undefined>;
+  socket?: { remoteAddress?: string } | null;
+  on(event: "data", listener: (chunk: Buffer) => void): unknown;
+  on(event: "end" | "aborted", listener: () => void): unknown;
+  on(event: "error", listener: (error: Error) => void): unknown;
+  destroy(): unknown;
+}
+
+export interface HttpResponseLike {
+  writableEnded?: boolean;
+  destroyed?: boolean;
+  on?: (event: "close", listener: () => void) => unknown;
+  writeHead(status: number, headers?: Record<string, string | number>): { end(body?: string): unknown };
+  write(chunk: string): unknown;
+  end(body?: string): unknown;
+}
+
+export type HttpRouteHandler = (req: HttpRequestLike, res: HttpResponseLike) => void | Promise<void>;
+
+export interface WebServerLike {
+  register(route: { kind: "exact"; path: string; handler: HttpRouteHandler }): () => void;
+}
+
+export interface HttpConfigLike {
+  path: string;
+  allowRemote?: boolean;
+  maxBodyBytes: number;
+  logRequests?: boolean;
+}
+
+export interface HttpStateLike {
+  token: string;
+  tokenSource?: string;
+  endpointPath?: string | null;
+}
+
+export interface HttpLoggerLike {
+  info?: (message: string) => void;
+  warn?: (message: string) => void;
+}
+
+export interface HttpStatsLike {
+  startedAt?: number | null;
+  record?: (
+    method: string,
+    durationMs: number,
+    ok: boolean,
+    errorCode?: number | null,
+    outcome?: string | null,
+  ) => void;
+  snapshot?: () => {
+    total: number;
+    errors: number;
+    byMethod: Record<string, unknown>;
+    recent: unknown[];
+  };
+}
+
+export interface RegisterRoutesOptions {
+  webServer: WebServerLike;
+  config: HttpConfigLike;
+  dispatch: RpcDispatcher;
+  methods: RpcMethodsTable;
+  state: HttpStateLike;
+  ctx?: unknown;
+  log: HttpLoggerLike;
+  stats?: HttpStatsLike;
+}
+
+export interface RegisteredRoutes {
+  paths: {
+    rpc: string;
+    stream: string;
+    health: string;
+    status: string;
+    statusAlias: string;
+  };
+  dispose(): void;
+}
+
+interface RouteCell {
+  handler: HttpRouteHandler;
+  owner: symbol;
+  release: (() => void) | null;
+}
+
+const LOOPBACK_ADDRESSES: ReadonlySet<string> = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
 /**
  * How far past `maxBodyBytes` a body may run before the socket is cut instead of
@@ -29,13 +197,15 @@ const STATUS_ALIAS = "/dsh-rpc/status";
  * would forget which paths the previous generation mounted, so each reload would
  * collide with the previous one and never activate again.
  */
-const ROUTE_CELLS = (globalThis[Symbol.for("dsh-rpc.route-cells")] ??= new Map());
+const ROUTE_CELLS_KEY = Symbol.for("dsh-rpc.route-cells");
+const globalStore = globalThis as Record<PropertyKey, unknown>;
+const ROUTE_CELLS = (globalStore[ROUTE_CELLS_KEY] ??= new Map<string, RouteCell>()) as Map<string, RouteCell>;
 
-export function buildDispatcher(methods) {
+export function buildDispatcher(methods: RpcMethodsTable): RpcDispatcher {
   // A disabled task centre must look absent rather than half-alive: the carrier
   // answers -32601 for the whole family, so a caller falls back to "this plugin
   // has no task centre" instead of submitting work nobody will ever read.
-  const gateTask = (handler) => (params, context) => {
+  const gateTask = (handler: RpcHandler): RpcHandler => (params, context) => {
     if (!methods.tasksEnabled) {
       throw new RpcError(
         CODE.methodNotFound,
@@ -46,7 +216,7 @@ export function buildDispatcher(methods) {
     return handler(params, context);
   };
 
-  const table = new Map([
+  const table = new Map<string, RpcHandler>([
     ["dsh.ping", (params) => methods.ping(params)],
     ["dsh.discover", (params) => methods.discover(params)],
     ["dsh.capabilities", (params) => methods.capabilities(params)],
@@ -67,10 +237,10 @@ export function buildDispatcher(methods) {
     ["dsh.tasks.submit", gateTask((params) => methods.submitTask(params))],
     ["dsh.tasks.get", gateTask((params) => methods.getTask(params))],
     ["dsh.tasks.list", gateTask((params) => methods.listTasks(params))],
-  ["dsh.tasks.events", gateTask((params) => methods.taskEvents(params))],
-  ["dsh.tasks.input", gateTask((params) => methods.inputTask(params))],
-  ["dsh.tasks.readArtifact", gateTask((params) => methods.readArtifactTask(params))],
-  ["dsh.agents.get", gateTask((params) => methods.getAgent(params))],
+    ["dsh.tasks.events", gateTask((params) => methods.taskEvents(params))],
+    ["dsh.tasks.input", gateTask((params) => methods.inputTask(params))],
+    ["dsh.tasks.readArtifact", gateTask((params) => methods.readArtifactTask(params))],
+    ["dsh.agents.get", gateTask((params) => methods.getAgent(params))],
     ["dsh.tasks.cancel", gateTask((params) => methods.cancelTask(params))],
     ["dsh.tasks.preview", gateTask((params) => methods.previewTask(params))],
     ["dsh.tasks.reconcile", gateTask((params) => methods.reconcileTask(params))],
@@ -85,7 +255,7 @@ export function buildDispatcher(methods) {
 
   // Friendly aliases keep hand-written curl calls short without a second
   // contract to maintain.
-  const aliases = new Map([
+  const aliases = new Map<string, string>([
     ["ping", "dsh.ping"],
     ["discover", "dsh.discover"],
     ["ask", "dsh.sessions.ask"],
@@ -104,19 +274,19 @@ export function buildDispatcher(methods) {
   };
 }
 
-export function registerRoutes({ webServer, config, dispatch, methods, state, ctx, log, stats }) {
+export function registerRoutes({ webServer, config, dispatch, methods, state, ctx: _ctx, log, stats }: RegisterRoutesOptions): RegisteredRoutes {
   const base = config.path;
-  const disposers = [];
+  const disposers: Array<() => void> = [];
 
-  const authorized = (req) => tokenMatches(state.token, extractToken(req.headers));
+  const authorized = (req: HttpRequestLike): boolean => tokenMatches(state.token, extractToken(req.headers));
 
-  const reachable = (req) => {
+  const reachable = (req: HttpRequestLike): boolean => {
     if (config.allowRemote) return true;
     const address = req.socket?.remoteAddress ?? "";
     return LOOPBACK_ADDRESSES.has(address);
   };
 
-  const guard = (req, res) => {
+  const guard = (req: HttpRequestLike, res: HttpResponseLike): boolean => {
     if (!reachable(req)) {
       sendJson(res, 403, failure(null, CODE.forbidden, "dsh-rpc accepts loopback connections only (set allowRemote to opt in)"));
       return false;
@@ -135,7 +305,7 @@ export function registerRoutes({ webServer, config, dispatch, methods, state, ct
 
   // ------------------------------------------------------------- JSON-RPC --
 
-  const rpcHandler = async (req, res) => {
+  const rpcHandler: HttpRouteHandler = async (req, res) => {
     if (req.method !== "POST") {
       sendJson(res, 405, failure(null, CODE.invalidRequest, "use POST for JSON-RPC"), { allow: "POST" });
       return;
@@ -153,23 +323,27 @@ export function registerRoutes({ webServer, config, dispatch, methods, state, ct
         abort.abort();
       }
     });
-    const rpcContext = { signal: abort.signal, clientAbort: () => clientGone };
+    const rpcContext: RpcDispatchContext = { signal: abort.signal, clientAbort: () => clientGone };
 
-    let body;
+    let body: string;
     try {
       body = await readBody(req, config.maxBodyBytes);
     } catch (error) {
       const tooLarge = error instanceof RpcError;
+      const message =
+        error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string"
+          ? (error as { message: string }).message
+          : "unreadable body";
       sendJson(
         res,
         tooLarge ? 413 : 400,
-        failure(null, CODE.invalidRequest, error?.message ?? "unreadable body", tooLarge ? error.data : undefined),
+        failure(null, CODE.invalidRequest, message, tooLarge ? error.data : undefined),
         tooLarge ? { connection: "close" } : {},
       );
       return;
     }
 
-    let payload;
+    let payload: unknown;
     try {
       payload = JSON.parse(body);
     } catch {
@@ -182,16 +356,16 @@ export function registerRoutes({ webServer, config, dispatch, methods, state, ct
         sendJson(res, 400, failure(null, CODE.invalidRequest, "empty batch"));
         return;
       }
-      const answers = [];
+      const answers: unknown[] = [];
       for (const entry of payload) {
         // Once the caller has hung up there is nobody left to answer, so stop
         // dispatching instead of finishing a batch for a closed socket. Members
         // that already ran keep their effects; the rest never start.
-        if (rpcContext.signal.aborted) break;
+        if (rpcContext.signal!.aborted) break;
         const answer = await handleOne(entry, rpcContext);
         if (answer !== null) answers.push(answer);
       }
-      if (rpcContext.signal.aborted) return;
+      if (rpcContext.signal!.aborted) return;
       if (answers.length === 0) {
         if (!res.destroyed && !res.writableEnded) res.writeHead(204).end();
         return;
@@ -209,14 +383,15 @@ export function registerRoutes({ webServer, config, dispatch, methods, state, ct
     sendJson(res, 200, answer);
   };
 
-  const handleOne = async (entry, context = {}) => {
-    let id = null;
+  const handleOne = async (entry: unknown, context: RpcDispatchContext = {}) => {
+    let id: string | number | null = null;
     let notification = false;
     const startedAt = Date.now();
     // Record the label the caller used, not the aliased target: `ask` and
     // `dsh.sessions.ask` are the same work, and counting them apart is what a
     // reader of the status page expects to see.
-    const label = typeof entry?.method === "string" ? entry.method : "?";
+    const rawMethod = entry && typeof entry === "object" ? (entry as { method?: unknown }).method : undefined;
+    const label = typeof rawMethod === "string" ? rawMethod : "?";
     try {
       assertRequest(entry);
       id = normalizeId(entry.id);
@@ -224,12 +399,14 @@ export function registerRoutes({ webServer, config, dispatch, methods, state, ct
       const params = paramsObject(entry.params);
       const result = await dispatch(entry.method, params, context);
       if (config.logRequests) log.info?.(`[dsh-rpc] ${entry.method} ok`);
-      stats?.record?.(label, Date.now() - startedAt, true, null, result?.timedOut === true ? "timeouts" : null);
+      const timedOut =
+        result && typeof result === "object" && (result as { timedOut?: unknown }).timedOut === true;
+      stats?.record?.(label, Date.now() - startedAt, true, null, timedOut ? "timeouts" : null);
       return notification ? null : ok(id, result);
     } catch (error) {
       const described = describeError(error);
       if (config.logRequests || described.code !== CODE.methodNotFound) {
-        log.warn?.(`[dsh-rpc] ${String(entry?.method ?? "?")} failed: ${described.message}`);
+        log.warn?.(`[dsh-rpc] ${String(rawMethod ?? "?")} failed: ${described.message}`);
       }
       // A caller that hung up is not a failure of the bridge: the call was
       // admitted, did what it could and nobody is left to read the answer. It is
@@ -249,33 +426,38 @@ export function registerRoutes({ webServer, config, dispatch, methods, state, ct
 
   // ------------------------------------------------------- streaming ask --
 
-  const streamHandler = async (req, res) => {
+  const streamHandler: HttpRouteHandler = async (req, res) => {
     if (req.method !== "POST") {
       sendJson(res, 405, failure(null, CODE.invalidRequest, "use POST"), { allow: "POST" });
       return;
     }
     if (!guard(req, res)) return;
 
-    let params;
+    let params: Record<string, unknown>;
     try {
       const body = await readBody(req, config.maxBodyBytes);
-      params = body.trim().length === 0 ? {} : JSON.parse(body);
-      if (params === null || typeof params !== "object" || Array.isArray(params)) {
+      const parsed: unknown = body.trim().length === 0 ? {} : JSON.parse(body);
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
         throw new Error("body must be a JSON object of `dsh.sessions.ask` params");
       }
+      params = parsed as Record<string, unknown>;
     } catch (error) {
       const tooLarge = error instanceof RpcError;
+      const message =
+        error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string"
+          ? (error as { message: string }).message
+          : "invalid body";
       sendJson(
         res,
         tooLarge ? 413 : 400,
-        failure(null, CODE.invalidParams, error?.message ?? "invalid body"),
+        failure(null, CODE.invalidParams, message),
         tooLarge ? { connection: "close" } : {},
       );
       return;
     }
 
     const abort = new AbortController();
-    res.on("close", () => {
+    res.on?.("close", () => {
       if (!res.writableEnded) abort.abort(Object.assign(new Error("client disconnected"), { name: "AbortError" }));
     });
 
@@ -286,7 +468,7 @@ export function registerRoutes({ webServer, config, dispatch, methods, state, ct
       "x-dsh-rpc-version": PLUGIN_VERSION,
     });
 
-    const write = (value) => {
+    const write = (value: unknown): void => {
       if (res.writableEnded || abort.signal.aborted) return;
       try {
         res.write(`${JSON.stringify(value)}\n`);
@@ -330,7 +512,7 @@ export function registerRoutes({ webServer, config, dispatch, methods, state, ct
 
   // ---------------------------------------------------------------- health --
 
-  const healthHandler = (req, res) => {
+  const healthHandler: HttpRouteHandler = (req, res) => {
     if (req.method !== "GET" && req.method !== "HEAD") {
       sendJson(res, 405, { ok: false, error: "use GET" }, { allow: "GET" });
       return;
@@ -357,7 +539,7 @@ export function registerRoutes({ webServer, config, dispatch, methods, state, ct
    * is deliberately free of secrets and of anything a caller said: no token,
    * no prompt text, no session handle.
    */
-  const statusHandler = async (req, res) => {
+  const statusHandler: HttpRouteHandler = async (req, res) => {
     if (req.method !== "GET" && req.method !== "HEAD") {
       sendJson(res, 405, { ok: false, error: "use GET" }, { allow: "GET" });
       return;
@@ -369,7 +551,7 @@ export function registerRoutes({ webServer, config, dispatch, methods, state, ct
 
     // `ping()` is the one method that reports the live run table; if it throws
     // the page should still render, so a failure degrades to nulls.
-    let live = null;
+    let live: PingSnapshot | null = null;
     try {
       live = await methods.ping();
     } catch {
@@ -410,9 +592,9 @@ export function registerRoutes({ webServer, config, dispatch, methods, state, ct
   // trampoline cell, owned by the newest instance that asked for it; older owners
   // lose their claim and their disposer leaves the route alone.
   const instanceId = Symbol("dsh-rpc routes");
-  const mounted = [];
+  const mounted: string[] = [];
 
-  const claim = (path, handler) => {
+  const claim = (path: string, handler: HttpRouteHandler): void => {
     const cell = ROUTE_CELLS.get(path);
 
     if (cell) {
@@ -425,13 +607,13 @@ export function registerRoutes({ webServer, config, dispatch, methods, state, ct
       disposers.push(() => {
         if (ROUTE_CELLS.get(path) !== cell || cell.owner !== instanceId) return;
         ROUTE_CELLS.delete(path);
-        cell.release();
+        cell.release?.();
       });
       return;
     }
 
-    const fresh = { handler, owner: instanceId, release: null };
-    let dispose;
+    const fresh: RouteCell = { handler, owner: instanceId, release: null };
+    let dispose: () => void;
     try {
       dispose = webServer.register({
         kind: "exact",
@@ -441,7 +623,11 @@ export function registerRoutes({ webServer, config, dispatch, methods, state, ct
     } catch (error) {
       // Something that is not this plugin owns the path. Surface it as-is: a
       // silent skip would turn a real conflict into a bridge that answers 404s.
-      throw new Error(`dsh-rpc cannot mount ${path}: ${error?.message ?? error}`);
+      const msg =
+        error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string"
+          ? (error as { message: string }).message
+          : String(error);
+      throw new Error(`dsh-rpc cannot mount ${path}: ${msg}`);
     }
 
     fresh.release = dispose;
@@ -449,11 +635,11 @@ export function registerRoutes({ webServer, config, dispatch, methods, state, ct
     disposers.push(() => {
       if (ROUTE_CELLS.get(path) !== fresh || fresh.owner !== instanceId) return;
       ROUTE_CELLS.delete(path);
-      fresh.release();
+      fresh.release?.();
     });
   };
 
-  const mount = (path, handler) => {
+  const mount = (path: string, handler: HttpRouteHandler): void => {
     claim(path, handler);
     mounted.push(path);
   };
@@ -506,7 +692,12 @@ export function registerRoutes({ webServer, config, dispatch, methods, state, ct
 
 // --------------------------------------------------------------- utilities --
 
-function sendJson(res, status, payload, headers = {}) {
+function sendJson(
+  res: HttpResponseLike,
+  status: number,
+  payload: unknown,
+  headers: Record<string, string | number> = {},
+): void {
   // The caller may already be gone. Writing to a destroyed socket throws, and a
   // second write would append a body to a finished response — either way the
   // catch in the route handler turns it into noise nobody can read.
@@ -521,14 +712,14 @@ function sendJson(res, status, payload, headers = {}) {
   res.end(body);
 }
 
-function readBody(req, maxBytes) {
+function readBody(req: HttpRequestLike, maxBytes: number): Promise<string> {
   return new Promise((resolve, reject) => {
     let size = 0;
     let overflow = false;
     let settled = false;
-    const chunks = [];
+    const chunks: Buffer[] = [];
 
-    const fail = (error) => {
+    const fail = (error: unknown) => {
       if (settled) return;
       settled = true;
       reject(error);
@@ -536,7 +727,7 @@ function readBody(req, maxBytes) {
     const tooLarge = () =>
       new RpcError(CODE.invalidRequest, `request body exceeds ${maxBytes} bytes`, { limit: maxBytes });
 
-    req.on("data", (chunk) => {
+    req.on("data", (chunk: Buffer) => {
       if (settled) return;
       size += chunk.length;
       if (overflow) {
@@ -566,7 +757,7 @@ function readBody(req, maxBytes) {
       if (overflow) reject(tooLarge());
       else resolve(Buffer.concat(chunks).toString("utf8"));
     });
-    req.on("error", (error) => fail(error));
+    req.on("error", (error: Error) => fail(error));
     req.on("aborted", () => fail(Object.assign(new Error("client aborted"), { name: "AbortError" })));
   });
 }

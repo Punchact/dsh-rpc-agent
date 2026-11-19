@@ -185,11 +185,11 @@ for (const [subpath, srcTarget] of Object.entries(srcExports)) {
     continue;
   }
 
-  const srcResolved = resolve(REPO, srcTarget);
-  const distResolved = resolve(DIST, distTarget);
-  const srcRel = toPosixRel(REPO, srcResolved);
+  const srcRel = srcTarget.replace(/^\.\//, "");
+  const srcResolved = resolveSourceEntryPath(srcRel);
+  const distResolved = resolve(DIST, srcTarget);
   const distRel = toPosixRel(DIST, distResolved);
-  if (!existsSync(srcResolved)) {
+  if (!srcResolved) {
     problems.push(`exports["${subpath}"] 源码目标不存在: ${srcRel}`);
   } else if (!existsSync(distResolved)) {
     problems.push(`exports["${subpath}"] 产物目标不存在: dist/${distRel}`);

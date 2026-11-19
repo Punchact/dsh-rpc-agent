@@ -9,11 +9,15 @@
  * failure is named the same way on every platform.
  */
 
-const SYSTEM_ERRNO = /^E[A-Z0-9]+$/;
+export const SYSTEM_ERRNO: RegExp = /^E[A-Z0-9]+$/;
+
+export type UndiciAliasCode = "ECONNRESET" | "ETIMEDOUT";
+export type KnownTransportCode = UndiciAliasCode | "EBADPORT";
+export type TransportCode = KnownTransportCode | (string & {}) | undefined;
 
 // Only the undici codes whose socket-level meaning is unambiguous. Anything
 // else is reported verbatim rather than guessed at.
-const UNDICI_CODE_ALIASES = new Map([
+export const UNDICI_CODE_ALIASES: ReadonlyMap<string, UndiciAliasCode> = new Map<string, UndiciAliasCode>([
   ["UND_ERR_SOCKET", "ECONNRESET"],
   ["UND_ERR_CLOSED", "ECONNRESET"],
   ["UND_ERR_CONNECT_TIMEOUT", "ETIMEDOUT"],
@@ -23,13 +27,14 @@ const UNDICI_CODE_ALIASES = new Map([
 
 const MAX_DEPTH = 6;
 
-export function collectErrorCodes(error, out = [], depth = 0) {
+export function collectErrorCodes(error: unknown, out: string[] = [], depth = 0): string[] {
   if (!error || typeof error !== "object" || depth > MAX_DEPTH) return out;
-  if (typeof error.code === "string" && error.code.length > 0) out.push(error.code);
-  if (Array.isArray(error.errors)) {
-    for (const nested of error.errors) collectErrorCodes(nested, out, depth + 1);
+  const errObj = error as { code?: unknown; errors?: unknown; cause?: unknown };
+  if (typeof errObj.code === "string" && errObj.code.length > 0) out.push(errObj.code);
+  if (Array.isArray(errObj.errors)) {
+    for (const nested of errObj.errors) collectErrorCodes(nested, out, depth + 1);
   }
-  if (error.cause) collectErrorCodes(error.cause, out, depth + 1);
+  if (errObj.cause) collectErrorCodes(errObj.cause, out, depth + 1);
   return out;
 }
 
@@ -39,33 +44,36 @@ export function collectErrorCodes(error, out = [], depth = 0) {
 // own port: it mounts on the Host's Web server, and a Host that binds 5060 or
 // 6667 leaves every out-of-process caller (CLI, MCP bridge) unable to connect
 // while the server itself thinks it is healthy.
-export const FETCH_BLOCKED_PORTS = new Set([
+export const FETCH_BLOCKED_PORTS: ReadonlySet<number> = new Set<number>([
   1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102, 103, 104,
   109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515,
   526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049,
   3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6697, 10080,
 ]);
 
-export function isFetchBlockedPort(value) {
-  let port = value;
+export type NumericPortInput = number | `${number}`;
+
+export function isFetchBlockedPort(value: NumericPortInput): boolean {
+  let port: unknown = value;
   if (typeof value === "string") {
     if (!/^\d+$/.test(value)) return false;
     port = Number(value);
   }
-  return Number.isInteger(port) && FETCH_BLOCKED_PORTS.has(port);
+  return typeof port === "number" && Number.isInteger(port) && FETCH_BLOCKED_PORTS.has(port);
 }
 
 /** The `bad port` refusal is the only one with no code anywhere in the chain. */
-function hasBadPortCause(error, depth = 0) {
+export function hasBadPortCause(error: unknown, depth = 0): boolean {
   if (!error || typeof error !== "object" || depth > MAX_DEPTH) return false;
-  if (error.message === "bad port") return true;
-  if (Array.isArray(error.errors) && error.errors.some((nested) => hasBadPortCause(nested, depth + 1))) {
+  const errObj = error as { message?: unknown; errors?: unknown; cause?: unknown };
+  if (errObj.message === "bad port") return true;
+  if (Array.isArray(errObj.errors) && errObj.errors.some((nested) => hasBadPortCause(nested, depth + 1))) {
     return true;
   }
-  return Boolean(error.cause) && hasBadPortCause(error.cause, depth + 1);
+  return Boolean(errObj.cause) && hasBadPortCause(errObj.cause, depth + 1);
 }
 
-export function transportCode(error) {
+export function transportCode(error: unknown): TransportCode {
   const codes = collectErrorCodes(error);
   // A real errno always wins: it is the most specific thing in the chain.
   const system = codes.find((code) => SYSTEM_ERRNO.test(code));

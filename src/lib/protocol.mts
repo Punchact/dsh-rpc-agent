@@ -2,7 +2,7 @@
 // the application-error range. Everything here is transport-only: no service
 // access, so it stays trivially testable outside a Host process.
 
-export const RPC_VERSION = "2.0";
+export const RPC_VERSION = "2.0" as const;
 
 export const CODE = {
   parseError: -32700,
@@ -17,11 +17,42 @@ export const CODE = {
   busy: -32004,
   timeout: -32005,
   cancelled: -32006,
-};
+} as const;
+
+export type RpcCode = (typeof CODE)[keyof typeof CODE];
+export type JsonRpcId = string | number | null;
+
+export interface JsonRpcErrorObject {
+  code: number;
+  message: string;
+  data?: unknown;
+}
+
+export interface JsonRpcSuccess<T = unknown> {
+  jsonrpc: typeof RPC_VERSION;
+  id: JsonRpcId;
+  result: T;
+}
+
+export interface JsonRpcFailure {
+  jsonrpc: typeof RPC_VERSION;
+  id: JsonRpcId;
+  error: JsonRpcErrorObject;
+}
+
+export interface JsonRpcRequest {
+  jsonrpc?: string;
+  id?: unknown;
+  method: string;
+  params?: unknown;
+}
 
 /** An error that already knows the JSON-RPC code it should surface as. */
 export class RpcError extends Error {
-  constructor(code, message, data) {
+  code: number;
+  data?: unknown;
+
+  constructor(code: number, message: string, data?: unknown) {
     super(message);
     this.name = "RpcError";
     this.code = code;
@@ -29,16 +60,20 @@ export class RpcError extends Error {
   }
 }
 
-export function badRequest(message, data) {
+export function isRpcError(error: unknown): error is RpcError {
+  return error instanceof RpcError;
+}
+
+export function badRequest(message: string, data?: unknown): RpcError {
   return new RpcError(CODE.invalidParams, message, data);
 }
 
-export function ok(id, result) {
+export function ok<T = unknown>(id: JsonRpcId, result: T): JsonRpcSuccess<T> {
   return { jsonrpc: RPC_VERSION, id, result };
 }
 
-export function failure(id, code, message, data) {
-  const error = { code, message };
+export function failure(id: JsonRpcId, code: number, message: string, data?: unknown): JsonRpcFailure {
+  const error: JsonRpcErrorObject = { code, message };
   if (data !== undefined) error.data = data;
   return { jsonrpc: RPC_VERSION, id, error };
 }
@@ -49,7 +84,7 @@ export function failure(id, code, message, data) {
  * application errors so callers can branch on `data.kind` instead of parsing
  * prose.
  */
-export function describeError(error) {
+export function describeError(error: unknown): JsonRpcErrorObject {
   if (error instanceof RpcError) {
     return { code: error.code, message: error.message, data: error.data };
   }
@@ -75,7 +110,7 @@ export function describeError(error) {
 // Codes observed in @deepseek-ai/dsh-api-session-controller. Codes absent here
 // still surface as `CODE.server` with the original `data.kind`, so an unknown
 // code loses precision but never information.
-const REMOTE_CODE_MAP = {
+const REMOTE_CODE_MAP: Record<string, RpcCode> = {
   // Gone, or never a valid id.
   "session/not-found": CODE.notFound,
   "session/queue-item-not-found": CODE.notFound,
@@ -105,11 +140,22 @@ const REMOTE_CODE_MAP = {
   "session/workspace-attach-failed": CODE.internal,
 };
 
-function isRemoteError(error) {
-  return Boolean(error) && typeof error === "object" && error.isDSHRemoteError === true;
+interface DshRemoteError {
+  isDSHRemoteError: true;
+  code: string;
+  message?: string;
+  details?: unknown;
 }
 
-function safeDetails(details) {
+function isRemoteError(error: unknown): error is DshRemoteError {
+  return (
+    Boolean(error) &&
+    typeof error === "object" &&
+    (error as { isDSHRemoteError?: unknown }).isDSHRemoteError === true
+  );
+}
+
+function safeDetails(details: unknown): unknown {
   if (details === undefined || details === null) return undefined;
   if (typeof details !== "object") return details;
   try {
@@ -121,7 +167,7 @@ function safeDetails(details) {
 }
 
 /** JSON-RPC ids are strings, numbers or null. Anything else is invalid. */
-export function normalizeId(value) {
+export function normalizeId(value: unknown): JsonRpcId {
   if (value === undefined) return null;
   if (value === null) return null;
   if (typeof value === "string" || typeof value === "number") return value;
@@ -129,28 +175,29 @@ export function normalizeId(value) {
 }
 
 /** True when the envelope is a notification, which must never be answered. */
-export function isNotification(payload) {
+export function isNotification(payload: unknown): boolean {
   return payload !== null && typeof payload === "object" && !("id" in payload);
 }
 
 /** Validate the common shape of a single request object. */
-export function assertRequest(payload) {
+export function assertRequest(payload: unknown): asserts payload is JsonRpcRequest {
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
     throw new RpcError(CODE.invalidRequest, "request must be a JSON object");
   }
-  if (payload.jsonrpc !== undefined && payload.jsonrpc !== RPC_VERSION) {
-    throw new RpcError(CODE.invalidRequest, `unsupported jsonrpc version: ${String(payload.jsonrpc)}`);
+  const req = payload as Record<string, unknown>;
+  if (req.jsonrpc !== undefined && req.jsonrpc !== RPC_VERSION) {
+    throw new RpcError(CODE.invalidRequest, `unsupported jsonrpc version: ${String(req.jsonrpc)}`);
   }
-  if (typeof payload.method !== "string" || payload.method.length === 0) {
+  if (typeof req.method !== "string" || req.method.length === 0) {
     throw new RpcError(CODE.invalidRequest, "`method` must be a non-empty string");
   }
-  if (payload.params !== undefined && (payload.params === null || typeof payload.params !== "object")) {
+  if (req.params !== undefined && (req.params === null || typeof req.params !== "object")) {
     throw new RpcError(CODE.invalidRequest, "`params` must be an object or an array");
   }
 }
 
 /** Coerce positional params into the object form our handlers use. */
-export function paramsObject(params) {
+export function paramsObject(params: unknown): Record<string, unknown> {
   if (params === undefined || params === null) return {};
   if (Array.isArray(params)) {
     if (params.length > 1) {
@@ -161,10 +208,10 @@ export function paramsObject(params) {
     if (first === null || typeof first !== "object") {
       throw new RpcError(CODE.invalidParams, "positional param must be an object");
     }
-    return first;
+    return first as Record<string, unknown>;
   }
   if (typeof params !== "object") {
     throw new RpcError(CODE.invalidParams, "`params` must be an object");
   }
-  return params;
+  return params as Record<string, unknown>;
 }
