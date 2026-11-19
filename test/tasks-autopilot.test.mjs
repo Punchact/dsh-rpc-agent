@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 import test from "node:test";
+import ts from "typescript";
 
 import { ACTIVE_STATUSES, createAutopilot } from "../dist/lib/tasks/autopilot.mjs";
 
@@ -206,4 +208,39 @@ test("a broken ledger query is reported, not thrown at the timer", async () => {
   assert.match(result.failed[0].message, /database is gone/);
   assert.equal(dispatcher.calls.start.length, 0);
   assert.equal(logger.lines.length, 1);
+});
+
+test("AutopilotStepResult rejects missing field at tsc compile time", () => {
+  const repoRoot = resolve(import.meta.dirname, "..");
+  const configPath = resolve(repoRoot, "tsconfig.json");
+  const parsed = ts.parseJsonConfigFileContent(
+    ts.readConfigFile(configPath, ts.sys.readFile).config,
+    ts.sys,
+    repoRoot,
+  );
+  const virtualFile = resolve(repoRoot, "src/lib/tasks/__typecheck_autopilot__.mts");
+  const badSource = `
+import type { AutopilotStepResult } from "./autopilot.mjs";
+const incomplete: AutopilotStepResult = {
+  skipped: false,
+  started: [],
+  pumped: [],
+};
+void incomplete;
+`;
+  const host = ts.createCompilerHost(parsed.options);
+  const origGetSourceFile = host.getSourceFile.bind(host);
+  host.getSourceFile = (fileName, languageVersion, ...rest) => {
+    if (resolve(fileName) === virtualFile) {
+      return ts.createSourceFile(fileName, badSource, languageVersion);
+    }
+    return origGetSourceFile(fileName, languageVersion, ...rest);
+  };
+  const program = ts.createProgram([virtualFile], parsed.options, host);
+  const diagnostics = ts.getPreEmitDiagnostics(program, program.getSourceFile(virtualFile));
+  assert.ok(diagnostics.length > 0, "tsc must reject incomplete AutopilotStepResult");
+  assert.ok(
+    diagnostics.some((d) => d.code === 2741 && String(d.messageText).includes("failed")),
+    `expected TS2741 mentioning missing failed, got: ${diagnostics.map((d) => `${d.code}:${d.messageText}`).join("; ")}`,
+  );
 });
