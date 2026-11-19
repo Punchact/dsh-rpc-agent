@@ -874,3 +874,15 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 **决定**：verify 打包并上传（`npm pack ./dist` → `sha256sum` → `upload-artifact`），publish 下载同名 artifact、`sha256sum -c` 校验、`npm publish "$TARBALL"`，并**禁止**在 publish 里 `npm run build`。`scripts/check-release-path.ts` 增加五条断言：verify 必须 `npm pack ./dist`、必须 `upload-artifact`（带 name）、publish 必须 `download-artifact`（同名）、必须 `sha256sum -c`、**每条** publish 调用都必须指向 tarball。最后一条是被咬过才加的：最初只要求“某处 publish 指向 tarball”，于是“rehearsal 指向 tarball + 真实分支 `cd dist && npm publish`”照样过关。
 
 **残留边界**：`npm publish` 的 provenance 由 OIDC 提供，artifact 绑定管的是“发布的是哪份字节”，两者互不替代；本机令牌兜底路径（`docs/release.md` §2.3）没有 artifact 绑定，靠手工 `verify` 保证。
+
+## 62. 决策 0.9.5-a：门禁脚本也用 TypeScript，但不进发布包
+
+**现象**。全仓迁到 TypeScript 之后，`scripts/` 下 9 个文件（1,458 行）仍是 `.mjs`：它们既不在 `tsconfig.json` 的 `include`（只有 `src/**/*`）里，`checkJs` 也是关的，`check:types` 只覆盖 `client.js`，所以这批守着发布链路的脚本自己没有任何类型检查。它们动的是 `dist/` 保真、发布包清单、文档数字、接口面对账——错了的后果比业务代码更靠后：构建看着成功、包看着干净。
+
+**决定**。改成 `.ts`，由 Node 的原生类型剥离直接运行（`node scripts/build.ts`），`tsconfig.scripts.json` 以 `noEmit` 只做类型检查，`check:types` 串上 `tsc -p tsconfig.scripts.json`。
+
+**为什么不用「编译到某个目录」**。脚本不发布，编译产物没有去处：放进 `dist/` 会污染 58 文件清单与保真断言，放进 `.scripts-build/` 又要维护第二份目录结构与清理逻辑。Node 22.19+/24 已经从运行时层面支持剥类型，`engines` 也早就是 `^22.19.0 || >=24`，等于运行时本来就是这份实现的一部分，不必再引入一步构建。
+
+**代价与边界**。①剥离只擦类型、不做转译，所以脚本里不能出现 `enum`、`namespace`、参数属性这类不可擦语法——本仓库 9 个脚本没有用到，将来要用得先改写法。②`.ts` 脚本只能在 `node_modules` 之外运行（`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`），这对本仓成立，但不适合被别的包 `import`。③`node --check` 对 `.ts` 可用（实测 Node 24.22、CI 22.x/24.x 双绿），所以 CI 的语法检查 glob 直接换成 `scripts/*.ts`。
+
+**怎么钉住**。`npm run check:types` = `tsc -p tsconfig.client.json && tsc -p tsconfig.scripts.json`，`verify`（以及 `npm test` 链尾）必然跑到；strict 报错本来是 93 条，全部补齐后为 0——中间没有"先关掉再慢慢来"的过渡态。九处脚本的输出文案在这个过程里逐字未变，改完用同一批 gate 与 `npm run verify` 复核。
