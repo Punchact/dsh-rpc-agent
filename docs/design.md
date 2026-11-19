@@ -186,7 +186,7 @@ Host 抛 `RemoteError(code, message, details)`（`isDSHRemoteError === true`）�
 
 以上数字均为 2026-11-05 在本机实跑，命令见 README §10。
 
-> **现行口径（2026-11-19，0.9.0）**：本表是 2026-11-05 的历史快照，不改写。当前的数量以 README「开发与验证」为准——`npm test` 固定顺序跑 43 个 `*.test.mjs` 共 372 例，外加 `catalog.smoke.mjs`（34 个 RPC 方法）。表中三行随版本长大：`methods` 41 → 85 例，`client` 6 → 8 例；`edge` 仍是 24 项，但**本机 23/24**——第 21 项「create without a cwd reports the directory the Host attached」要求宿主替无 `cwd` 的请求补上工作目录，本机 0.8.1 宿主返回 `null`，属既有环境差异；**CI 不跑 `test:edge`（`.github/workflows/test.yml` 只有 `npm test` / `test:host` / `check:package`），故“CI 下通过”没有证据**，这一项目前只有本机 23/24 的实测。
+> **现行口径（2026-11-19，0.9.0）**：本表是 2026-11-05 的历史快照，不改写。当前的数量以 README「开发与验证」为准——`npm test` 固定顺序跑 43 个 `*.test.mjs` 共 373 例，外加 `catalog.smoke.mjs`（34 个 RPC 方法）。表中三行随版本长大：`methods` 41 → 85 例，`client` 6 → 8 例；`edge` 仍是 24 项，但**本机 23/24**——第 21 项「create without a cwd reports the directory the Host attached」要求宿主替无 `cwd` 的请求补上工作目录，本机 0.8.1 宿主返回 `null`，属既有环境差异；**CI 不跑 `test:edge`（`.github/workflows/test.yml` 只有 `npm test` / `test:host` / `check:package`），故“CI 下通过”没有证据**，这一项目前只有本机 23/24 的实测。
 
 ## 8. 后续可做
 
@@ -684,3 +684,14 @@ compression: gzip
 - **取舍三：没有 review 问题时仍然拒收**。放宽只在「有登记在案的人工问题」时生效，否则 `resolve` 就成了绕过状态机的后门；回归用例 `resolve keeps refusing a running task that has no open review attention` 把这条钉住。
 - **附带修掉一处投影错误**：`derivePhase` 的 `reconcileDue` 原先只认 `lease.expired` 与 `cancel.unsupported`，`cancel.unconfirmed` 升级后阶段仍显示 `machine/working`——真机上「等你核对」的任务被显示成「机器在干活」。现在 `cancel.unconfirmed` / `cancel.failed` / `dispatch.orphaned` 都算核对信号。
 - **边界**：`resultValid: false` 会一路带到任务详情与签收记录里，不因为人工接受就改成 `true`。人工接受的是「这份未校验的产出」，不是「它通过了校验」。
+
+## 44. 决策 0.9.0-q：审批记录先分「要不要决定」，核对期排在遗留问题之前
+
+0.9.0 第五、六处缺陷同源：都把「不是阻塞信号的东西」当成「在等一个不会来的人」。
+
+- **现象一（`approval/policy` 假阻塞）**：真机会话历史第 2 条是 `approval/policy`，data 为 `{ policy: "ask" }`——它记录的是这个会话的审批策略，不是待批请求；权威的待批数据在 `dsh.approvals.pending`（当时返回 `{ pending: [], count: 0, timedOut: true, mode: "off" }`）。适配器按 `type.startsWith("approval/")` 一律回 `blocked` + approval attention，于是一个已经 `turn/end completed` 的会话被挂进 `waiting_input`，人工面对的是一条无法回答的问题。
+- **取舍一：按事件后缀分类，不用「有没有 pending」判**。`approval/requested` / `approval/request` 阻塞，其余（`policy` / `resolved` / 未知后缀）一律 `progress`，把「是否待批」留给会话状态这条当期快照（`statusToReport` 的 `waiting_approval`）。事件流只追加、不回撤，拿不到「已解决」的否定证据；状态是快照，可以。
+- **取舍二：未知后缀不阻塞**。宁可少挂一次（状态路径会补上），也不要凭一条读不懂的审批记录把任务钉死——0.9.0 的教训是「假阻塞」比「晚一拍发现」代价更高。
+- **现象二（核对期被问题挤走）**：`needs_reconcile` + 未关闭的 `input` 问题 + `lastEvent = cancel.unconfirmed` 的任务，先命中了 answer 档，显示 `person/answer`。执行方自己的「已停止」都不可信了，它的遗留问题自然也不该由人来答。
+- **取舍三：核对期排在问题之前（仍在 delivery 与 approval 之后）**。顺序为 `person/delivery → person/approval → person/reconcile → person/answer → person/review`：审批是当期状态里真实存在的待决动作，留在前面；核对期一旦成立就压过遗留问题，因为下一步动作是核对而不是应答。
+- **回归钉法**：`approval records that need no decision never block a task`（`test/adapters-dsh.test.mjs`）与 `derivePhase` 的 precedence 用例（`test/tasks-engine.test.mjs`：`needs_reconcile` + open input + `cancel.unconfirmed` → `person/reconcile`）。

@@ -289,3 +289,33 @@ test("dsh adapter integrates end-to-end with createTaskEngine and createDispatch
     store.close();
   }
 });
+
+test("approval records that need no decision never block a task (0.9.0 live: approval/policy parked a finished task)", async () => {
+  const { ops } = makeOps({
+    async sessionHistory(params) {
+      return {
+        ok: true,
+        sessionId: params.sessionId,
+        cursor: 4,
+        records: [
+          // The session's approval policy at start: `{ policy: "ask" }` records how approvals
+          // would be requested, not that one is pending.
+          { seq: 2, type: "approval/policy", data: { policy: "ask" } },
+          // A resolution row can only exist after a decision, so it cannot be pending either.
+          { seq: 3, type: "approval/resolved", data: { approvalId: "apr_1", decision: "allow-once" } },
+          { seq: 4, type: "turn/end", data: { reason: { kind: "completed" } } },
+        ],
+      };
+    },
+  });
+  const adapter = createDshAdapter({ ops });
+  const res = await adapter.events({ kind: "dsh", sessionId: "sess_policy_1" }, 1);
+
+  assert.equal(res.events.length, 3);
+  for (const evt of res.events.slice(0, 2)) {
+    assert.equal(evt.report.state, "progress", `${evt.adapterEventId} must not block`);
+    assert.equal(evt.report.attention, undefined, `${evt.adapterEventId} must not open an attention`);
+  }
+  assert.equal(res.events[0].report.evidence.policy, "ask");
+  assert.equal(res.events[2].report.state, "ready");
+});

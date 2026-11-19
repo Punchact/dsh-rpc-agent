@@ -294,13 +294,26 @@ test("derivePhase covers all §5.4 rules and enforces top-to-bottom precedence",
     "person/approval",
   );
 
-  // 3. person/answer for open decision or input
+  // 3. person/reconcile outranks leftover questions once the stop is untrusted (0.9.0 live:
+  //    `needs_reconcile` + open `input` attention + lastEvent `cancel.unconfirmed` reported
+  //    `person/answer`, hiding the reconcile duty).
+  assert.equal(
+    derivePhase(
+      { status: "needs_reconcile" },
+      [{ kind: "input", status: "open" }],
+      { type: "cancel.unconfirmed" },
+      { nowMs: now },
+    ).phase,
+    "person/reconcile",
+  );
+
+  // 4. person/answer for open decision or input (when nothing reconcile-due is pending)
   assert.equal(
     derivePhase({ status: "waiting_input" }, [{ kind: "decision", status: "open" }], null, { nowMs: now }).phase,
     "person/answer",
   );
 
-  // 4. person/reconcile only when lease expired (or cancel.unsupported); active lease stays machine/working
+  // 5. person/reconcile only when lease expired (or a cancel/dispatch signal); active lease stays machine/working
   assert.equal(
     derivePhase(
       { status: "needs_reconcile", leaseExpiresAt: "2026-11-18T12:05:00Z" },
@@ -320,18 +333,18 @@ test("derivePhase covers all §5.4 rules and enforces top-to-bottom precedence",
     "person/reconcile",
   );
 
-  // 5. person/review
+  // 6. person/review
   assert.equal(derivePhase({ status: "review_pending" }, [], null, { nowMs: now }).phase, "person/review");
 
-  // 6. machine/queued
+  // 7. machine/queued
   assert.equal(derivePhase({ status: "queued" }, [], null, { nowMs: now }).phase, "machine/queued");
   assert.equal(derivePhase({ status: "dispatching" }, [], null, { nowMs: now }).phase, "machine/queued");
 
-  // 7. machine/working (also when waiting_input has no open attention: never falsely displays person/*)
+  // 8. machine/working (also when waiting_input has no open attention: never falsely displays person/*)
   assert.equal(derivePhase({ status: "running" }, [], null, { nowMs: now }).phase, "machine/working");
   assert.equal(derivePhase({ status: "waiting_input" }, [], null, { nowMs: now }).phase, "machine/working");
 
-  // 8. done
+  // 9. done
   assert.equal(derivePhase({ status: "succeeded" }, [], null, { nowMs: now }).phase, "done");
   assert.equal(derivePhase({ status: "failed" }, [], null, { nowMs: now }).phase, "done");
   assert.equal(derivePhase({ status: "cancelled" }, [], null, { nowMs: now }).phase, "done");
