@@ -6,11 +6,11 @@
 
 | 项 | 值 |
 | --- | --- |
-| npm 上最新 | `0.8.1`（`npm view @punchact/dsh-rpc-agent version`；注册表刚更新时 `npm view` 可能滞后一两分钟，**以直查 `registry.npmjs.org` 为准**） |
-| 注册表里有的版本 | `0.4.3`、`0.4.4`、`0.5.3`、`0.7.6`、`0.7.7`、`0.7.8`、`0.8.1` |
+| npm 上最新 | `0.9.3`（`npm view @punchact/dsh-rpc-agent version`；注册表刚更新时 `npm view` 可能滞后一两分钟，**以直查 `registry.npmjs.org` 为准**） |
+| 注册表里有的版本 | `0.4.3`、`0.4.4`、`0.5.3`、`0.7.6`、`0.7.7`、`0.7.8`、`0.8.1`、`0.9.3` |
 | 已撤回、取不到 | `0.4.1`、`0.4.2`（早期发布流程的失败版本，24 小时内 `npm unpublish` 掉的） |
-| 未单独发布 | `0.5.4`、`0.6.0`（内容随 `v0.7.6` 一起交付，没有各自的 tag）、`0.8.0`（内容随 `v0.8.1` 一起交付） |
-| tag / Release | `v0.5.3`、`v0.7.6`、`v0.7.7`、`v0.7.8`、`v0.8.1` |
+| 未单独发布 | `0.5.4`、`0.6.0`（内容随 `v0.7.6` 一起交付，没有各自的 tag）、`0.8.0`（内容随 `v0.8.1` 一起交付）、`0.9.0`、`0.9.1`、`0.9.2`（内容随 `v0.9.3` 一起交付） |
+| tag / Release | `v0.5.3`、`v0.7.6`、`v0.7.7`、`v0.7.8`、`v0.8.1`、`v0.9.3` |
 
 > 一版一个 Release、一个 tag。Release 一旦 Publish 就会触发发布，所以**不要把"写正文"当成创建 Release 的理由**（见 §2）。
 
@@ -46,17 +46,21 @@
 ### 2.1 发版前
 
 ```bash
-# 1. 版本号：三处必须一致（package.json / lib/version.mjs / package-lock.json 的两处）
-#    npm run check:version 会拦第一对，check-package 不查 lock，所以抬版本时三处一起改
+# 1. 版本号：三处必须一致（package.json / src/lib/version.mts / package-lock.json 的两处）
+#    先 npm run build 再跑 npm run check:version 会拦第一对，check-package 不查 lock，所以抬版本时三处一起改
 node -e "…"            # 见上一版的实际做法：用一次性脚本改 lock，别手改
 
 # 2. CHANGELOG：顶部加一节 ## [x.y.z] - YYYY-MM-DD，写清「新增 / 修复 / 说明」
 #    未发布的版本要在这一节里注一句「本版尚未发布到 npm（npm 上仍是 …）」
 
-# 3. 本地全绿
+# 3. 本地全绿（仓库根目录是私有开发工作区，真实发布物是构建出的 `dist/` 产物包）
+npm run build
 npm run check:version
-npm test               # 11 个测试文件共 217 例，另有 catalog smoke
-npm run check:package  # 向 npm 要真实打包清单再核对
+npm run check:types
+npm test
+npm run test:host
+npm run check:package            # 向 npm 要 dist/ 真实打包清单再核对
+node scripts/check-release-path.mjs
 
 # 4. 常规 PR 流程合进 main
 ```
@@ -73,23 +77,32 @@ git push origin v0.8.1
 ```
 
 Draft 状态**不会**触发工作流，所以写正文是安全的：先存 Draft、反复改、最后 Publish。
-工作流按 `release: published` 触发，tag 与版本号不一致、或 `check:version` / 单测 / 真宿主集成 / 打包检查
-任何一项红，都不会进 publish。publish 用 OIDC 换短期凭证，仓库里没有可被盗的令牌。
+工作流按 `release: published` 触发：`verify` job 会先执行 `npm run build` 生成 `dist/`，再校验 tag、版本、`check:types`、全套单测、真宿主集成与 `dist/` 打包/`check-release-path`；任何一项红都不会进 `publish`。`publish` job 同样先 `npm run build` 再在 **`dist/` 目录内** 执行 `npm publish --access public`（发布的是构建并验证过的 `dist/` 产物包；仓库根目录保留 `"private": true` 且无 `files` 字段，不会被直接发布），并用 OIDC 换短期凭证，仓库里没有可被盗的令牌。
 
-只想演练不发布：Actions → release → Run workflow，`dry_run` 保持默认 `true`。它会跑完整 `verify` 并打印
-`npm publish --access public --dry-run` 的真实清单。若这个版本号已经在注册表上（比如对着已发布的提交重跑
+只想演练不发布：Actions → release → Run workflow，`dry_run` 保持默认 `true`。它会跑完整 `verify` 并在 `publish` job 打印 `(cd dist && npm publish --access public --dry-run)` 的真实清单。若这个版本号已经在注册表上（比如对着已发布的提交重跑
 演练），工作流会先查 `registry.npmjs.org/@punchact%2Fdsh-rpc-agent/<version>`，命中 200 就直接给出
 `::notice::version … already exists` 并结束——npm 那句 "You cannot publish over the previously published
 versions" 对重跑演练是正常状态，不是缺陷。想真正演练打包结果，改版本号再跑。
 
-### 2.3 B. 本机令牌发布（OIDC 出问题时的兜底）
+### 2.3 B. 本机令牌发布（OIDC 出问题时的兜底，同样只发布 `dist/`）
+
+仓库根目录带有 `"private": true` 与指向 `./dist/...` 的工作区入口，**禁止**也不可能直接从仓库根执行 `npm publish`；本机发布与 CI 一样，先构建并整套验过，再发布 `dist/` 产物包（二选一）：
 
 ```bash
-npm publish          # publishConfig 已声明 access: public，不需要 --access
+# 第一步：在仓库根完成构建与全部发布前校验
+npm run build && npm run check:version && npm run verify
+
+# 第二步（方式一）：进入 dist/ 发布产物包
+(cd dist && npm publish)          # dist/package.json 已去除 private 并声明 access: public
+
+# 第二步（方式二）：先打包成 tarball 再发布该压缩包
+npm pack ./dist
+npm publish ./punchact-dsh-rpc-agent-<版本>.tgz
 ```
 
-`prepublishOnly` 会先跑 `check:version`、十段单测与 `check:package`，检查不过就上传不了，也就不会白白占掉
-一个版本号。用令牌发布的版本**没有 provenance**（见 §6）。
+以上校验不通过就不要进入第二步，也就不会白白占掉一个版本号。用令牌发布的版本**没有 provenance**（见 §6）。
+
+**这条路径没有自动防呆，别指望 npm 帮你拦。** `dist/package.json` 的 `prepublishOnly` 由构建脚本剥掉了（它引用仓库根的 `scripts/`，产物包里没有），而仓库根的 `prepublishOnly` 因为 `"private": true` 永远不会被触发——所以 `(cd dist && npm publish)` 一旦敲下去就直接发。要么按上面第一步手工跑 `verify`，要么用 `npm run release:local`（先 `verify` 再 `npm pack ./dist`，产出的 `*.tgz` 已被 `.gitignore` 忽略）。
 
 ### 2.4 C. 发布认证失败时怎么定位
 
@@ -177,9 +190,12 @@ curl -s "https://registry.npmjs.org/-/npm/v1/attestations/@punchact%2Fdsh-rpc-ag
   ```powershell
   plugin_manager({ action: "remove_bundle", target: "@punchact/dsh-rpc-agent" })
   plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent@<版本>" })
-  node bin/dsh-rpc.mjs ping
-  node bin/dsh-rpc.mjs ask "只回复两个字：收到" --cwd . --json
+  $cli = "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\dist\bin\dsh-rpc.mjs"
+  node $cli ping
+  node $cli ask "只回复两个字：收到" --cwd . --json
   ```
+
+  （迁移后包里唯一真实入口是 `dist/bin/dsh-rpc.mjs`；仓库根的 `bin/` 与 `index.mjs` 已不存在。）
 
   `install_bundle` 若报 `already-installed`，先 `remove_bundle` 再装；装完 `~/.dsh/dsh-rpc/endpoint.json` 的
   `version` 才是新版本。

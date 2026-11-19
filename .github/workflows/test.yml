@@ -64,6 +64,12 @@ jobs:
       - name: Plan surface matches the code
         run: npm run check:surface
 
+      - name: Type-check client.js
+        run: npm run check:types
+
+      - name: Verify release publish path
+        run: node scripts/check-release-path.mjs
+
       - name: Unit tests (no Harness required)
         run: npm test
 

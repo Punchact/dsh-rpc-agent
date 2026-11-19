@@ -844,3 +844,14 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 - **浏览器脚本兜底边界不变**：按决策 0.9.4-a，`client.js` 维持原位 `// @ts-check` + 纯注释 JSDoc 并由 `build.mjs` 复制进 `dist/client.js`，发布包 58 文件除静态资产、文档与 `client.js` 外均为 TS 编译产物。
 
 **怎么钉住**：`test/config-breakers.test.mjs` 与 `test/capabilities.test.mjs` 分别新增纯内存 `CompilerHost` 编译期与运行时契约测试，覆盖本次迁移的 11 份模块导出签名与非法入参编译期拒绝。
+
+## 59. 决策 0.9.4-d：发布链路收敛到 `dist/`（发布的是验过的那一份）
+
+**现象**。TS 全仓迁移后，源码在 `src/**/*.mts`、构建产物在 `dist/`，但发布链路仍残留四处旧布局假设：① `release.yml` publish job 在仓库根运行 `npm publish`，而根 `package.json` 的 `files` 指向已删除的 `index.mjs`/`lib/`/`bin/`，实测根 `npm pack --dry-run` 仅含 17 文件且缺失全部代码入口，与此同时 `check-package.mjs` 却只验证 `dist/`（58 文件），造成“验的是 `dist/`、发的却是残缺根目录”；② `release.yml` verify job 先于 `npm test`（`pretest` 构建）调用 `check:version`（`import('./dist/lib/version.mjs')`），在全新检出上触发 `ERR_MODULE_NOT_FOUND`；③ `client.js` 原位带着 `// @ts-check` 与 JSDoc，但无任何 tsconfig 真正检查它；④ 根 `package.json` 入口与 `tsconfig.json` `rootDirs: ["src", "types"]` 留有死引用。
+
+**核心原则：发布的是验过的那一份**。
+- **根目录与构建产物的职责分离**：根 `package.json` 设为 `"private": true`、移除 `"files"`，并将 `main`/`bin`/`exports` 指向 `./dist/...` 真实产物路径（工作区零死引用，且根目录本身不可被 `npm publish` 误发）；`scripts/build.mjs` 通过与 `check-dist-fidelity.mjs` 共用的 `buildDistManifest()` 从根清单确定性推导 `dist/package.json`（移除 `private`、剥离 `./dist/` 前缀、写入 58 文件发布 `files` 白名单并剔除指向仓库脚本的 `prepublishOnly`）。
+- **工作流强制先建后验并锁死从 `dist/` 发布**：`release.yml` 在 `verify` 与 `publish` 两个 job 开头均显式执行 `npm run build`（使 `check:version`、`check:types`、`npm test`、`test:host`、`check:package` 与 `check-release-path` 均作用于新构 `dist/`），`publish` job 全部经 `(cd dist && npm ... publish)` 发布产物包。
+- **`client.js` 纳入独立严格类型门禁**：新增 `tsconfig.client.json`（`include: ["client.js"]`、`allowJs: true`、`checkJs: true`、`strict: true`、`noEmit: true`、`lib: ["es2023", "dom"]`、`types: []`）与 `npm run check:types`，接入 `npm test` 链及两个工作流。
+
+**怎么钉住**：新增 `scripts/check-release-path.mjs` 并在 `npm test` 与双工作流运行：① 检查 `dist` `npm pack --dry-run` 包含 `dist/package.json` 声明的全部 `main`/`exports`/`bin`；② 检查根目录 `package.json` 为 `private: true` 且无发布 `files`（或所有声明入口均在根打包中且存在于磁盘）；③ 静态断言 `release.yml` 的 `verify` 顺序与 `publish` 从 `dist/` 发布。同时 `npm run check:types` 真执行 `tsc -p tsconfig.client.json`。

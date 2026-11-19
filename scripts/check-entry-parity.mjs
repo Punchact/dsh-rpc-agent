@@ -145,26 +145,29 @@ for (const binRel of ["bin/dsh-rpc.mjs", "bin/dsh-rpc-mcp.mjs"]) {
 // 3. package.json exports subpaths in src vs dist
 const srcPkg = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8"));
 const distPkg = JSON.parse(readFileSync(join(DIST, "package.json"), "utf8"));
+const stripDistPrefix = (target) =>
+  typeof target === "string" ? target.replace(/^\.\/dist\//, "./").replace(/^dist\//, "") : target;
 
 const srcExports = srcPkg.exports ?? {};
 const distExports = distPkg.exports ?? {};
 
 for (const [subpath, srcTarget] of Object.entries(srcExports)) {
   checkedItems += 1;
+  const normalizedSrcTarget = stripDistPrefix(srcTarget);
   const distTarget = distExports[subpath];
-  if (distTarget !== srcTarget) {
+  if (distTarget !== normalizedSrcTarget) {
     problems.push(
-      `exports["${subpath}"] 在 dist/package.json 不一致: src=${JSON.stringify(srcTarget)} vs dist=${JSON.stringify(distTarget)}`,
+      `exports["${subpath}"] 在 dist/package.json 不一致: src=${JSON.stringify(srcTarget)} (规范化=${JSON.stringify(normalizedSrcTarget)}) vs dist=${JSON.stringify(distTarget)}`,
     );
     continue;
   }
-  if (typeof srcTarget !== "string") {
-    problems.push(`exports["${subpath}"] 不是字符串目标: ${JSON.stringify(srcTarget)}`);
+  if (typeof distTarget !== "string") {
+    problems.push(`exports["${subpath}"] 不是字符串目标: ${JSON.stringify(distTarget)}`);
     continue;
   }
-  if (srcTarget.includes("*")) {
+  if (distTarget.includes("*")) {
     // Expand wildcard pattern such as ./locale/*.json
-    const relPattern = srcTarget.replace(/^\.\//, "");
+    const relPattern = distTarget.replace(/^\.\//, "");
     const starIdx = relPattern.indexOf("*");
     const dirRel = posix.dirname(relPattern);
     const basePattern = posix.basename(relPattern);
@@ -189,16 +192,16 @@ for (const [subpath, srcTarget] of Object.entries(srcExports)) {
     continue;
   }
 
-  const srcRel = srcTarget.replace(/^\.\//, "");
-  const srcResolved = resolveSourceEntryPath(srcRel);
-  const distResolved = resolve(DIST, srcTarget);
-  const distRel = toPosixRel(DIST, distResolved);
+  const distRel = distTarget.replace(/^\.\//, "");
+  const srcResolved = resolveSourceEntryPath(distRel);
+  const distResolved = resolve(DIST, distTarget);
+  const resolvedDistRel = toPosixRel(DIST, distResolved);
   if (!srcResolved) {
-    problems.push(`exports["${subpath}"] 源码目标不存在: ${srcRel}`);
+    problems.push(`exports["${subpath}"] 源码目标不存在: ${distRel}`);
   } else if (!existsSync(distResolved)) {
-    problems.push(`exports["${subpath}"] 产物目标不存在: dist/${distRel}`);
-  } else if (srcRel !== distRel) {
-    problems.push(`exports["${subpath}"] 解析路径不一致: src=${srcRel} vs dist=${distRel}`);
+    problems.push(`exports["${subpath}"] 产物目标不存在: dist/${resolvedDistRel}`);
+  } else if (distRel !== resolvedDistRel) {
+    problems.push(`exports["${subpath}"] 解析路径不一致: ${distRel} vs ${resolvedDistRel}`);
   }
 }
 
