@@ -76,7 +76,7 @@ Repository and package name are both `dsh-rpc-agent`; the commands (`dsh-rpc`, `
 - **Self-describing**: `dsh_capabilities` returns an eight-section snapshot (runtime, permission presets, callable tools, MCP prefixes, sessions, workspaces, plugins), so a planner does not have to guess what this machine offers.
 - **No pretend knowledge**: when an outer client caps tool calls below the bridge budget, the bridge says so and recommends polling in slices instead of letting a long job look like a failure.
 - **Managed external agent tasks (Task centre, `tasksEnabled: false` by default)**: a 15-table SQLite ledger, 11-state machine, and capability cards/read-only probes driving DSH itself, Antigravity, and Codex App Server; see [docs/task-center.md](./docs/task-center.md).
-- **Regression tests guard the sharp edges**: 45 test files (387 cases) + catalog smoke (387/387 pass locally, including the 15 `approvals` cases) + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
+- **Regression tests guard the sharp edges**: 45 test files (388 cases) + catalog smoke (388/388 pass locally, including the 15 `approvals` cases) + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
 
 ## Install and update
 
@@ -757,7 +757,7 @@ Everything the page shows comes from that read-only endpoint; it writes nothing.
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 45 test files, 387 cases, plus catalog smoke; no running Harness needed
+npm test                       # 45 test files, 388 cases, plus catalog smoke; no running Harness needed
 node test/host.test.mjs        # 1 case: real WebServer integration (needs npm ci first)
 node test/e2e.mjs              # 14 cases: end to end against a real Harness (--cwd takes an absolute path only)
 node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a real Harness
@@ -812,7 +812,7 @@ npm run docs:surface    # re-extract the snapshot after editing the plan doc (ne
 | `adapters-codex` | 5 | `codex.exe` discovery, `stdio://` handshake, frame shape and size limits, event queue, `turn/interrupt` |
 | `adapters-dsh` | 8 | DSH baseline 7-op mapping, honest stop, `resultValid: false`, and dispatch integration |
 | `methods-dsh-ops` | 2 | `createDshAdapterOps` error containment, auto-wiring, `registerAgent`, `decideApproval` |
-| `tasks-dispatch` | 11 | `startTask`/`pump`/`drainEffects`, lease reclamation, atomic `maxConcurrent` gate, failure sanitising |
+| `tasks-dispatch` | 12 | `startTask`/`pump`/`drainEffects`, lease reclamation, atomic `maxConcurrent` gate, failure sanitising |
 | `tasks-autopilot` | 7 | The advance loop: every active status covered, one failure does not stop the pass, a slow pass does not stack, an empty ledger stays quiet, async paging is awaited before dispatch, and a broken ledger reports instead of throwing |
 | `config-breakers` | 3 | Five circuit-breaker defaults, valid bounds, `ConfigError` rejections |
 | `index-wiring` | 3 | Off leaves DB untouched, on initializes/seeds, external adapter init degradation |
@@ -843,7 +843,7 @@ A few worth calling out:
 - **Edge** probes the protocol layer: batches, notifications, id shapes, auth headers, oversized bodies (a genuine 413, not a dropped connection), parameter-injection defences, timeout clamping, concurrent asks, `limit` semantics.
 - **Port drift** (manual): point `endpoint.json` at a dead port and run `dsh-rpc ping`; expect exit code 3 and a readable error mentioning `nothing is listening`, `pid` and `health --wait`.
 
-Local verification (2026-11-19, 0.9.0, real repository): all 45 test files in the `npm test` chain pass (**387/387** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.mjs` (`methods: 34` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`). Formatting (UTF-8 without BOM, LF) is a review convention here, not an automated gate.
+Local verification (2026-11-19, 0.9.0, real repository): all 45 test files in the `npm test` chain pass (**388/388** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.mjs` (`methods: 34` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`). Formatting (UTF-8 without BOM, LF) is a review convention here, not an automated gate.
 
 ## License
 

@@ -214,7 +214,11 @@ export async function apply(ctx, input = {}) {
       let passRunning = false;
       let inFlightPass = Promise.resolve();
       const drainTimer = setInterval(() => {
-        if (shuttingDown) return;
+        // A pass owns `passRunning` until its `drainEffects` settles. Starting another pass while
+        // one is still draining would let the newer (usually faster) chain clear `passRunning`
+        // first and mark the hub idle while the older chain is still writing — and an idle-looking
+        // shutdown then closes the store underneath it.
+        if (shuttingDown || passRunning) return;
         passRunning = true;
         const tick = autopilot
           ? autopilot
