@@ -9,9 +9,9 @@
 - **任务中心账本与状态机**（默认 `$DSH_HOME/storages/task-center/tasks.db`，WAL + `foreign_keys=ON`）：
   - 新建 15 张表（`schema_meta`、`principals`、`workspaces`、`agents`、`capability_revisions`、`previews`、`tasks`、`mandates`、`attempts`、`events`、`effects`、`inputs`、`approvals`、`artifacts`、`attention`）。
   - 11 态任务状态机、`expectedStateVersion` 乐观锁、基于 `(principalId, idempotencyKey)` 的提交/控制幂等校验、`effects` 持久出箱（带 `lease_expires_at` 租约回收）与一次性 `previews` 绑定。
-  - 派生阶段 `derivePhase` 按 8 档优先级现算（`person/delivery` → `person/approval` → `person/answer` → `person/reconcile` → `person/review` → `machine/queued` → `machine/working` → `done`），不写回数据库。
-- **RPC、MCP 与 CLI 扩展**（JSON-RPC 方法总数 **17 → 31**，MCP 工具 **11（默认）+ 6（`tasksEnabled: true` 时共 17 个）**）：
-  - 新增 13 个任务 RPC：`dsh.tasks.{preview,submit,get,list,events,cancel,dispatch,pump,reconcile,decideApproval,input,readArtifact,resolve}`（`resolve` 是唯一的人工签收入口，只在 RPC/CLI 面，不进 MCP）；新增 4 个代理 RPC：`dsh.agents.{register,list,probe,get}`。
+  - 派生阶段 `derivePhase` 按 8 档优先级现算（`person/delivery` → `person/approval` → `person/reconcile` → `person/answer` → `person/review` → `machine/queued` → `machine/working` → `done`；核对期压过遗留问题见「修复」一节第五条），不写回数据库。
+- **RPC、MCP 与 CLI 扩展**（JSON-RPC 方法总数 **17 → 34**，MCP 工具 **11（默认）+ 11（`tasksEnabled: true` 时共 22 个）**）：
+  - 新增 13 个任务 RPC 与 4 个代理 RPC（合计 17 个，方法总数 17 → 34）：`dsh.tasks.{preview,submit,get,list,events,cancel,dispatch,pump,reconcile,decideApproval,input,readArtifact,resolve}`（`resolve` 是唯一的人工签收入口，只在 RPC/CLI 面，不进 MCP）；新增 4 个代理 RPC：`dsh.agents.{register,list,probe,get}`。
   - 新增 11 个受开关门控的 MCP 工具：`dsh_task_{submit,list,get,cancel,preview,events,read_artifact,input}` 与 `dsh_agents_{list,probe,get}`（有意排除 `resolve`、`reconcile` 与 `decideApproval`，人工核对、签收与审批留在 RPC/CLI 面）。
   - 新增 CLI 子命令：`dsh-rpc tasks <preview|submit|list|get|cancel|dispatch|pump|reconcile|approve>` 与 `dsh-rpc agents <register|list|probe>`。
 - **三个执行方适配器**（统一实现七操作契约 `probe`/`start`/`inspect`/`sendInput`/`cancel`/`events`/`decideApproval`）：

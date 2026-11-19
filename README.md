@@ -732,6 +732,8 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 - **轨迹有预算，结构化只在 `full`**：`errors` / `summary` / `full` 分别封顶 4 行 600 字、20 行 1200 字、40 行 8000 字；超出部分只留 `… +N more`，要逐条完整体验用 `trace: "full"` 或读 `dsh_history`。
 - **`dsh_history` 会当面揭穿旧插件**：桥连着 0.8.1 之前的插件时，`since` / `kinds` / `max_chars` 会被静默忽略；此时结果头部改用 `note:` 说明「这窗口没被过滤/截断」，而不是假装已经过滤。升级插件后即消失。
 - **`maxResultChars` 治不了外层的 413**：它只截单轮正文（默认 20000 字）。外层客户端（例如 Codex 的 `codex-auto-review` 旁路请求）被累计上下文撑爆时，靠截断单次结果救不回来——那要在调用方控制上下文。
+- **`principalId` 是命名空间，不是授权边界**：任务账本用它分区、做 `(principalId, idempotencyKey)` 幂等，并在传了它时校验 `get` / `cancel` 的归属；`list` / `input` / `readArtifact` / `resolve` 不读它。真正的鉴权边界仍是 loopback token 加本机用户（见上面那条 token 泄漏面）。要跨主体隔离，得把它变成强制参数并逐方法校验——这是未完成项，不是已经实现的隔离。
+- **适配器只有 DSH 自身在真机上跑过**：DSH 适配器有真机端到端证据（正常链、取消链、诚实性三组用例）；Antigravity 与 Codex 适配器目前只有离线套件与静态契约证据，未接真实执行方（方案 A07/A14/A18 未验收）。
 
 ## 排障
 

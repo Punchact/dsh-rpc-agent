@@ -94,7 +94,7 @@ test("raw call --timeout overrides the JSON timeoutMs", async () => {
   // override took effect (not the JSON 1234) without pinning a millisecond.
   const forwarded = calls.at(-1).params.timeoutMs;
   assert.equal(typeof forwarded, "number");
-  assert.ok(forwarded > 1234, `--timeout must override the JSON value, got ${forwarded}`);
+  assert.ok(forwarded >= 2000, `the first slice must be nearly the whole budget, got ${forwarded}`);
   assert.ok(forwarded <= 2345, `a wait must never ask for more than its budget, got ${forwarded}`);
 });
 

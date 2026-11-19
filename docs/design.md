@@ -558,7 +558,7 @@ compression: gzip
 
 ## 29. 决策 0.9.0-b：派生阶段现算不落库（避免第二真相）
 
-- **决策**：对外展示的 `phase`（`person/delivery`、`person/approval`、`person/answer`、`person/reconcile`、`person/review`、`machine/queued`、`machine/working`、`done`）每次读取通过纯函数 `derivePhase(task, attentionRows, lastEvent)` 按固定优先级现场派生，不在 `tasks` 表额外存 `phase` 列。
+- **决策**：对外展示的 `phase`（`person/delivery`、`person/approval`、`person/answer`、`person/reconcile`、`person/review`、`machine/queued`、`machine/working`、`done`；0.9.0-q 起核对期提前到遗留问题之前，当前顺序见 §44）每次读取通过纯函数 `derivePhase(task, attentionRows, lastEvent)` 按固定优先级现场派生，不在 `tasks` 表额外存 `phase` 列。
 - **为什么**：若在数据库同时维护 `status`、`attention.status` 和 `phase` 两个/三个可变列，只要任何一条分支（如审批过期、人工核对关闭 attention、重连推进）忘了同步改写 `phase`，界面就会出现「状态是 `running` 或 `attention` 已空，但 `phase` 还显示在等你审批」的分裂真相。纯函数现算确保「谁在等谁」永远严格派生自唯一真相源。
 - **反例或代价**：每次 `get` 需读取任务行、关联的 `attention` 行与末条事件再计算一次（同一次读事务内几微秒级别），且无法直接写 `WHERE phase = 'person/approval'` 的单列索引查询；若未来列表需按 `phase` 过滤，应写等价 SQL 谓词或物化视图，而不是把可写状态拆成两份。
 
@@ -653,7 +653,7 @@ compression: gzip
 6. **如实记录**：这三处（事件入口、预览归属/探测、探测抹声明）都不是评审或单测能发现的，它们的共同前提是「已经有一个可用的修订 id」。真机冒烟的价值就在这里。
 
 
-## 42. 决策 0.9.0-o：轮询必须幂等，未确认的停止必须升级
+## 41. 决策 0.9.0-o：轮询必须幂等，未确认的停止必须升级
 
 首次真机端到端（2026-11-19，0.9.0 装在 desktop profile 上、`tasksEnabled: true`）跑出三条缺陷，全部是离线套件不会出现的：
 
@@ -663,7 +663,7 @@ compression: gzip
 
 **由此得到的规矩**：任何「轮询就能拿到」的外部状态，进账本前必须有稳定标识；任何「已受理但未确认」的副作用，必须有升级路径，而不是只留一个等待态。这三条离线套件都抓不到，因为假适配器不会像真执行方那样反复描述同一个状态。
 
-## 41. 决策 0.9.0-n：问答、产物与执行方读回是三条独立入口
+## 42. 决策 0.9.0-n：问答、产物与执行方读回是三条独立入口
 
 `dsh.tasks.input` / `dsh.tasks.readArtifact` / `dsh.agents.get` 的边界：
 
@@ -705,3 +705,12 @@ compression: gzip
 - **现象二（核对期被租约压住）**：任务因「停止没被确认」进了 `needs_reconcile`，派发期写的 `effects.lease_expires_at` 还在未来，而 `derivePhase` 的核对期分支要求 `leaseExpiresRaw == null`——于是阶段还是 `machine/working`，人看到「机器还在干活」，实际在等他对账。
 - **取舍二：停止不可信信号自成核对理由**。租约回答的是「谁在跑这一单」，无从回答「它说停了能不能信」。`cancel.unsupported` / `cancel.unconfirmed` / `cancel.failed` / `dispatch.orphaned` 任一出现即算核对到期，租约到期仍是另一条独立理由，两条都不再互相要求前置条件。
 - **回归钉法**：`two ready reports for one task ask one review question`（只开一单、两条 `report.invalid` 都在）与 `a stop nobody confirmed is reconcile-due even while the dispatch lease is open`（活动租约 + `cancel.unconfirmed` → `person/reconcile`，标签 `Needs reconciliation`），均在 `test/tasks-engine.test.mjs`。
+
+## 46. 决策 0.9.0-s：principalId 是命名空间，鉴权边界仍在进程之外
+
+全面复盘时挨着方案 A06（身份隔离）逐方法读了一遍实现，结论要写在文档里，而不是等验收时才发现口径不同。
+
+- **现状**：`lib/tasks/engine.mjs` 的 `get()` 与 `cancel()` 在调用方传了 `principalId` 时比对 `detail.principalId`，不一致按 `notFound` 处理；`list()` 只把 `params.principalId` 当过滤条件；`input()` / `readArtifact()` 直接调 `recordInput(store, params)` / `readArtifact(store, params)`，完全不看 `principalId`；`resolve()` 的入参里没有这个字段。也就是说：`principalId` 目前负责**分区、幂等作用域与审计归属**，不构成**跨主体授权**。
+- **为什么现在就写成这样**：这套任务中心的第一批使用方是本机同一个人的若干 agent（Codex 出规划、DSH 执行、Antigravity 兜底）。它们同属一个 OS 用户、共用同一个 loopback token，进程边界之上没有可信的身份来源；在这一层做「伪隔离」只会增加参数与分支，不增加任何实际抵抗力。
+- **真正的边界在哪**：token 文件（`$DSH_HOME/dsh-rpc/token` 或 `DSH_RPC_TOKEN`）加本机文件系统权限。谁能读到 token，谁就能调全部方法——这一点在 README 的「已知边界」里已经对等披露，包括子会话能读到 token 的实测结论。
+- **将来要真隔离，得先有身份来源**：把 `principalId` 变成每个方法都强制、且由传输层注入（不能由调用方自选）的参数，再配一个主体→token 的映射；在那之前，A06 只能算「未实现」，不能算「已通过」。这条已写进 README 的「已知边界」，避免使用者以为它不是同一个人的 agent 就天然被隔离。
