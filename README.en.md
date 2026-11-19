@@ -833,7 +833,7 @@ npm run docs:surface    # re-extract the snapshot after editing the plan doc (ne
 
 </details>
 
-`npm test` runs these 45 test files plus the catalog smoke in a fixed order; `npm run test:host` runs the real-WebServer integration test; `npm run test:e2e` / `npm run test:edge` need a live Harness.
+`npm test` runs these 46 test files plus the catalog smoke in a fixed order; `npm run test:host` runs the real-WebServer integration test; `npm run test:e2e` / `npm run test:edge` need a live Harness.
 
 > [!TIP]
 > **If `node --test` hits `spawn EPERM` in a restricted sandbox**: run individual files via `node <file>` or pass `node --test --test-isolation=none <file>`.

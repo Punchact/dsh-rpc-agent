@@ -85,6 +85,8 @@ const expected = {
 // 每条规则：文件、正则（必须带命名组）、每组对应的期望值。`onlyLatest` 表示只作用于
 // CHANGELOG 最新一节（历史章节的数字是当时的事实，不该被后来的改动覆盖）。
 const rules = [
+  { file: "README.md", onlyLatest: false, re: /跑这 (?<files>\d+) 个测试文件/g, expect: () => ({ files: expected.testFiles }) },
+  { file: "README.en.md", onlyLatest: false, re: /runs these (?<files>\d+) test files/g, expect: () => ({ files: expected.testFiles }) },
   { file: "README.md", onlyLatest: false, re: /(?<files>\d+) 个测试文件共 (?<cases>\d+) 例/g, expect: (m) => ({ files: expected.testFiles, cases: expected.testCases }) },
   { file: "README.md", onlyLatest: false, re: /本机实测 (?<pass>\d+)\/(?<total>\d+) 通过/g, expect: () => ({ pass: expected.testCases, total: expected.testCases }) },
   { file: "README.md", onlyLatest: false, re: /共 \*\*(?<n>\d+) 个\*\* JSON-RPC 方法/g, expect: () => ({ n: expected.rpcTotal }) },
@@ -173,7 +175,12 @@ for (const table of suiteTables) {
   }
   const startIdx = headerMatch.index + headerMatch[0].length;
   const closeIdx = text.indexOf("</details>", startIdx);
-  const body = text.slice(startIdx, closeIdx < 0 ? undefined : closeIdx);
+  if (closeIdx < 0) {
+    // 缺闭合标签时不能"扫到文件尾"了事：下面若还有同构表格，行数会静默失真。
+    problems.push(`${table.file}: 测试表缺少 </details> 闭合标签 — 修好标签再谈行数`);
+    continue;
+  }
+  const body = text.slice(startIdx, closeIdx);
   const rows = body.split("\n").filter((line) => /^\| `[a-z0-9-]+` \| \d+ \|/.test(line)).length;
   if (rows !== expected.testFiles) {
     const line = text.slice(0, startIdx).split("\n").length;

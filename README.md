@@ -833,7 +833,7 @@ npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案
 
 </details>
 
-`npm test` 按固定顺序跑这 45 个测试文件和 catalog smoke；`npm run test:host` 跑真实 WebServer 集成；`npm run test:e2e` / `npm run test:edge` 要活的 Harness。
+`npm test` 按固定顺序跑这 46 个测试文件和 catalog smoke；`npm run test:host` 跑真实 WebServer 集成；`npm run test:e2e` / `npm run test:edge` 要活的 Harness。
 
 > [!TIP]
 > **受限沙箱里 `node --test` 可能触发 `spawn EPERM`**：若默认并发子进程被拦，使用 `node --test --test-isolation=none <file>` 或单文件 `node <file>` 运行。
