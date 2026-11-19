@@ -36,7 +36,7 @@
 - **「有 attempt 但没 locator」是同一个坑的另一种形状**：孤儿守卫最初只判「`dispatching` 且没有 attempt 行」，而 `recordAttemptStart({ markRunning: false, runtimeLocator: null })`（或启动成功却没回 locator 的适配器）会留下「有行、无 locator」——守卫被跳过，`adapter.events(null)` 照样每遍抛错。改为按 locator 判断，事件里补 `attemptRecorded` 与 `attemptId` 便于定位；`startOrphanGraceMs` 也按 `maxConcurrent` 的口径归一化（`NaN`/负数回落默认值，不允许静默变成零宽限）。
 - **推进环与停机共用一把锁**：定时器原来只判 `shuttingDown`，`drainEffects` 慢于间隔时第二遍会覆盖 `inFlightPass` 并先置空闲，第一遍仍在写账本时 `cleanupTasks` 已判定可以关库。现在 `passRunning` 兼作重入守卫（上一遍含排水未完则跳过本遍），`cleanupTasks` 只在真有在途遍时等待，其余情况同步关闭。
 - **核对期被事件名枚举漏掉**：`derivePhase` 原先把 `cancel.unsupported` / `cancel.unconfirmed` / `cancel.failed` / `dispatch.orphaned` 与租约过期当作核对理由，而 `dispatch.failed`、`inspect.unknown` 同样会进 `needs_reconcile` —— 于是阶段跌回 `machine/working`，人看到的是「机器还在干活」，实际在等他对账。改为状态本身即职责：`status === "needs_reconcile"` 一律 `person/reconcile`，不再枚举理由。
-- `scripts.test` 新增并接入 20 个任务中心与 CLI/适配器测试套件（全链 46 个测试文件、420 例，本机 420/420 通过；CI 结果见 PR #30），并更新 `catalog.smoke.mjs` 校验 34 个 RPC 方法。
+- `scripts.test` 新增并接入 20 个任务中心与 CLI/适配器测试套件（全链 46 个测试文件、422 例，本机 422/422 通过；CI 结果见 PR #30），并更新 `catalog.smoke.mjs` 校验 34 个 RPC 方法。
 - `dispatch.mjs` 修复了租约到期回收与原子 `maxConcurrent` 门控竞态，防止同一写事务之外并发超发或将任务卡死在 `dispatching` / `in_flight`。
 - **取消确认后立刻收口**：适配器回报 `confirmedStopped: true`（DSH 会话真停了、Antigravity 回执里含该 cascadeId）时，同一次出箱排水内把任务从 `cancel_requested` 推进到 `cancelled` 并写 `cancel.confirmed`；此前只把 effect 标完成，任务会悬在 `cancel_requested` 等一个已停会话永远不会发出的事件。Codex 的 `turn/interrupt` 只算受理，故不设该标志。
 - **幂等键不再掩盖改过的请求**：`cancel` / `resolve` 的重放分支会比较请求意图（取消原因；处置结论 + 证据引用），同键异载荷抛 `STATE_CONFLICT`（`reason: "idempotency_payload_mismatch"`）。`expectedStateVersion` 属并发护栏、重试时本就会变，不参与比较。
@@ -82,7 +82,7 @@
 - **`dispatching` 崩溃窗口的隔离演练**：`audit-tmp/smoke-090/a04b-dispatching-crash.mjs`——worker 子进程在「`dispatching` 已写、attempt 未落库」时被 `exit(9)` 真杀掉，父进程重开账本断言崩溃现场（停在 `dispatching`、无 attempt 行），再让推进环接手：`needs_reconcile` + `person/reconcile` + `dispatch.orphaned`（证据里 `attemptRecorded: false`）、全程不碰适配器事件接口、槽位释放后队列继续走。11/11 PASS。
 - **两道门禁收紧**：①`docs/counts.json` 的用例数不再能手填——`npm run count:cases` 真跑一遍 TAP 才写，并附测试文件摘要与声明条数；`check:docs` 重算后遇到「文件变了数字没重算」或「用例数少于声明条数」直接失败，`docs:surface`/`docs:counts` 也刷不出一个假的数。②`check:surface --write` 新增 `implementationOnly` 条目必须显式 `--accept-new`，否则只列出来并失败，不再能靠重抽快照把新接口自我声明掉。
 
-- 计数：全链 46 个测试文件、420 例，本机 420/420 通过。
+- 计数：全链 46 个测试文件、422 例，本机 422/422 通过。
 
 ### 0.9.3 开发期
 
