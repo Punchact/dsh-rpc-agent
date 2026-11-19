@@ -8,8 +8,9 @@
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test, { after } from "node:test";
+import ts from "typescript";
 
 // The sticky-session registry lives under `$DSH_HOME/dsh-rpc/`. A suite that
 // remembered a session between runs would make "created" vs "reused" depend on
@@ -17,7 +18,7 @@ import test, { after } from "node:test";
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), "dsh-rpc-home-"));
 
 import { resolveConfig } from "../dist/lib/config.mjs";
-import { collectTurn, createMethods } from "../dist/lib/methods.mjs";
+import { collectTurn, createMethods, METHOD_CATALOG } from "../dist/lib/methods.mjs";
 import { buildDispatcher } from "../dist/lib/http.mjs";
 
 // The bridge deliberately `unref()`s its timers so a bridge run never keeps the
@@ -1871,4 +1872,189 @@ test("history enforces maxChars with an explicit truncated flag and validates ba
   await assert.rejects(() => methods.history({ sessionId: "session-test", since: -1 }), (err) => err.code === -32602);
   await assert.rejects(() => methods.history({ sessionId: "session-test", kinds: "tool/call" }), (err) => err.code === -32602);
   await assert.rejects(() => methods.history({ sessionId: "session-test", maxChars: -5 }), (err) => err.code === -32602);
+});
+
+test("METHOD_CATALOG is single source of truth for createMethods().handlers and ping.taskCentre projection", async () => {
+  assert.equal(METHOD_CATALOG.length, 34);
+  const autopilot = { enabled: true, intervalMs: 5_000, maxStart: 2, maxPump: 4 };
+  const autopilotStats = {
+    passes: 3,
+    lastPassAt: "2026-11-19T00:00:00.000Z",
+    lastStarted: 1,
+    lastPumped: 2,
+    lastFailed: 0,
+    lastError: null,
+  };
+  const methods = createMethods(
+    {
+      sessionController: fakeController({ script: happyScript }),
+      webServer: ORIGIN,
+      taskCentre: {
+        enabled: true,
+        mode: "memory",
+        ready: true,
+        dbPath: null,
+        seedError: null,
+        startError: null,
+        autopilot,
+        autopilotStats,
+      },
+    },
+    resolveConfig({ tasksEnabled: true }),
+    { get: () => undefined },
+    { tokenSource: "env" },
+  );
+
+  const catalogNames = METHOD_CATALOG.map((entry) => entry.name).sort();
+  const handlerKeys = Object.keys(methods.handlers).sort();
+  assert.deepEqual(handlerKeys, catalogNames);
+  for (const name of catalogNames) {
+    assert.equal(typeof methods.handlers[name], "function", `missing handler for ${name}`);
+  }
+
+  const discovered = await methods.handlers["dsh.discover"]();
+  assert.equal(discovered.methods.length, 34);
+  const ping = await methods.handlers["dsh.ping"]();
+  assert.deepEqual(ping.taskCentre.autopilot, autopilot);
+  assert.deepEqual(ping.taskCentre.autopilotStats, autopilotStats);
+});
+
+test("MethodName, METHOD_CATALOG, createMethods().handlers, and Params contracts reject invalid keys/shapes at tsc compile time", () => {
+  const repoRoot = resolve(import.meta.dirname, "..");
+  const configPath = resolve(repoRoot, "tsconfig.json");
+  const parsed = ts.parseJsonConfigFileContent(
+    ts.readConfigFile(configPath, ts.sys.readFile).config,
+    ts.sys,
+    repoRoot,
+  );
+  // Never emit, never write build info, never touch the repo: the two probes live in memory.
+  const options = { ...parsed.options, noEmit: true, incremental: false, composite: false, declaration: false };
+  const validFile = resolve(repoRoot, "src/lib/__methods_valid_probe__.mts");
+  const badFile = resolve(repoRoot, "src/lib/__methods_bad_probe__.mts");
+
+  const validSource = `
+import {
+  createMethods,
+  METHOD_CATALOG,
+  type MethodCatalogEntry,
+  type MethodName,
+  type PingTaskCentreProjection,
+  type RpcMethodHandler,
+  type TasksCancelParams,
+  type TasksSubmitParams,
+} from "./methods.mjs";
+import { buildDispatcher } from "./http.mjs";
+
+const catalog: readonly MethodCatalogEntry[] = METHOD_CATALOG;
+const validName: MethodName = "dsh.tasks.submit";
+const methods = createMethods({ sessionController: null });
+const dispatch = buildDispatcher(methods);
+const submitHandler: RpcMethodHandler = methods.handlers[validName];
+const submitParams: TasksSubmitParams = {
+  idempotencyKey: "k1",
+  capabilityRevisionId: "rev-1",
+  workspaceId: "ws-1",
+  agentId: "agent-1",
+};
+const cancelParams: TasksCancelParams = {
+  taskId: "t1",
+  expectedStateVersion: 1,
+  idempotencyKey: "k2",
+};
+async function checkPing(): Promise<PingTaskCentreProjection> {
+  const res = await methods.ping();
+  const passes: number | undefined = res.taskCentre.autopilotStats?.passes;
+  void passes;
+  return res.taskCentre;
+}
+void catalog; void dispatch; void submitHandler; void submitParams; void cancelParams; void checkPing;
+`;
+
+  const badSource = `
+import {
+  createMethods,
+  type MethodName,
+  type RpcMethodHandler,
+  type TasksCancelParams,
+} from "./methods.mjs";
+
+const badName: MethodName = "dsh.tasks.nonexistent";
+const methods = createMethods({ sessionController: null });
+const missingHandler = methods.handlers["dsh.doesNotExist"];
+const partialMap: Record<MethodName, RpcMethodHandler> = {
+  "dsh.discover": async () => ({}),
+};
+const badCancel: TasksCancelParams = {
+  taskId: "t1",
+  expectedStateVersion: "not-a-number",
+  idempotencyKey: "k1",
+};
+void badName; void missingHandler; void partialMap; void badCancel;
+`;
+
+  const sources = new Map([
+    [validFile, validSource],
+    [badFile, badSource],
+  ]);
+  const host = ts.createCompilerHost(options, true);
+  const origGetSourceFile = host.getSourceFile.bind(host);
+  const origFileExists = host.fileExists.bind(host);
+  const origReadFile = host.readFile.bind(host);
+  host.getSourceFile = (fileName, languageVersion, onError, shouldCreate) => {
+    const resolved = resolve(fileName);
+    const virtual = sources.get(resolved);
+    if (virtual !== undefined) return ts.createSourceFile(fileName, virtual, languageVersion, true);
+    return origGetSourceFile(fileName, languageVersion, onError, shouldCreate);
+  };
+  host.fileExists = (fileName) => sources.has(resolve(fileName)) || origFileExists(fileName);
+  host.readFile = (fileName) => sources.get(resolve(fileName)) ?? origReadFile(fileName);
+  host.writeFile = () => {
+    throw new Error("the type probe must never write to disk");
+  };
+
+  const program = ts.createProgram([validFile, badFile], options, host);
+  const collectDiagnostics = (rootFile) => {
+    const sourceFile = program.getSourceFile(rootFile);
+    if (!sourceFile) throw new Error(`tsc did not load the probe ${rootFile}`);
+    return ts
+      .getPreEmitDiagnostics(program, sourceFile)
+      .filter((diagnostic) => diagnostic.file === sourceFile)
+      .map((diagnostic) => ({
+        code: diagnostic.code,
+        text: ts.flattenDiagnosticMessageText(diagnostic.messageText, " "),
+      }));
+  };
+
+  const validDiagnostics = collectDiagnostics(validFile);
+  assert.deepEqual(
+    validDiagnostics,
+    [],
+    `valid methods probe should compile cleanly, got: ${validDiagnostics.map((d) => `TS${d.code}:${d.text}`).join("; ")}`,
+  );
+
+  const badDiagnostics = collectDiagnostics(badFile);
+  const codes = new Set(badDiagnostics.map((diagnostic) => diagnostic.code));
+  const summary = badDiagnostics.map((d) => `TS${d.code}:${d.text}`).join(" | ");
+  assert.ok(badDiagnostics.length >= 4, `expected >= 4 tsc errors, got ${badDiagnostics.length}: ${summary}`);
+  assert.ok(codes.has(2322), `expected TS2322 for the bogus MethodName and the mistyped field: ${summary}`);
+  assert.ok(
+    codes.has(2339) || codes.has(7053),
+    `expected TS2339/TS7053 for the unknown handler key: ${summary}`,
+  );
+  assert.ok(
+    codes.has(2740) || codes.has(2741) || codes.has(2739),
+    `expected TS2740/TS2741/TS2739 for the partial handler map: ${summary}`,
+  );
+  assert.ok(
+    badDiagnostics.some((diagnostic) => diagnostic.text.includes("Type '\"dsh.tasks.nonexistent\"' is not assignable")),
+    `expected the bogus method name type error in the diagnostics: ${summary}`,
+  );
+  assert.ok(
+    badDiagnostics.some((diagnostic) => diagnostic.text.includes("dsh.doesNotExist")),
+    `expected the unknown handler key in the diagnostics: ${summary}`,
+  );
+  assert.ok(
+    badDiagnostics.some((diagnostic) => diagnostic.text.includes("Type 'string' is not assignable to type 'number'")),
+    `expected the mistyped expectedStateVersion error in the diagnostics: ${summary}`,
+  );
 });

@@ -31,14 +31,12 @@ export interface PingSnapshot {
   };
   config?: unknown;
   activeRuns?: PingActiveRun[];
-  [key: string]: unknown;
 }
 
 export interface CreatedSessionSnapshot {
   sessionId: string;
-  cwd?: string;
+  cwd?: string | null;
   agentPreset?: string | null;
-  [key: string]: unknown;
 }
 
 export type RpcHandler = (params: Record<string, unknown>, context: RpcDispatchContext) => unknown | Promise<unknown>;
@@ -57,7 +55,7 @@ export interface RpcMethodsTable {
   listSessions: (params: Record<string, unknown>) => unknown;
   createSession: (params: Record<string, unknown>) => CreatedSessionSnapshot | Promise<CreatedSessionSnapshot>;
   configure: (params: Record<string, unknown>) => unknown;
-  ask: (params: Record<string, unknown>, context: RpcDispatchContext) => Record<string, unknown> | Promise<Record<string, unknown>>;
+  ask: (params: Record<string, unknown>, context: RpcDispatchContext) => object | Promise<object>;
   prompt: (params: Record<string, unknown>) => unknown;
   wait: (params: Record<string, unknown>, context: RpcDispatchContext) => unknown;
   cancel: (params: Record<string, unknown>) => unknown;
