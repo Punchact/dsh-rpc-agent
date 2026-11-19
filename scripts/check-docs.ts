@@ -8,7 +8,7 @@
 //   - 算不出来的（用例总数要整跑一遍才知道）记在 `docs/counts.json` 里，作为唯一来源。
 //
 // `node scripts/check-docs.ts`         核对：文档里的数字必须与上面两处一致，不一致就失败。
-// `node scripts/check-docs.mjs --write` 同步：把这些数字刷进文档（幂等，再跑一次不会有改动）。
+// `node scripts/check-docs.ts --write` 同步：把这些数字刷进文档（幂等，再跑一次不会有改动）。
 //
 // 匹配用的锚点是固定的；锚点消失也算失败——那样说明这句文档被改写，规则该跟着更新，而不是静默放过。
 import { readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs";
@@ -190,7 +190,7 @@ for (const rule of rules) {
   const body = text.slice(scope.start, scope.end);
   const matches = [...body.matchAll(rule.re)];
   if (matches.length === 0) {
-    problems.push(`${rule.file}: 找不到锚点 ${rule.re} — 这句文档被改写了，请同步更新 scripts/check-docs.mjs 的规则`);
+    problems.push(`${rule.file}: 找不到锚点 ${rule.re} — 这句文档被改写了，请同步更新 scripts/check-docs.ts 的规则`);
     continue;
   }
   for (const m of matches) {
@@ -221,7 +221,7 @@ for (const table of suiteTables) {
   const text = read(table.file);
   const headerMatch = table.header.exec(text);
   if (!headerMatch) {
-    problems.push(`${table.file}: 找不到测试表标题（${table.header}）— 标题被改写了，请同步更新 scripts/check-docs.mjs`);
+    problems.push(`${table.file}: 找不到测试表标题（${table.header}）— 标题被改写了，请同步更新 scripts/check-docs.ts`);
     continue;
   }
   const startIdx = headerMatch.index + headerMatch[0].length;
