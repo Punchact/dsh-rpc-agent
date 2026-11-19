@@ -18,6 +18,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  buildDistManifest,
   collectMigratedOutputs,
   collectUnmigratedFiles,
   verifyDistFidelity,
@@ -77,9 +78,10 @@ for (const rel of unmigrated) {
   copyFileSync(srcPath, destPath);
 }
 
-// 4. Write <staging>/package.json (identical content to root package.json)
-const pkgBytes = readFileSync(join(REPO, "package.json"));
-writeFileSync(join(STAGING, "package.json"), pkgBytes);
+// 4. Write <staging>/package.json (publishable manifest derived from root package.json)
+const rootPkg = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8"));
+const distPkg = buildDistManifest(rootPkg);
+writeFileSync(join(STAGING, "package.json"), `${JSON.stringify(distPkg, null, 2)}\n`, "utf8");
 
 // 5. Assert byte-for-byte SHA-256 fidelity and exact file count
 const check = verifyDistFidelity({

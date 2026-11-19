@@ -22,6 +22,63 @@ const ROOT_FILES = [
   "LICENSE",
 ];
 
+export const DIST_PUBLISH_FILES = [
+  "index.mjs",
+  "client.js",
+  "lib/",
+  "bin/",
+  "locale/",
+  "icon.svg",
+  "cordis.patch.yml",
+  "README.md",
+  "README.en.md",
+  "CHANGELOG.md",
+  "SECURITY.md",
+  "LICENSE",
+  "docs/",
+];
+
+function stripDistPrefix(target, { keepDotSlash = true } = {}) {
+  if (typeof target !== "string") return target;
+  const cleaned = target.replace(/^\.\/dist\//, "./").replace(/^dist\//, "");
+  if (!keepDotSlash) return cleaned.replace(/^\.\//, "");
+  return cleaned;
+}
+
+/**
+ * Derive the publishable `dist/package.json` manifest from the root workspace manifest:
+ * removes `private: true`, rewrites `./dist/` entry targets to package-root paths, sets
+ * `files`, and drops `prepublishOnly` (dist/ has no repo-only `scripts/` or `test/`).
+ */
+export function buildDistManifest(rootPkg) {
+  const distPkg = structuredClone(rootPkg);
+  delete distPkg.private;
+  if (typeof distPkg.main === "string") {
+    distPkg.main = stripDistPrefix(distPkg.main, { keepDotSlash: false });
+  }
+  if (distPkg.exports && typeof distPkg.exports === "object") {
+    const nextExports = {};
+    for (const [k, v] of Object.entries(distPkg.exports)) {
+      nextExports[k] = stripDistPrefix(v);
+    }
+    distPkg.exports = nextExports;
+  }
+  if (distPkg.bin && typeof distPkg.bin === "object") {
+    const nextBin = {};
+    for (const [k, v] of Object.entries(distPkg.bin)) {
+      nextBin[k] = stripDistPrefix(v);
+    }
+    distPkg.bin = nextBin;
+  }
+  distPkg.files = [...DIST_PUBLISH_FILES];
+  if (distPkg.scripts && typeof distPkg.scripts === "object") {
+    const nextScripts = { ...distPkg.scripts };
+    delete nextScripts.prepublishOnly;
+    distPkg.scripts = nextScripts;
+  }
+  return distPkg;
+}
+
 function walkDir(absDir, relPrefix = "", filter = null) {
   if (!existsSync(absDir)) return [];
   const results = [];
@@ -107,12 +164,10 @@ export function verifyDistFidelity({
   if (!existsSync(distPkgPath)) {
     problems.push("缺失产物文件: dist/package.json");
   } else {
-    const srcPkgHash = sha256File(rootPkgPath);
-    const distPkgHash = sha256File(distPkgPath);
-    if (srcPkgHash !== distPkgHash) {
-      problems.push(
-        `package.json 不一致 (src=${srcPkgHash.slice(0, 12)} != dist=${distPkgHash.slice(0, 12)})`,
-      );
+    const expectedPkg = buildDistManifest(JSON.parse(readFileSync(rootPkgPath, "utf8")));
+    const actualPkg = JSON.parse(readFileSync(distPkgPath, "utf8"));
+    if (JSON.stringify(expectedPkg) !== JSON.stringify(actualPkg)) {
+      problems.push("dist/package.json 与从根目录推导的发布清单一不致");
     }
   }
 
