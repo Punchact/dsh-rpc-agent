@@ -5,10 +5,10 @@
 // and wraps every Host call so a missing or throwing service becomes an honest
 // `unavailable` / `partial` section instead of an exception.
 
-import { normalizeSections } from "./capabilities.mjs";
+import { normalizeSections, type CapabilitySectionId, type CollectedCapabilitySection } from "./capabilities.mjs";
 import { PLUGIN_NAME, PLUGIN_VERSION, PROTOCOL_VERSION } from "./version.mjs";
 
-const ALLOWED_SERVICES = new Set([
+const ALLOWED_SERVICES: ReadonlySet<string> = new Set([
   "permissionPresets",
   "tools",
   "sessions",
@@ -19,38 +19,63 @@ const ALLOWED_SERVICES = new Set([
 const TOOL_NAME_CAP = 40;
 const MCP_PREFIX_RE = /^mcp__([^_]+(?:_[^_]+)*?)__/;
 
-function errorMessage(error) {
+export interface CollectFactsHostContext {
+  get?: (name: string) => unknown;
+  [key: string]: unknown;
+}
+
+export interface CollectFactsBridgeState {
+  endpointUrl?: string | null;
+  tokenSource?: string;
+  startedAt?: number;
+  [key: string]: unknown;
+}
+
+export interface CollectFactsOptions {
+  ctx?: CollectFactsHostContext | unknown;
+  config?: Record<string, unknown>;
+  state?: CollectFactsBridgeState | Record<string, unknown>;
+  sessionId?: string | null;
+  sections?: CapabilitySectionId[] | string[] | "*" | null;
+}
+
+type SafeGetResult = { ok: true; service: any } | { ok: false; reason: string };
+type SafeGetFn = (name: string) => SafeGetResult;
+type ToolsReadResult = { ok: false; reason: string } | { ok: true; names: string[]; namesOnly: boolean };
+
+function errorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error ?? "unknown error");
   return message.replace(/\r?\n|\r/g, " ").trim() || "unknown error";
 }
 
-function formatCompactNames(names, cap = TOOL_NAME_CAP) {
+function formatCompactNames(names: string[], cap = TOOL_NAME_CAP): string {
   if (names.length <= cap) return names.join(", ");
   const head = names.slice(0, cap).join(", ");
   return `${head}, … (+${names.length - cap} more)`;
 }
 
-function makeGetter(ctx) {
-  return function safeGet(name) {
+function makeGetter(ctx: CollectFactsHostContext | unknown): SafeGetFn {
+  return function safeGet(name: string): SafeGetResult {
     if (!ALLOWED_SERVICES.has(name)) {
       return { ok: false, reason: `service "${name}" is outside the capability allowlist` };
     }
-    if (!ctx || typeof ctx.get !== "function") {
+    const hostCtx = ctx as CollectFactsHostContext | null | undefined;
+    if (!hostCtx || typeof hostCtx.get !== "function") {
       return { ok: false, reason: `${name} is not a service in this host` };
     }
     try {
-      const service = ctx.get(name);
+      const service = hostCtx.get(name);
       if (service === undefined || service === null) {
         return { ok: false, reason: `${name} is not a service in this host` };
       }
       return { ok: true, service };
-    } catch (error) {
+    } catch (error: unknown) {
       return { ok: false, reason: `${name} failed: ${errorMessage(error)}` };
     }
   };
 }
 
-function collectIdentity({ state }) {
+function collectIdentity({ state }: { state?: CollectFactsBridgeState | Record<string, unknown> }): CollectedCapabilitySection {
   const endpointUrl =
     typeof state?.endpointUrl === "string" && state.endpointUrl.trim().length > 0
       ? state.endpointUrl.trim()
@@ -85,7 +110,7 @@ function collectIdentity({ state }) {
   };
 }
 
-function collectRuntime() {
+function collectRuntime(): CollectedCapabilitySection {
   const uptimeMinutes = Math.max(0, Math.floor(process.uptime() / 60));
   const cwd = process.cwd();
   return {
@@ -107,7 +132,7 @@ function collectRuntime() {
   };
 }
 
-async function collectPermissions(safeGet, sessionId) {
+async function collectPermissions(safeGet: SafeGetFn, sessionId: string | null): Promise<CollectedCapabilitySection> {
   const got = safeGet("permissionPresets");
   if (!got.ok) {
     return { id: "permissions", status: "unavailable", source: "permissionPresets", reason: got.reason };
@@ -122,10 +147,10 @@ async function collectPermissions(safeGet, sessionId) {
     };
   }
 
-  let catalog;
+  let catalog: { defaultPreset?: unknown; options?: unknown[] } | null | undefined;
   try {
     catalog = await service.catalog();
-  } catch (error) {
+  } catch (error: unknown) {
     return {
       id: "permissions",
       status: "unavailable",
@@ -145,13 +170,14 @@ async function collectPermissions(safeGet, sessionId) {
     };
   }
 
-  const options = catalog.options.map((option) => {
+  const options = catalog.options.map((rawOption: unknown) => {
+    const option = rawOption as { value?: unknown; name?: unknown } | null | undefined;
     const value =
       typeof option?.value === "string" && option.value.trim()
         ? option.value.trim()
         : typeof option?.name === "string" && option.name.trim()
           ? option.name.trim()
-          : String(option ?? "");
+          : String(rawOption ?? "");
     return {
       value,
       name: typeof option?.name === "string" ? option.name : value,
@@ -162,13 +188,18 @@ async function collectPermissions(safeGet, sessionId) {
     option.value === defaultPreset ? `${option.value} (default)` : option.value,
   );
   const lines = [options.length > 0 ? `presets: ${labels.join(", ")}` : "presets: (none declared)"];
-  const data = {
+  const data: {
+    defaultPreset: string | null;
+    options: Array<{ value: string; name: string }>;
+    sessionId?: string;
+    sessionPreset?: string | null;
+  } = {
     defaultPreset,
     options,
   };
 
   if (sessionId) {
-    let sessionPreset = null;
+    let sessionPreset: string | null = null;
     if (typeof service.current !== "function") {
       lines.push(`session ${sessionId}: current preset unavailable (current() not exposed)`);
     } else {
@@ -185,7 +216,7 @@ async function collectPermissions(safeGet, sessionId) {
             sessionPreset = typeof current === "string" && current.trim() ? current.trim() : null;
             lines.push(`session ${sessionId}: ${sessionPreset ?? "unset"}`);
           }
-        } catch (error) {
+        } catch (error: unknown) {
           lines.push(`session ${sessionId}: lookup failed (${errorMessage(error)})`);
         }
       }
@@ -203,14 +234,14 @@ async function collectPermissions(safeGet, sessionId) {
   };
 }
 
-function readTools(safeGet) {
+function readTools(safeGet: SafeGetFn): ToolsReadResult {
   const got = safeGet("tools");
   if (!got.ok) {
     return { ok: false, reason: got.reason };
   }
   const service = got.service;
 
-  let raw;
+  let raw: unknown;
   let namesOnly = false;
   try {
     if (typeof service.schemas === "function") {
@@ -227,7 +258,7 @@ function readTools(safeGet) {
     } else {
       return { ok: false, reason: "tools service exposes no schemas() method" };
     }
-  } catch (error) {
+  } catch (error: unknown) {
     return { ok: false, reason: `tools query failed: ${errorMessage(error)}` };
   }
 
@@ -235,8 +266,8 @@ function readTools(safeGet) {
     return { ok: false, reason: "tools service did not return a list" };
   }
 
-  const seen = new Set();
-  const names = [];
+  const seen = new Set<string>();
+  const names: string[] = [];
   let sawStringEntry = false;
   let sawObjectEntry = false;
 
@@ -250,11 +281,12 @@ function readTools(safeGet) {
       }
     } else if (item && typeof item === "object") {
       sawObjectEntry = true;
+      const entry = item as { name?: unknown; id?: unknown };
       const candidate =
-        typeof item.name === "string"
-          ? item.name.trim()
-          : typeof item.id === "string"
-            ? item.id.trim()
+        typeof entry.name === "string"
+          ? entry.name.trim()
+          : typeof entry.id === "string"
+            ? entry.id.trim()
             : "";
       if (candidate && !seen.has(candidate)) {
         seen.add(candidate);
@@ -270,7 +302,7 @@ function readTools(safeGet) {
   return { ok: true, names, namesOnly };
 }
 
-function collectTools(toolsResult) {
+function collectTools(toolsResult: ToolsReadResult): CollectedCapabilitySection {
   if (!toolsResult.ok) {
     return { id: "tools", status: "unavailable", source: "tools", reason: toolsResult.reason };
   }
@@ -298,12 +330,12 @@ function collectTools(toolsResult) {
   };
 }
 
-function collectMcp(toolsResult) {
+function collectMcp(toolsResult: ToolsReadResult): CollectedCapabilitySection {
   if (!toolsResult.ok) {
     return { id: "mcp", status: "unavailable", source: "tools(mcp__)", reason: toolsResult.reason };
   }
 
-  const groups = new Map();
+  const groups = new Map<string, Array<{ full: string; short: string }>>();
   let total = 0;
 
   for (const fullName of toolsResult.names) {
@@ -372,14 +404,14 @@ function collectMcp(toolsResult) {
   };
 }
 
-function collectSessions(safeGet, sessionId) {
+function collectSessions(safeGet: SafeGetFn, sessionId: string | null): CollectedCapabilitySection {
   const got = safeGet("sessions");
   if (!got.ok) {
     return { id: "sessions", status: "unavailable", source: "sessions", reason: got.reason };
   }
   const service = got.service;
 
-  let count = null;
+  let count: number | null = null;
   try {
     if (typeof service.size === "number") {
       count = service.size;
@@ -396,7 +428,7 @@ function collectSessions(safeGet, sessionId) {
     } else if (Array.isArray(service)) {
       count = service.length;
     }
-  } catch (error) {
+  } catch (error: unknown) {
     return {
       id: "sessions",
       status: "unavailable",
@@ -421,23 +453,33 @@ function collectSessions(safeGet, sessionId) {
       ? "live session count is not exposed by this host (only lookup by id is available)"
       : `live sessions: ${count}`,
   ];
-  const data = { count };
+  const data: {
+    count: number | null;
+    sessionId?: string;
+    caller?: { id: unknown; cwd: string | null; agentPreset: string | null } | null;
+  } = { count };
 
   if (sessionId) {
-    let caller = null;
+    let caller: { id: unknown; cwd: string | null; agentPreset: string | null } | null = null;
     if (hasLookup) {
       try {
         const session = service.get(sessionId);
         if (session && typeof session === "object") {
-          const cwd = session.header?.cwd ?? session.cwd ?? null;
-          const agentPreset = session.header?.agentPreset ?? session.agentPreset ?? null;
+          const sess = session as {
+            id?: unknown;
+            cwd?: unknown;
+            agentPreset?: unknown;
+            header?: { cwd?: unknown; agentPreset?: unknown };
+          };
+          const cwd = sess.header?.cwd ?? sess.cwd ?? null;
+          const agentPreset = sess.header?.agentPreset ?? sess.agentPreset ?? null;
           caller = {
-            id: session.id ?? sessionId,
+            id: sess.id ?? sessionId,
             cwd: typeof cwd === "string" ? cwd : null,
             agentPreset: typeof agentPreset === "string" ? agentPreset : null,
           };
         }
-      } catch (error) {
+      } catch (error: unknown) {
         lines.push(`session ${sessionId}: lookup failed (${errorMessage(error)})`);
       }
     }
@@ -464,7 +506,7 @@ function collectSessions(safeGet, sessionId) {
   };
 }
 
-function collectWorkspace(safeGet) {
+function collectWorkspace(safeGet: SafeGetFn): CollectedCapabilitySection {
   const got = safeGet("workspaceRegistry");
   if (!got.ok) {
     return { id: "workspace", status: "unavailable", source: "workspaceRegistry", reason: got.reason };
@@ -479,10 +521,10 @@ function collectWorkspace(safeGet) {
     };
   }
 
-  let raw;
+  let raw: unknown;
   try {
     raw = service.list();
-  } catch (error) {
+  } catch (error: unknown) {
     return {
       id: "workspace",
       status: "unavailable",
@@ -501,11 +543,14 @@ function collectWorkspace(safeGet) {
     };
   }
 
-  const items = raw.map((workspace) => ({
-    id: typeof workspace?.id === "string" ? workspace.id : null,
-    title: typeof workspace?.title === "string" ? workspace.title : null,
-    path: typeof workspace?.path === "string" ? workspace.path : null,
-  }));
+  const items = raw.map((workspace: unknown) => {
+    const ws = workspace as { id?: unknown; title?: unknown; path?: unknown } | null | undefined;
+    return {
+      id: typeof ws?.id === "string" ? ws.id : null,
+      title: typeof ws?.title === "string" ? ws.title : null,
+      path: typeof ws?.path === "string" ? ws.path : null,
+    };
+  });
 
   const lines = [`${items.length} workspace(s)`];
   const shownItems = items.slice(0, TOOL_NAME_CAP);
@@ -530,7 +575,7 @@ function collectWorkspace(safeGet) {
   };
 }
 
-function collectPlugins(safeGet) {
+function collectPlugins(safeGet: SafeGetFn): CollectedCapabilitySection {
   const got = safeGet("loader");
   if (!got.ok) {
     return { id: "plugins", status: "unavailable", source: "loader", reason: got.reason };
@@ -545,10 +590,10 @@ function collectPlugins(safeGet) {
     };
   }
 
-  let rawEntries;
+  let rawEntries: unknown[];
   try {
     rawEntries = [...service.entries()];
-  } catch (error) {
+  } catch (error: unknown) {
     return {
       id: "plugins",
       status: "unavailable",
@@ -557,14 +602,15 @@ function collectPlugins(safeGet) {
     };
   }
 
-  const names = [];
+  const names: string[] = [];
   for (const entry of rawEntries) {
-    let name = null;
+    let name: unknown = null;
     if (Array.isArray(entry) && entry.length >= 2) {
-      const value = entry[1];
+      const value = entry[1] as { name?: unknown; options?: { name?: unknown }; id?: unknown } | undefined;
       name = value?.name ?? value?.options?.name ?? value?.id ?? entry[0];
     } else if (entry && typeof entry === "object") {
-      name = entry.name ?? entry.options?.name ?? entry.id;
+      const obj = entry as { name?: unknown; options?: { name?: unknown }; id?: unknown };
+      name = obj.name ?? obj.options?.name ?? obj.id;
     } else if (typeof entry === "string") {
       name = entry;
     }
@@ -594,7 +640,13 @@ function collectPlugins(safeGet) {
 /**
  * Collect capability facts for the requested sections without throwing.
  */
-export async function collectFacts({ ctx, config = {}, state = {}, sessionId = null, sections = null } = {}) {
+export async function collectFacts({
+  ctx,
+  config: _config = {},
+  state = {},
+  sessionId = null,
+  sections = null,
+}: CollectFactsOptions = {}): Promise<CollectedCapabilitySection[]> {
   const { sections: wanted } = normalizeSections(sections);
   if (wanted.length === 0) return [];
 
@@ -602,17 +654,17 @@ export async function collectFacts({ ctx, config = {}, state = {}, sessionId = n
   const callerSessionId = typeof sessionId === "string" && sessionId.trim() ? sessionId.trim() : null;
 
   // Read `tools` at most once even when both `tools` and `mcp` are requested.
-  let cachedTools = null;
-  const getToolsResult = () => {
+  let cachedTools: ToolsReadResult | null = null;
+  const getToolsResult = (): ToolsReadResult => {
     if (cachedTools === null) cachedTools = readTools(safeGet);
     return cachedTools;
   };
 
-  const results = [];
+  const results: CollectedCapabilitySection[] = [];
   for (const id of wanted) {
     switch (id) {
       case "identity":
-        results.push(collectIdentity({ config, state }));
+        results.push(collectIdentity({ state }));
         break;
       case "runtime":
         results.push(collectRuntime());

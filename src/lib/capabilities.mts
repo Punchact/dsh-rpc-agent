@@ -12,19 +12,75 @@ export const SECTION_IDS = Object.freeze([
   "sessions",
   "workspace",
   "plugins",
-]);
+] as const);
 
-const SECTION_SET = new Set(SECTION_IDS);
+export type CapabilitySectionId = (typeof SECTION_IDS)[number];
+
+export type CapabilitySectionStatus = "ok" | "partial" | "unavailable";
+
+const SECTION_SET: ReadonlySet<string> = new Set(SECTION_IDS);
 
 export const DEFAULT_MAX_CHARS = 8000;
 export const MAX_MAX_CHARS = 40000;
 const TRUNCATION_LINE = "… truncated (raise max_chars to see the rest)";
 
-function oneLine(value) {
+export interface CollectedCapabilitySection {
+  id: string;
+  status: CapabilitySectionStatus | string;
+  source: string;
+  lines?: string[];
+  reason?: string;
+  data?: unknown;
+}
+
+export interface NormalizedSectionsResult {
+  sections: CapabilitySectionId[];
+  missing: string[];
+}
+
+export interface NormalizedCapabilitySection {
+  id: string;
+  status: CapabilitySectionStatus;
+  source: string;
+  lines?: string[];
+  reason?: string;
+  data?: unknown;
+}
+
+export interface FormatCapabilitiesOptions {
+  maxChars?: number;
+  missing?: string[];
+}
+
+export interface FormattedCapabilitiesStructured {
+  plugin: string;
+  version: string;
+  protocol: string;
+  counts: {
+    ok: number;
+    partial: number;
+    unavailable: number;
+    total: number;
+  };
+  sections: NormalizedCapabilitySection[];
+  shown: string[];
+  missing: string[];
+  truncated: boolean;
+}
+
+export interface FormattedCapabilities {
+  text: string;
+  structured: FormattedCapabilitiesStructured;
+  shown: string[];
+  missing: string[];
+  truncated: boolean;
+}
+
+function oneLine(value: unknown): string {
   return String(value ?? "").replace(/\r?\n|\r/g, " ").trim();
 }
 
-function resolveMaxChars(value) {
+function resolveMaxChars(value: unknown): number {
   if (value === 0) return 0;
   if (typeof value === "number" && Number.isFinite(value) && value > 0) {
     return Math.min(Math.floor(value), MAX_MAX_CHARS);
@@ -36,7 +92,7 @@ function resolveMaxChars(value) {
  * Normalize a requested section filter (`null`, `[]`, `["*"]`, or a subset).
  * Unknown ids are ignored and returned in `missing`; valid ids appear once.
  */
-export function normalizeSections(value) {
+export function normalizeSections(value: unknown): NormalizedSectionsResult {
   if (value === null || value === undefined || value === "*") {
     return { sections: [...SECTION_IDS], missing: [] };
   }
@@ -44,7 +100,7 @@ export function normalizeSections(value) {
     const trimmed = value.trim();
     if (!trimmed || trimmed === "*") return { sections: [...SECTION_IDS], missing: [] };
     return SECTION_SET.has(trimmed)
-      ? { sections: [trimmed], missing: [] }
+      ? { sections: [trimmed as CapabilitySectionId], missing: [] }
       : { sections: [], missing: [trimmed] };
   }
   if (!Array.isArray(value)) {
@@ -54,8 +110,8 @@ export function normalizeSections(value) {
     return { sections: [...SECTION_IDS], missing: [] };
   }
 
-  const seen = new Set();
-  const missing = new Set();
+  const seen = new Set<CapabilitySectionId>();
+  const missing = new Set<string>();
   let wildcard = false;
 
   for (const item of value) {
@@ -66,7 +122,7 @@ export function normalizeSections(value) {
       continue;
     }
     if (SECTION_SET.has(id)) {
-      seen.add(id);
+      seen.add(id as CapabilitySectionId);
     } else {
       missing.add(id);
     }
@@ -78,7 +134,7 @@ export function normalizeSections(value) {
   return { sections: [...seen], missing: [...missing] };
 }
 
-function applyMaxChars(lines, maxChars) {
+function applyMaxChars(lines: string[], maxChars: number): { text: string; truncated: boolean } {
   const full = lines.join("\n");
   if (maxChars === 0 || full.length <= maxChars) {
     return { text: full, truncated: false };
@@ -88,7 +144,7 @@ function applyMaxChars(lines, maxChars) {
   }
 
   const budget = maxChars - TRUNCATION_LINE.length - 1;
-  const kept = [];
+  const kept: string[] = [];
   let used = 0;
 
   for (const line of lines) {
@@ -108,8 +164,11 @@ function applyMaxChars(lines, maxChars) {
 /**
  * Format collected capability sections into bounded text and structured output.
  */
-export function formatCapabilities(sections, options = {}) {
-  const list = Array.isArray(sections) ? sections : [];
+export function formatCapabilities(
+  sections: CollectedCapabilitySection[] | unknown,
+  options: FormatCapabilitiesOptions = {},
+): FormattedCapabilities {
+  const list = Array.isArray(sections) ? (sections as CollectedCapabilitySection[]) : [];
   const missing = Array.isArray(options.missing) ? [...options.missing] : [];
   const maxChars = resolveMaxChars(options.maxChars);
 
@@ -129,11 +188,11 @@ export function formatCapabilities(sections, options = {}) {
     `${list.length} ${noun} (${ok} ok · ${partial} partial · ${unavailable} unavailable)`;
 
   const lines = [header];
-  const normalizedSections = [];
+  const normalizedSections: NormalizedCapabilitySection[] = [];
 
   for (const section of list) {
     const id = typeof section?.id === "string" && section.id ? section.id : "unknown";
-    const status =
+    const status: CapabilitySectionStatus =
       section?.status === "ok" || section?.status === "partial" || section?.status === "unavailable"
         ? section.status
         : "unavailable";
@@ -154,7 +213,7 @@ export function formatCapabilities(sections, options = {}) {
 
     lines.push(`${id} [${status}] source: ${source}`);
     const rawLines = Array.isArray(section?.lines) && section.lines.length > 0 ? section.lines : ["(no details)"];
-    const cleanLines = [];
+    const cleanLines: string[] = [];
     for (const rawLine of rawLines) {
       for (const part of String(rawLine ?? "").split(/\r?\n/)) {
         cleanLines.push(part);
@@ -173,7 +232,7 @@ export function formatCapabilities(sections, options = {}) {
   const { text, truncated } = applyMaxChars(lines, maxChars);
   const shown = normalizedSections.map((section) => section.id);
 
-  const structured = {
+  const structured: FormattedCapabilitiesStructured = {
     plugin: PLUGIN_NAME,
     version: PLUGIN_VERSION,
     protocol: PROTOCOL_VERSION,

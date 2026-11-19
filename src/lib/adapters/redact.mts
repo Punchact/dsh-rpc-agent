@@ -5,12 +5,14 @@
 // csrfToken, apiSecret all count), but only a *string* value is a credential:
 // maxTokens/tokenCount are budgets, and redacting a number is a lie that hides
 // the numbers an operator needs. TOKEN_COUNT_KEY_RE names those exceptions.
-const SENSITIVE_KEY_RE = /token|secret|password|passwd|passphrase|authorization|cookie|api[-_]?key|apikey|private[-_]?key|session[-_]?key|credential/i;
-const TOKEN_COUNT_KEY_RE = /^(max|min|num|prompt|completion|total|input|output|reasoning|cached)_?tokens?$|^token_?(count|limit|budget)$/i;
+const SENSITIVE_KEY_RE =
+  /token|secret|password|passwd|passphrase|authorization|cookie|api[-_]?key|apikey|private[-_]?key|session[-_]?key|credential/i;
+const TOKEN_COUNT_KEY_RE =
+  /^(max|min|num|prompt|completion|total|input|output|reasoning|cached)_?tokens?$|^token_?(count|limit|budget)$/i;
 const DEFAULT_MAX_CHARS = 2000;
 const DEFAULT_MAX_DEPTH = 6;
 
-const SECRET_PATTERNS = [
+const SECRET_PATTERNS: readonly RegExp[] = [
   // A token is one long run of token characters that is not a plain word:
   // "the bearer of bad news" and "Bearer authentication is required" are prose,
   // and redacting them silently destroys the log line.
@@ -34,19 +36,30 @@ const SECRET_PATTERNS = [
 // keep the header name so a reader still knows what was removed.
 const COOKIE_HEADER_RE = /\b((?:set-)?cookie)\b(["']?\s*[:=]\s*["']?)([^\r\n]*)/gi;
 
+export interface RedactSecretsOptions {
+  maxChars?: number;
+}
+
+export interface RedactDeepOptions {
+  maxChars?: number;
+  maxDepth?: number;
+}
+
 /**
  * Redact known credential patterns from `text` and truncate beyond `maxChars`.
  * Returns `null` when `text` is not a string.
  */
-export function redactSecrets(text, { maxChars = DEFAULT_MAX_CHARS } = {}) {
+export function redactSecrets(text: string, opts?: RedactSecretsOptions): string;
+export function redactSecrets(text: unknown, opts?: RedactSecretsOptions): string | null;
+export function redactSecrets(text: unknown, { maxChars = DEFAULT_MAX_CHARS }: RedactSecretsOptions = {}): string | null {
   if (typeof text !== "string") return null;
   // A cookie header is a list of credentials, not one. Mask every pair in the
   // header's remainder but keep the rest of the line: a URL or a field after a
   // cookie is not part of the cookie, and redacting it hides unrelated evidence.
-  let out = text.replace(COOKIE_HEADER_RE, (_match, name, separator, rest) => {
+  let out = text.replace(COOKIE_HEADER_RE, (_match, name: string, separator: string, rest: string) => {
     // Rebuild nothing: only the pair values change, so quotes, braces and the
     // "," between JSON members survive exactly as written.
-    const masked = rest.replace(/([^=;\s,"]+)=([^;\s,"}]*)/g, (_pair, key) => key + "=[redacted]");
+    const masked = rest.replace(/([^=;\s,"]+)=([^;\s,"}]*)/g, (_pair, key: string) => key + "=[redacted]");
     return name + separator + masked;
   });
   for (const pattern of SECRET_PATTERNS) {
@@ -62,11 +75,17 @@ export function redactSecrets(text, { maxChars = DEFAULT_MAX_CHARS } = {}) {
 /**
  * Recursively redact credential strings and sensitive keys up to `maxDepth`.
  */
-export function redactDeep(value, opts = {}) {
-  const maxChars = Number.isInteger(opts?.maxChars) && opts.maxChars > 0 ? opts.maxChars : DEFAULT_MAX_CHARS;
-  const maxDepth = Number.isInteger(opts?.maxDepth) && opts.maxDepth >= 0 ? opts.maxDepth : DEFAULT_MAX_DEPTH;
+export function redactDeep<T = unknown>(value: T, opts: RedactDeepOptions = {}): unknown {
+  const maxChars =
+    typeof opts?.maxChars === "number" && Number.isInteger(opts.maxChars) && opts.maxChars > 0
+      ? opts.maxChars
+      : DEFAULT_MAX_CHARS;
+  const maxDepth =
+    typeof opts?.maxDepth === "number" && Number.isInteger(opts.maxDepth) && opts.maxDepth >= 0
+      ? opts.maxDepth
+      : DEFAULT_MAX_DEPTH;
 
-  function walk(node, depth) {
+  function walk(node: unknown, depth: number): unknown {
     if (typeof node === "string") {
       return redactSecrets(node, { maxChars });
     }
@@ -81,7 +100,7 @@ export function redactDeep(value, opts = {}) {
     if (Array.isArray(node)) {
       return node.map((item) => walk(item, depth + 1));
     }
-    const out = {};
+    const out: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(node)) {
       // Only a string under a credential-ish key is a credential. A number
       // such as maxTokens: 4000 or tokenCount: 12 is a budget, not a secret,

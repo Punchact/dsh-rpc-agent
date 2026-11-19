@@ -833,3 +833,14 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 - **调用方最小对齐**：仅在 `src/lib/methods.mts` 将 `TasksEventsResult` 改为复用 `engine.mts` 导出的真身 `TaskEventsResult`、将 `PendingApprovalPacket` 改为复用 `pending.mts` 导出的单一真身，零运行时行为改变。
 
 **怎么钉住**：`test/tasks-engine.test.mjs` 新增纯内存 `CompilerHost` 编译期契约测试，覆盖 `*Row`、`TaskProjection`、`derivePhase`、`AttentionOnceInTxParams` 与 `TaskEngine` 正反两面；`test/approval-state.test.mjs` 新增运行时穷尽断言与编译期负向用例，校验 `RESERVATION_TRANSITIONS`、`PENDING_TRANSITIONS`、`APPROVAL_MODES`、`ESCALATION_TARGETS` 与缺键拒绝。
+
+## 58. 决策 0.9.4-c：配置、宿主与注册域收口与发布面 100% TypeScript（PR 5b）
+
+**现象**。PR 5b 迁移 `lib/` 下最后 11 份运行模块（`host-facts` / `config` / `capabilities` / `registry` / `auth` / `adapters/redact` / `owned` / `stats` / `inflight` / `advice` / `version`）并清空剩余 11 份 `types/lib/**/*.d.mts` 桥接声明；`lib/` 与 `types/` 两个过渡目录归零后，发布面 `dist/` 内所有 `.mjs` 文件均由 `src/**/*.mts`（共计 41 个源码文件）编译产出。
+
+**取舍与细节**。
+- **唯一的 `.mjs` 脚本锚点调整**：`package.json` 中的 `check:version` 原通过 `import('./lib/version.mjs')` 校验 `PLUGIN_VERSION === package.json version`；迁移后 `lib/version.mjs` 已删除，故仅将该脚本路径改为 `./dist/lib/version.mjs`（构建后产物），保持 `PLUGIN_VERSION = "0.9.3"` 与 `PROTOCOL_VERSION = "2026-11-19"` 唯一来源及语义零改动。
+- **`redactSecrets` 双重载保持**：为同时满足显式传参类型安全（`string -> string`）与边界防呆（`unknown -> string | null`），`src/lib/adapters/redact.mts` 对 `redactSecrets` 声明双重载，与现有 `engine.mts` / `dispatch.mts` / 适配器零摩擦兼容。
+- **浏览器脚本兜底边界不变**：按决策 0.9.4-a，`client.js` 维持原位 `// @ts-check` + 纯注释 JSDoc 并由 `build.mjs` 复制进 `dist/client.js`，发布包 58 文件除静态资产、文档与 `client.js` 外均为 TS 编译产物。
+
+**怎么钉住**：`test/config-breakers.test.mjs` 与 `test/capabilities.test.mjs` 分别新增纯内存 `CompilerHost` 编译期与运行时契约测试，覆盖本次迁移的 11 份模块导出签名与非法入参编译期拒绝。

@@ -75,7 +75,7 @@
     "check:surface": "node scripts/check-surface.mjs",
     "docs:surface": "node scripts/check-surface.mjs --write",
     "prepublishOnly": "npm run check:version && npm run check:docs && npm run check:surface && npm run check:package && npm test",
-    "check:version": "node --input-type=module -e \"import {readFileSync} from 'node:fs'; const {PLUGIN_VERSION} = await import('./lib/version.mjs'); const v = JSON.parse(readFileSync('package.json','utf8')).version; if (PLUGIN_VERSION !== v) { console.error('PLUGIN_VERSION ' + PLUGIN_VERSION + ' != package.json ' + v); process.exit(1); } console.log('version ok: ' + v);\""
+    "check:version": "node --input-type=module -e \"import {readFileSync} from 'node:fs'; const {PLUGIN_VERSION} = await import('./dist/lib/version.mjs'); const v = JSON.parse(readFileSync('package.json','utf8')).version; if (PLUGIN_VERSION !== v) { console.error('PLUGIN_VERSION ' + PLUGIN_VERSION + ' != package.json ' + v); process.exit(1); } console.log('version ok: ' + v);\""
   },
   "engines": {
     "node": "^22.19.0 || >=24"
