@@ -2,17 +2,73 @@
 // *calling* agent's process, so they only speak HTTP to the Harness and never
 // import Host modules.
 
-import { endpointPath, readEndpoint, readTokenFromFile } from "./auth.mjs";
+import { endpointPath, readEndpoint, readTokenFromFile, type PublishedEndpoint } from "./auth.mjs";
 import { MAX_WAIT_SLICE_MS } from "./config.mjs";
 
 // Part of the slicing contract: a caller may clamp its own hint with the same
 // ceiling the bridge and this client use, without importing the config module.
 export { MAX_WAIT_SLICE_MS };
-import { transportCode } from "./transport.mjs";
+import { transportCode, type TransportCode } from "./transport.mjs";
+
+export type { PublishedEndpoint, TransportCode };
+
+export interface ClientConnectionOptions {
+  url?: string;
+  token?: string;
+}
+
+export interface RpcCallOptions extends ClientConnectionOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  id?: string | number | null;
+}
+
+export interface WaitForTurnOptions extends RpcCallOptions {
+  sliceMs?: number;
+  since?: number;
+}
+
+export interface RpcStreamOptions extends ClientConnectionOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+export interface ResolvedConnection {
+  url: string;
+  token: string;
+  endpoint: PublishedEndpoint | null;
+}
+
+export interface TransportError extends Error {
+  code: TransportCode;
+  cause: unknown;
+  transport: true;
+}
+
+export interface ClientRpcError extends Error {
+  code: number;
+  data: unknown;
+  status: number | undefined;
+}
+
+export interface WaitForTurnResult {
+  status?: string;
+  slices: number;
+  waitedMs: number;
+  [key: string]: unknown;
+}
+
+export type RpcStreamFrame =
+  | { type: "session"; sessionId: string; cwd?: string; agentPreset?: string | null; [key: string]: unknown }
+  | { type: "progress"; frame: unknown; [key: string]: unknown }
+  | { type: "result"; [key: string]: unknown }
+  | { type: "error"; error: { code: number; message: string; data?: unknown }; [key: string]: unknown }
+  | { type: "malformed"; line: string }
+  | { type: string; [key: string]: unknown };
 
 const DEFAULT_PATH = "/dsh-rpc";
 
-export function resolveConnection(options = {}) {
+export function resolveConnection(options: ClientConnectionOptions = {}): ResolvedConnection {
   const env = process.env;
 
   let url = trim(options.url) || trim(env.DSH_RPC_URL);
@@ -47,18 +103,18 @@ export function resolveConnection(options = {}) {
   return { url, token, endpoint };
 }
 
-function trim(value) {
+function trim(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function authHeaders(token) {
+function authHeaders(token: string): { authorization: string } {
   // One header only: sending the secret twice doubles the places a proxy or a
   // shell history can capture it for no benefit.
   return { authorization: `Bearer ${token}` };
 }
 
 /** Preserve caller cancellation while enforcing the transport deadline independently. */
-function requestSignal(timeoutMs, callerSignal) {
+function requestSignal(timeoutMs: number, callerSignal?: AbortSignal): AbortSignal | undefined {
   const timeoutSignal = Number.isFinite(timeoutMs) && timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined;
   if (callerSignal && timeoutSignal) return AbortSignal.any([callerSignal, timeoutSignal]);
   return callerSignal ?? timeoutSignal;
@@ -73,22 +129,28 @@ function requestSignal(timeoutMs, callerSignal) {
  * which is useless in a CLI transcript.
  */
 /** The deepest message in a `cause` chain, which is where fetch keeps the reason. */
-function deepestMessage(error, depth = 0) {
+export function deepestMessage(error: unknown, depth = 0): string {
   if (!error || typeof error !== "object" || depth > 6) return "";
-  if (error.cause) {
-    const deeper = deepestMessage(error.cause, depth + 1);
+  const record = error as { cause?: unknown; message?: unknown };
+  if (record.cause) {
+    const deeper = deepestMessage(record.cause, depth + 1);
     if (deeper) return deeper;
   }
-  return typeof error.message === "string" ? error.message : "";
+  return typeof record.message === "string" ? record.message : "";
 }
 
-function transportError(error, label, options) {
-  const timedOut = error?.name === "TimeoutError" || error?.name === "AbortError";
+function transportError(error: unknown, label: string, options: { timeoutMs?: number }): TransportError {
+  const err = (error && typeof error === "object" ? error : null) as {
+    name?: unknown;
+    message?: unknown;
+    cause?: unknown;
+  } | null;
+  const timedOut = err?.name === "TimeoutError" || err?.name === "AbortError";
   const code = transportCode(error);
   // "fetch failed" alone sends the reader looking at the wrong thing: the reason
   // lives one level down, and for a blocked port it is the whole story.
-  const causeText = deepestMessage(error.cause);
-  const base = error?.message ?? String(error);
+  const causeText = deepestMessage(err?.cause);
+  const base = typeof err?.message === "string" ? err.message : String(error);
   const detail = timedOut
     ? `timed out${options.timeoutMs ? ` after ${options.timeoutMs}ms` : ""}`
     : code === "EBADPORT"
@@ -96,8 +158,8 @@ function transportError(error, label, options) {
       : causeText && causeText !== base
         ? `${base} (${causeText})`
         : base;
-  const wrapped = new Error(`${label}: ${detail}`);
-  wrapped.name = error?.name ?? "Error";
+  const wrapped = new Error(`${label}: ${detail}`) as TransportError;
+  wrapped.name = typeof err?.name === "string" ? err.name : "Error";
   wrapped.code = code;
   wrapped.cause = error;
   wrapped.transport = true;
@@ -111,21 +173,26 @@ const DEFAULT_CALL_TIMEOUT_MS = 120_000;
 // double-submit a prompt. ECONNRESET / EPIPE / timeouts mean bytes may already
 // have been delivered and a turn may be running, so those are reported, never
 // resent.
-const RETRYABLE_CONNECT_CODES = new Set(["ECONNREFUSED"]);
+export const RETRYABLE_CONNECT_CODES: ReadonlySet<string> = new Set(["ECONNREFUSED"]);
 
-function staleEndpointError(error, connection) {
+export function staleEndpointError(error: unknown, connection: ResolvedConnection): TransportError {
+  const err = (error && typeof error === "object" ? error : null) as {
+    name?: unknown;
+    message?: unknown;
+    code?: unknown;
+  } | null;
   const endpoint = connection.endpoint;
   const published = endpoint?.updatedAt
     ? `last published ${endpoint.updatedAt}`
     : "no published endpoint, so the URL came from DSH_WEB_URL";
   const who = endpoint?.pid ? `pid ${endpoint.pid}, started ${endpoint.startedAt}` : "no pid recorded";
   const wrapped = new Error(
-    `${error.message} — nothing is listening on ${connection.url} (${published}; ${who}). ` +
+    `${String(err?.message ?? error)} — nothing is listening on ${connection.url} (${published}; ${who}). ` +
       "The Harness most likely restarted on a new port: run `dsh-rpc health --wait 15000` and retry, " +
       "or pass --url to override.",
-  );
-  wrapped.name = error.name ?? "Error";
-  wrapped.code = error.code;
+  ) as TransportError;
+  wrapped.name = typeof err?.name === "string" ? err.name : "Error";
+  wrapped.code = typeof err?.code === "string" ? err.code : undefined;
   wrapped.cause = error;
   wrapped.transport = true;
   return wrapped;
@@ -144,14 +211,21 @@ function staleEndpointError(error, connection) {
  * did not move, a blocked port rethrows EBADPORT verbatim instead of "nothing is
  * listening". An explicitly supplied `--url` or `DSH_RPC_URL` is never retried.
  */
-async function withEndpointRetry(options, attempt) {
+export async function withEndpointRetry<T>(
+  options: ClientConnectionOptions,
+  attempt: (connection: ResolvedConnection) => Promise<T>,
+): Promise<T> {
   const explicit = Boolean(trim(options.url) || trim(process.env.DSH_RPC_URL));
   const first = resolveConnection(options);
   try {
     return await attempt(first);
   } catch (error) {
-    const isBadPort = error?.code === "EBADPORT";
-    if (explicit || (!RETRYABLE_CONNECT_CODES.has(error?.code) && !isBadPort)) throw error;
+    const code =
+      error && typeof error === "object" && typeof (error as { code?: unknown }).code === "string"
+        ? (error as { code: string }).code
+        : undefined;
+    const isBadPort = code === "EBADPORT";
+    if (explicit || ((!code || !RETRYABLE_CONNECT_CODES.has(code)) && !isBadPort)) throw error;
     const second = resolveConnection(options);
     if (second.url === first.url) {
       if (isBadPort) throw error;
@@ -163,7 +237,11 @@ async function withEndpointRetry(options, attempt) {
       // Only a refused handshake means the *new* address is dead too. A 401, a
       // method error, a timeout, or another bad port is the real answer to the
       // request and must not be re-labelled as "nothing is listening".
-      if (RETRYABLE_CONNECT_CODES.has(again?.code)) throw staleEndpointError(again, second);
+      const againCode =
+        again && typeof again === "object" && typeof (again as { code?: unknown }).code === "string"
+          ? (again as { code: string }).code
+          : undefined;
+      if (againCode && RETRYABLE_CONNECT_CODES.has(againCode)) throw staleEndpointError(again, second);
       throw again;
     }
   }
@@ -178,9 +256,13 @@ async function withEndpointRetry(options, attempt) {
  * call. Long-running calls (`ask`, `wait`) pass a budget derived from the turn
  * timeout instead, so this default never cuts a legitimate turn short.
  */
-export async function rpcCall(method, params = {}, options = {}) {
+export async function rpcCall<T = unknown>(
+  method: string,
+  params: Record<string, unknown> = {},
+  options: RpcCallOptions = {},
+): Promise<T> {
   const budget = options.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
-  return withEndpointRetry(options, (connection) => performCall(connection, method, params, options, budget));
+  return withEndpointRetry(options, (connection) => performCall<T>(connection, method, params, options, budget));
 }
 
 /**
@@ -199,27 +281,30 @@ export const WAIT_SLICE_MS = 120_000;
  * therefore has to be a loop of short ones. The bridge reports its own slice
  * length as `sliceMs`, which a caller may pass back in.
  */
-export async function waitForTurn(sessionId, options = {}) {
-  const budgetMs = Math.max(1_000, Number.isInteger(options.timeoutMs) ? options.timeoutMs : WAIT_SLICE_MS);
+export async function waitForTurn(sessionId: string, options: WaitForTurnOptions = {}): Promise<WaitForTurnResult> {
+  const budgetMs = Math.max(
+    1_000,
+    options.timeoutMs !== undefined && Number.isInteger(options.timeoutMs) ? options.timeoutMs : WAIT_SLICE_MS,
+  );
   const sliceMs = Math.max(
     1_000,
     Math.min(
-      Number.isInteger(options.sliceMs) ? options.sliceMs : WAIT_SLICE_MS,
+      options.sliceMs !== undefined && Number.isInteger(options.sliceMs) ? options.sliceMs : WAIT_SLICE_MS,
       budgetMs,
       MAX_WAIT_SLICE_MS,
     ),
   );
   const startedAt = Date.now();
-  let last = null;
+  let last: Record<string, unknown> | null = null;
   let slices = 0;
   for (;;) {
     const left = budgetMs - (Date.now() - startedAt);
     const slice = Math.max(1_000, Math.min(sliceMs, left > 0 ? left : 1_000));
-    const params = { sessionId, timeoutMs: slice };
-    if (Number.isInteger(options.since)) params.since = options.since;
+    const params: { sessionId: string; timeoutMs: number; since?: number } = { sessionId, timeoutMs: slice };
+    if (options.since !== undefined && Number.isInteger(options.since)) params.since = options.since;
     // The transport budget stays under the 300 s ceiling no matter what the
     // caller's overall budget is; that is the whole point of slicing.
-    last = await rpcCall("dsh.sessions.wait", params, {
+    last = await rpcCall<Record<string, unknown>>("dsh.sessions.wait", params, {
       ...options,
       timeoutMs: Math.min(slice + 30_000, 280_000),
     });
@@ -227,11 +312,17 @@ export async function waitForTurn(sessionId, options = {}) {
     if (last?.status !== "timeout") break;
     if (Date.now() - startedAt >= budgetMs) break;
   }
-  return { ...last, slices, waitedMs: Date.now() - startedAt };
+  return { ...(last ?? {}), slices, waitedMs: Date.now() - startedAt };
 }
 
-async function performCall({ url, token }, method, params, options, budget) {
-  let response;
+async function performCall<T>(
+  { url, token }: ResolvedConnection,
+  method: string,
+  params: Record<string, unknown>,
+  options: RpcCallOptions,
+  budget: number,
+): Promise<T> {
+  let response: Response;
   try {
     response = await fetch(url, {
       method: "POST",
@@ -251,7 +342,7 @@ async function performCall({ url, token }, method, params, options, budget) {
   if (response.status === 403) {
     throw rpcError(-32002, "dsh-rpc only serves loopback clients by default (enable allowRemote).", undefined, 403);
   }
-  let payload;
+  let payload: unknown;
   try {
     payload = JSON.parse(raw);
   } catch {
@@ -275,29 +366,36 @@ async function performCall({ url, token }, method, params, options, budget) {
       response.status,
     );
   }
+  const envelope = (payload && typeof payload === "object" ? payload : null) as {
+    jsonrpc?: unknown;
+    id?: unknown;
+    result?: unknown;
+    error?: { code?: unknown; message?: unknown; data?: unknown };
+  } | null;
   const hasResult = Object.prototype.hasOwnProperty.call(payload ?? {}, "result");
   const hasError = Object.prototype.hasOwnProperty.call(payload ?? {}, "error");
   const errorValid =
-    payload?.error &&
-    typeof payload.error === "object" &&
-    Number.isInteger(payload.error.code) &&
-    typeof payload.error.message === "string";
+    envelope?.error &&
+    typeof envelope.error === "object" &&
+    Number.isInteger(envelope.error.code) &&
+    typeof envelope.error.message === "string";
   if (
-    payload?.jsonrpc !== "2.0" ||
-    payload.id !== (options.id ?? 1) ||
+    envelope?.jsonrpc !== "2.0" ||
+    envelope.id !== (options.id ?? 1) ||
     hasResult === hasError ||
     (hasError && !errorValid)
   ) {
     throw rpcError(-32000, `dsh-rpc ${method} returned an invalid JSON-RPC response envelope`, undefined, response.status);
   }
   if (hasError) {
-    throw rpcError(payload.error.code, payload.error.message, payload.error.data, response.status);
+    const errObj = envelope!.error as { code: number; message: string; data?: unknown };
+    throw rpcError(errObj.code, errObj.message, errObj.data, response.status);
   }
-  return payload.result;
+  return envelope!.result as T;
 }
 
-function rpcError(code, message, data, status) {
-  const error = new Error(message);
+function rpcError(code: number, message: string, data?: unknown, status?: number): ClientRpcError {
+  const error = new Error(message) as ClientRpcError;
   error.code = code;
   error.data = data;
   error.status = status;
@@ -308,14 +406,17 @@ function rpcError(code, message, data, status) {
  * Streaming call against `<rpc>/stream`: yields parsed NDJSON frames until the
  * connection closes. The final frame is `{type:"result"}` or `{type:"error"}`.
  */
-export async function* rpcStream(params = {}, options = {}) {
+export async function* rpcStream(
+  params: Record<string, unknown> = {},
+  options: RpcStreamOptions = {},
+): AsyncGenerator<RpcStreamFrame, void, undefined> {
   const response = await withEndpointRetry(options, (connection) =>
     openStream(connection, params, options, options.timeoutMs ?? 0),
   );
 
   const decoder = new TextDecoder();
   let buffer = "";
-  for await (const chunk of response.body) {
+  for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
     buffer += decoder.decode(chunk, { stream: true });
     let newline = buffer.indexOf("\n");
     while (newline >= 0) {
@@ -323,7 +424,7 @@ export async function* rpcStream(params = {}, options = {}) {
       buffer = buffer.slice(newline + 1);
       if (line.length > 0) {
         try {
-          yield JSON.parse(line);
+          yield JSON.parse(line) as RpcStreamFrame;
         } catch {
           yield { type: "malformed", line };
         }
@@ -334,7 +435,7 @@ export async function* rpcStream(params = {}, options = {}) {
   const tail = buffer.trim();
   if (tail.length > 0) {
     try {
-      yield JSON.parse(tail);
+      yield JSON.parse(tail) as RpcStreamFrame;
     } catch {
       yield { type: "malformed", line: tail };
     }
@@ -346,9 +447,14 @@ export async function* rpcStream(params = {}, options = {}) {
  * Split out of `rpcStream` so the retry wrapper only ever replays the handshake,
  * never a partially consumed stream.
  */
-async function openStream({ url, token }, params, options, budget) {
+async function openStream(
+  { url, token }: ResolvedConnection,
+  params: Record<string, unknown>,
+  options: RpcStreamOptions,
+  budget: number,
+): Promise<Response & { body: NonNullable<Response["body"]> }> {
   const target = `${url.replace(/\/+$/, "")}/stream`;
-  let response;
+  let response: Response;
   try {
     response = await fetch(target, {
       method: "POST",
@@ -378,5 +484,5 @@ async function openStream({ url, token }, params, options, budget) {
   if (!response.body) {
     throw new Error("dsh-rpc stream returned no body (this Node build lacks streaming fetch)");
   }
-  return response;
+  return response as Response & { body: NonNullable<Response["body"]> };
 }

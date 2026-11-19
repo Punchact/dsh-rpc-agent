@@ -9,7 +9,8 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import ts from "typescript";
 
 import { closeServer as close, deadSafePort as deadPort, listenSafe as listen } from "./helpers/stub-server.mjs";
 
@@ -19,8 +20,11 @@ process.env.DSH_HOME = home;
 process.env.DSH_RPC_TOKEN = "client-test-token-0123456789";
 delete process.env.DSH_RPC_URL;
 
-const { rpcCall } = await import("../dist/lib/client.mjs");
-const { isFetchBlockedPort, transportCode } = await import("../dist/lib/transport.mjs");
+const { rpcCall, RETRYABLE_CONNECT_CODES } = await import("../dist/lib/client.mjs");
+const { FETCH_BLOCKED_PORTS, hasBadPortCause, isFetchBlockedPort, transportCode } = await import(
+  "../dist/lib/transport.mjs"
+);
+const { CODE, RpcError, isRpcError } = await import("../dist/lib/protocol.mjs");
 
 // These shapes differ per platform, which is exactly why the extraction is its
 // own module: a socket is not needed to pin the behaviour down.
@@ -328,4 +332,82 @@ test("an unchanged dead endpoint explains the restart and names the pid", async 
       return true;
     },
   );
+});
+
+test("protocol & transport exports preserve runtime guards and invariants", () => {
+  assert.equal(FETCH_BLOCKED_PORTS instanceof Set, true);
+  assert.equal(FETCH_BLOCKED_PORTS.has(5060), true);
+  assert.equal(FETCH_BLOCKED_PORTS.has(6667), true);
+  assert.equal(hasBadPortCause(new Error("fetch failed", { cause: new Error("bad port") })), true);
+  assert.equal(RETRYABLE_CONNECT_CODES instanceof Set, true);
+  assert.equal(RETRYABLE_CONNECT_CODES.has("ECONNREFUSED"), true);
+
+  const err = new RpcError(CODE.invalidParams, "bad");
+  assert.equal(isRpcError(err), true);
+  assert.equal(isRpcError(new Error("plain")), false);
+  assert.equal(isRpcError(null), false);
+});
+
+test("transportCode, FETCH_BLOCKED_PORTS, and client contracts reject ill-typed uses at tsc compile time", () => {
+  const repoRoot = resolve(import.meta.dirname, "..");
+  const configPath = resolve(repoRoot, "tsconfig.json");
+  const parsed = ts.parseJsonConfigFileContent(
+    ts.readConfigFile(configPath, ts.sys.readFile).config,
+    ts.sys,
+    repoRoot,
+  );
+  const validFile = resolve(repoRoot, "src/lib/__typecheck_valid_probe__.mts");
+  const badFile = resolve(repoRoot, "src/lib/__typecheck_bad_probe__.mts");
+
+  const validSource = `
+import { CODE, RpcError, isRpcError } from "./protocol.mjs";
+import { FETCH_BLOCKED_PORTS, isFetchBlockedPort, transportCode, type TransportCode } from "./transport.mjs";
+import { RETRYABLE_CONNECT_CODES, rpcCall } from "./client.mjs";
+
+const a: boolean = isFetchBlockedPort(5060);
+const b: boolean = isFetchBlockedPort("6667");
+const c: boolean = FETCH_BLOCKED_PORTS.has(5060);
+const d: TransportCode = transportCode(new Error("boom"));
+const e: boolean = RETRYABLE_CONNECT_CODES.has("ECONNREFUSED");
+const f: boolean = isRpcError(new RpcError(CODE.internal, "x"));
+void a; void b; void c; void d; void e; void f; void rpcCall;
+`;
+
+  const badSource = `
+import { FETCH_BLOCKED_PORTS, isFetchBlockedPort, transportCode } from "./transport.mjs";
+import { RETRYABLE_CONNECT_CODES } from "./client.mjs";
+
+const p1 = isFetchBlockedPort("5060abc");
+FETCH_BLOCKED_PORTS.add(1234);
+const p2 = FETCH_BLOCKED_PORTS.has("5060");
+const narrow: "ECONNREFUSED" | "UNKNOWN" = transportCode(new Error("boom"));
+RETRYABLE_CONNECT_CODES.add("ECONNRESET");
+void p1; void p2; void narrow;
+`;
+
+  const host = ts.createCompilerHost(parsed.options);
+  const origGetSourceFile = host.getSourceFile.bind(host);
+  host.getSourceFile = (fileName, languageVersion, ...rest) => {
+    const resolved = resolve(fileName);
+    if (resolved === validFile) return ts.createSourceFile(fileName, validSource, languageVersion);
+    if (resolved === badFile) return ts.createSourceFile(fileName, badSource, languageVersion);
+    return origGetSourceFile(fileName, languageVersion, ...rest);
+  };
+
+  const program = ts.createProgram([validFile, badFile], parsed.options, host);
+  const validDiags = ts.getPreEmitDiagnostics(program, program.getSourceFile(validFile));
+  assert.equal(
+    validDiags.length,
+    0,
+    `valid type-check probe should compile cleanly, got: ${validDiags.map((d) => `${d.code}:${ts.flattenDiagnosticMessageText(d.messageText, " ")}`).join("; ")}`,
+  );
+
+  const badDiags = ts.getPreEmitDiagnostics(program, program.getSourceFile(badFile));
+  const messages = badDiags.map((d) => `TS${d.code}:${ts.flattenDiagnosticMessageText(d.messageText, " ")}`);
+  const summary = messages.join(" | ");
+  assert.ok(badDiags.length >= 5, `expected >= 5 tsc errors, got ${badDiags.length}: ${summary}`);
+  assert.ok(messages.some((m) => m.includes("5060abc")), `missing 5060abc diagnostic: ${summary}`);
+  assert.ok(messages.some((m) => m.includes("ReadonlySet<number>")), `missing ReadonlySet<number> diagnostic: ${summary}`);
+  assert.ok(messages.some((m) => m.includes("ReadonlySet<string>")), `missing ReadonlySet<string> diagnostic: ${summary}`);
+  assert.ok(messages.some((m) => m.includes("TransportCode")), `missing TransportCode diagnostic: ${summary}`);
 });
