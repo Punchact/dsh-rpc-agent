@@ -186,7 +186,7 @@ Host 抛 `RemoteError(code, message, details)`（`isDSHRemoteError === true`）�
 
 以上数字均为 2026-11-05 在本机实跑，命令见 README §10。
 
-> **现行口径（2026-11-19，0.9.0）**：本表是 2026-11-05 的历史快照，不改写。当前的数量以 README「开发与验证」为准——`npm test` 固定顺序跑 38 个 `*.test.mjs` 共 354 例，外加 `catalog.smoke.mjs`（30 个 RPC 方法）。表中三行随版本长大：`methods` 41 → 85 例，`client` 6 → 8 例；`edge` 仍是 24 项，但**本机 23/24**——第 21 项「create without a cwd reports the directory the Host attached」要求宿主替无 `cwd` 的请求补上工作目录，本机 0.8.1 宿主返回 `null`，属既有环境差异；**CI 不跑 `test:edge`（`.github/workflows/test.yml` 只有 `npm test` / `test:host` / `check:package`），故“CI 下通过”没有证据**，这一项目前只有本机 23/24 的实测。
+> **现行口径（2026-11-19，0.9.0）**：本表是 2026-11-05 的历史快照，不改写。当前的数量以 README「开发与验证」为准——`npm test` 固定顺序跑 39 个 `*.test.mjs` 共 358 例，外加 `catalog.smoke.mjs`（31 个 RPC 方法）。表中三行随版本长大：`methods` 41 → 85 例，`client` 6 → 8 例；`edge` 仍是 24 项，但**本机 23/24**——第 21 项「create without a cwd reports the directory the Host attached」要求宿主替无 `cwd` 的请求补上工作目录，本机 0.8.1 宿主返回 `null`，属既有环境差异；**CI 不跑 `test:edge`（`.github/workflows/test.yml` 只有 `npm test` / `test:host` / `check:package`），故“CI 下通过”没有证据**，这一项目前只有本机 23/24 的实测。
 
 ## 8. 后续可做
 
@@ -642,3 +642,12 @@ compression: gzip
 3. **写类能力必须 `required`**：`sideEffectKind: "write"` 且显式写 `cancelPolicy: "optional"` 直接拒斥（不是静默改写），与 §4.2 规则 4 一致；只读能力的缺省是 `optional`，允许无取消能力的执行方入池并走 `degraded[]`。
 4. **可发现性**：`dsh.agents.list` 回显每个实例的 `capabilityRevisions`（能力 id、版本、修订 id），调用方无需读库就能知道能提交什么。
 5. **如实记录**：这条是冒烟补出来的——五路评审与 349 例单测都没抓到，因为它们的断言起点总是「已经有一个修订 id」。验证流程缺的从来不是覆盖度，而是「从零开始」。
+
+## 40. 决策 0.9.0-m：任务事件是排障路径，预览必须校验归属
+
+1. **`dsh.tasks.events` 只走 RPC/CLI**：引擎的 `events()` 一直存在，但没有入口，外部只能靠「再取一次 task detail」猜发生了什么。事件是排障与审计路径，不是驱动路径，所以不进 MCP 工具面（MCP 面固定 6 个任务工具），也不改 `tasksEnabled` 之外的语义。
+2. **预览校验修订归属**：`capabilityRevisionId` 存在 ≠ 该实例能执行它。预览现在要求实现「能力修订被这个实例声明过」，否则报 `CAPABILITY_VERSION_MISSING`；这条和 §4.4 的候选筛选是同一条规则的两半——**能被声明才谈得上被选中**。
+3. **探测过期即拒**：`probe_expires_at` 过期的实例，其能力声明不再算证据（`PROBE_STALE`）。这条不区分 `verified` / `unverified`，只区分「证据还有效」与「证据已失效」。
+4. **候选要给出排除原因**：`candidates[]` 现在同时包含选中项（`SELECTED`）与同类实例的排除项（`AGENT_DISABLED` / `PROBE_STALE`），调用方看到的是路由决定，不是黑箱。
+5. **探测不得改写已发布的能力集合**：`dsh.agents.probe` 只刷新证据与 `verified`，保留 `capabilityRevisions` 与 `projectId`。这一条是重启前静态排查时才发现的：旧实现会把修订一起抹掉，于是「注册 → 探测 → 预览」在真机上必然失败——单测按「先 seed 修订再预览」的顺序写，恰好绕过了它。
+6. **如实记录**：这三处（事件入口、预览归属/探测、探测抹声明）都不是评审或单测能发现的，它们的共同前提是「已经有一个可用的修订 id」。真机冒烟的价值就在这里。

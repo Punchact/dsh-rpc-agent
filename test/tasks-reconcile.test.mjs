@@ -210,6 +210,7 @@ test("RPC wiring covers dsh.agents.{register,list,probe}, dsh.tasks.{preview,rec
     const reg = await dispatch("dsh.agents.register", {
       card: {
         identity: { agentId: "ag-codex", name: "Codex", kind: "codex", version: "0.169.0" },
+        capabilities: [{ capabilityId: "review.diff", version: 1 }],
         controls: {
           start: { support: "required", evidence: "thread/start" },
           steer: { support: "optional", evidence: "turn/steer" },
@@ -245,7 +246,7 @@ test("RPC wiring covers dsh.agents.{register,list,probe}, dsh.tasks.{preview,rec
 
     const pv = await dispatch("dsh.tasks.preview", {
       principalId: "local-operator",
-      capabilityRevisionId: "cap-review-1",
+      capabilityRevisionId: reg.capabilityRevisions[0].revisionId,
       workspaceId: "ws-lab",
       agentId: "ag-codex",
       input: { diff: "abc" },

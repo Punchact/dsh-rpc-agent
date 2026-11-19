@@ -10,8 +10,8 @@
   - 新建 15 张表（`schema_meta`、`principals`、`workspaces`、`agents`、`capability_revisions`、`previews`、`tasks`、`mandates`、`attempts`、`events`、`effects`、`inputs`、`approvals`、`artifacts`、`attention`）。
   - 11 态任务状态机、`expectedStateVersion` 乐观锁、基于 `(principalId, idempotencyKey)` 的提交/控制幂等校验、`effects` 持久出箱（带 `lease_expires_at` 租约回收）与一次性 `previews` 绑定。
   - 派生阶段 `derivePhase` 按 8 档优先级现算（`person/delivery` → `person/approval` → `person/answer` → `person/reconcile` → `person/review` → `machine/queued` → `machine/working` → `done`），不写回数据库。
-- **RPC、MCP 与 CLI 扩展**（JSON-RPC 方法总数 **17 → 30**，MCP 工具 **11（默认）+ 6（`tasksEnabled: true` 时共 17 个）**）：
-  - 新增 10 个任务 RPC：`dsh.tasks.{preview,submit,get,list,cancel,dispatch,pump,reconcile,decideApproval,resolve}`（`resolve` 是唯一的人工签收入口，只在 RPC/CLI 面，不进 MCP）；新增 3 个代理 RPC：`dsh.agents.{register,list,probe}`。
+- **RPC、MCP 与 CLI 扩展**（JSON-RPC 方法总数 **17 → 31**，MCP 工具 **11（默认）+ 6（`tasksEnabled: true` 时共 17 个）**）：
+  - 新增 11 个任务 RPC：`dsh.tasks.{preview,submit,get,list,events,cancel,dispatch,pump,reconcile,decideApproval,resolve}`（`resolve` 是唯一的人工签收入口，只在 RPC/CLI 面，不进 MCP）；新增 3 个代理 RPC：`dsh.agents.{register,list,probe}`。
   - 新增 6 个受开关门控的 MCP 工具：`dsh_tasks_{submit,list,get,cancel}` 与 `dsh_agents_{list,probe}`（有意排除 `reconcile` 与 `decideApproval`，人工核对与审批留在 RPC/CLI 面）。
   - 新增 CLI 子命令：`dsh-rpc tasks <preview|submit|list|get|cancel|dispatch|pump|reconcile|approve>` 与 `dsh-rpc agents <register|list|probe>`。
 - **三个执行方适配器**（统一实现七操作契约 `probe`/`start`/`inspect`/`sendInput`/`cancel`/`events`/`decideApproval`）：
@@ -25,7 +25,7 @@
 
 ### 修复
 
-- `scripts.test` 新增并接入 20 个任务中心与 CLI/适配器测试套件（全链 38 个测试文件、354 例，本机 354/354 通过；CI 结果见 PR #30），并更新 `catalog.smoke.mjs` 校验 30 个 RPC 方法。
+- `scripts.test` 新增并接入 20 个任务中心与 CLI/适配器测试套件（全链 39 个测试文件、358 例，本机 358/358 通过；CI 结果见 PR #30），并更新 `catalog.smoke.mjs` 校验 31 个 RPC 方法。
 - `dispatch.mjs` 修复了租约到期回收与原子 `maxConcurrent` 门控竞态，防止同一写事务之外并发超发或将任务卡死在 `dispatching` / `in_flight`。
 - **取消确认后立刻收口**：适配器回报 `confirmedStopped: true`（DSH 会话真停了、Antigravity 回执里含该 cascadeId）时，同一次出箱排水内把任务从 `cancel_requested` 推进到 `cancelled` 并写 `cancel.confirmed`；此前只把 effect 标完成，任务会悬在 `cancel_requested` 等一个已停会话永远不会发出的事件。Codex 的 `turn/interrupt` 只算受理，故不设该标志。
 - **幂等键不再掩盖改过的请求**：`cancel` / `resolve` 的重放分支会比较请求意图（取消原因；处置结论 + 证据引用），同键异载荷抛 `STATE_CONFLICT`（`reason: "idempotency_payload_mismatch"`）。`expectedStateVersion` 属并发护栏、重试时本就会变，不参与比较。
@@ -41,8 +41,11 @@
 - **补上人工签收入口（第三次真机冒烟发现）**：方案 §6.1 要求 `dsh.tasks.resolve` 作为 `review_pending` / `needs_reconcile` 的人工终态处置，实现里只有 engine 方法、RPC 与 CLI 都没暴露，等于任务能跑完却无法签收。现补 RPC `dsh.tasks.resolve`（`taskId` + `expectedStateVersion` + `idempotencyKey` + `disposition: accept|reject|cancel|requeue` + `evidenceRef?`/`note?`）与 CLI `dsh-rpc tasks resolve --expected-version N --decision accept|reject|cancel|requeue`；按计划**不**进 MCP（签收是人的判断，不能让调用方自己给自己验收），并纳入 `tasksEnabled` 熔断名单与 `catalog.smoke` 期望表。
 - **开态启动不再被未注册服务拖垮（第二次真机冒烟发现）**：`index.mjs` 原用 `ctx?.get?.("taskAdapterFactories")` 找注入点，而 Cordis 的 `ctx.get(name, strict)` 对未注册服务会抛错，任务中心启动块整体中断后 `taskStore`/`taskEngine` 退回内存库——表现为 `dsh.tasks.submit` 报 `principal not found`、文件库里只剩 schema。现在缺服务视为未注入（try/catch 兜底）、基线身份播种改为 `await` 并记 `seedError`、启动失败记 `startError`，并让 `dsh.ping` 输出 `taskCentre {enabled, mode, ready, dbPath, store, seedError, startError}`；新增回归用例（`ctx.get` 抛错时仍启动、播种真正落盘）。
 - **安全复评第三轮（t3c）收紧**：凭据形态补 `Basic` / `Cookie` / URL userinfo / `github_pat_` / `AKIA` 五类（Cookie 止于分号，避免吞掉整行）；`redactDeep` 只对字符串凭据替换、放过 `maxTokens`/`tokenCount` 这类计数键，深度截断标记改为 `[truncated: depth]`；MCP 入口校验改用 `Object.hasOwn` 并显式拒绝 `__proto__`/`constructor`/`prototype`，递归上限由 2 提到 8；Cookie 头按逐对遮盖（整行遮盖会吞掉同一行后面的 URL），Bearer 只认"长且非纯字母"的串（`Bearer of bad news` 是句子不是凭据），键名补 `sessionKey` / `x-api-key` / `passphrase` / `credential`。**边界如实记**：任务结果按产出原样落账，脱敏只覆盖适配器失败文本与调试日志——结果是交付物，改写结果等于篡改。
+- **补上任务事件入口（重启前补齐的第四处缺口）**：方案 §6.1 要求 `dsh.tasks.events`，引擎里也早就有 `events()`，但 RPC/CLI 从未暴露——任务中心自己的日志从外部读不到。现在 `dsh.tasks.events`（`taskId` + `afterSeq` + `limit`）与 `dsh-rpc tasks events` 都在，MCP 面不加（事件属于排障路径，不是驱动路径）。
+- **预览不再接受「不相干的能力修订」（重启前补齐的第五处缺口）**：`dsh.tasks.preview` 过去只校验修订存在，不校验它属于所选实例、也不校验探测是否过期，还会把候选列表留空。现在：修订必须在该实例声明的 `capabilityRevisions` 里（否则 `CAPABILITY_VERSION_MISSING`）、探测过期即拒（`PROBE_STALE`），并把同类其它实例的排除原因（`AGENT_DISABLED` / `PROBE_STALE`）与选中项一起写进 `candidates[]`。
+- **顺带修掉一个会吃掉声明的 bug**：`dsh.agents.probe` 重写 `capabilities_json` 时会丢掉已发布的能力修订，导致「注册→探测→预览」直接失败；现在探测只更新证据，不动已发布的能力集合与项目绑定。
 - **注册即发布能力修订（首次真机冒烟发现）**：`dsh.agents.register` 过去只写 `agents` 行，`capability_revisions` 永远为空，而 `dsh.tasks.preview` / `dsh.tasks.submit` 都要求修订 id —— 干净主机上任务中心实际不可用。现在卡片的 `capabilities[]` 在注册时发布为不可变修订（id 由卡片哈希 + 能力派生，同卡幂等、换卡换版本），写类能力必须把 `cancelPolicy` 标 `required`，`dsh.agents.list` 会回显每个实例的 `capabilityRevisions`。
-- **测试与文档口径校正**：`scripts.test` 全链 38 个测试文件、**354 例**；`docs/design.md` 的 §7 历史快照后补了「现行口径（2026-11-19）」注，注明 `methods 41 → 85`、`client 6 → 8`、`edge 24 项但本机 23/24`（第 21 项 `create without a cwd` 因宿主返回 `cwd: null` 失败，属既有行为，非本 PR 引入）。
+- **测试与文档口径校正**：`scripts.test` 全链 39 个测试文件、**358 例**；`docs/design.md` 的 §7 历史快照后补了「现行口径（2026-11-19）」注，注明 `methods 41 → 85`、`client 6 → 8`、`edge 24 项但本机 23/24`（第 21 项 `create without a cwd` 因宿主返回 `cwd: null` 失败，属既有行为，非本 PR 引入）。
 
 ### 行为变化
 

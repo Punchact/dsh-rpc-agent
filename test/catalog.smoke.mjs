@@ -79,6 +79,7 @@ const expected = [
   "dsh.tasks.dispatch",
   "dsh.tasks.get",
   "dsh.tasks.list",
+  "dsh.tasks.events",
   "dsh.tasks.preview",
   "dsh.tasks.pump",
   "dsh.tasks.reconcile",

@@ -76,7 +76,7 @@ Repository and package name are both `dsh-rpc-agent`; the commands (`dsh-rpc`, `
 - **Self-describing**: `dsh_capabilities` returns an eight-section snapshot (runtime, permission presets, callable tools, MCP prefixes, sessions, workspaces, plugins), so a planner does not have to guess what this machine offers.
 - **No pretend knowledge**: when an outer client caps tool calls below the bridge budget, the bridge says so and recommends polling in slices instead of letting a long job look like a failure.
 - **Managed external agent tasks (Task centre, `tasksEnabled: false` by default)**: a 15-table SQLite ledger, 11-state machine, and capability cards/read-only probes driving DSH itself, Antigravity, and Codex App Server; see [docs/task-center.md](./docs/task-center.md).
-- **Regression tests guard the sharp edges**: 38 test files (354 cases) + catalog smoke (354/354 pass locally, including the 15 `approvals` cases) + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
+- **Regression tests guard the sharp edges**: 39 test files (358 cases) + catalog smoke (358/358 pass locally, including the 15 `approvals` cases) + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
 
 ## Install and update
 
@@ -286,9 +286,10 @@ Every method lives under the `dsh.` namespace; the CLI aliases `ping` / `discove
 | `dsh.sessions.cancel` | `sessionId` | `{accepted, sessionId}` |
 | `dsh.sessions.history` | `sessionId, limit?, since?, kinds?, maxChars?` | `{cursor, turn, running, messageCount, records[], truncated?}` |
 | `dsh.capabilities` | `sections?, maxChars?, sessionId?` | `{sections[], text, truncated, missing[]}`, read-only eight-section snapshot |
-| `dsh.tasks.preview` | `principalId, workspaceId?, agentId?, capabilityRevisionId?, input?, ttlMs?` | `{previewId, requestDigest, agentId, expiresAt, …}` |
+| `dsh.tasks.preview` | `principalId, workspaceId?, agentId?, capabilityRevisionId?, input?, ttlMs?` | `{previewId, requestDigest, agentId, candidates[], degraded[], expiresAt, …}`; the revision must belong to that instance and a stale probe is refused |
 | `dsh.tasks.submit` | `idempotencyKey` (required), `previewId?` (binds the parameters and principal it was issued for), `capabilityRevisionId?`, `workspaceId?`, `agentId?`, `input?` | `{taskId, status, phase, stateVersion, …}` |
 | `dsh.tasks.get` / `list` | `taskId` / `status?, workspaceId?, principalId?, limit?, cursor?` | Task details (with `phase` and open `attention`) or paginated list |
+| `dsh.tasks.events` | `taskId, afterSeq?, limit?` | The task's own event stream (`{taskId, events[], nextAfterSeq, hasMore}`; `taskId` + `seq` is the dedupe key) |
 | `dsh.tasks.cancel` | `taskId, expectedStateVersion, idempotencyKey, reason?` | `{taskId, status, stateVersion, notice?}` |
 | `dsh.tasks.dispatch` / `pump` | `taskId, …` / `taskId, maxSteps?, deadlineMs?, cursor?` | Dispatches to an adapter or drives bounded events/inspect pumping |
 | `dsh.tasks.reconcile` | `taskId, evidence: { observedState, note?, result? }` | Settles `needs_reconcile`/`cancel_requested` and closes active attempts |
@@ -296,7 +297,7 @@ Every method lives under the `dsh.` namespace; the CLI aliases `ping` / `discove
 | `dsh.tasks.decideApproval` | `taskId, attemptId, approvalId, decision: "allow"\|"deny", reason?` | `{approvalId, decision, status, stateVersion, operationId}` |
 | `dsh.agents.register` / `list` / `probe` | `card` / filters / `agentId, controls?` | Capability-card registration, listing, and read-only control probing |
 
-(**30** JSON-RPC methods total; run `dsh.discover` or `dsh-rpc discover` for full parameter schemas.)
+(**31** JSON-RPC methods total; run `dsh.discover` or `dsh-rpc discover` for full parameter schemas.)
 
 Semantics that are easy to trip over:
 
@@ -750,7 +751,7 @@ Everything the page shows comes from that read-only endpoint; it writes nothing.
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 38 test files, 354 cases, plus catalog smoke; no running Harness needed
+npm test                       # 39 test files, 358 cases, plus catalog smoke; no running Harness needed
 node test/host.test.mjs        # 1 case: real WebServer integration (needs npm ci first)
 node test/e2e.mjs              # 14 cases: end to end against a real Harness (--cwd takes an absolute path only)
 node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a real Harness
@@ -777,6 +778,7 @@ node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a 
 | `agents-capability-revisions` | 5 | one immutable revision per declared capability at registration: parsing, `required` for writes, idempotent re-register, new revision when the card changes |
 | `agents-probe` | 1 | Read-only probe timeout/throw isolation and `unknown` recording |
 | `tasks-preview` | 3 | One-shot preview consumption, digest match, TTL expiry, principal isolation, and `degraded[]` from the capability card shape |
+| `tasks-events-and-preview` | 4 | task event cursor, revision ownership, stale probe, candidate exclusion reasons |
 | `tasks-reconcile` | 4 | `needs_reconcile` settlement, closing lingering side-effect attempts, requeue unlock |
 | `adapters-base` | 4 | Seven-operation adapter contract, six-state report validation, failure sanitising and the curated reason list |
 | `adapters-redact` | 5 | Credential-shaped redaction (Bearer/Basic/Cookie/userinfo/PAT/AK), cookie pairs masked without breaking JSON, truncation, depth limit, and token budgets left intact |
@@ -814,7 +816,7 @@ A few worth calling out:
 - **Edge** probes the protocol layer: batches, notifications, id shapes, auth headers, oversized bodies (a genuine 413, not a dropped connection), parameter-injection defences, timeout clamping, concurrent asks, `limit` semantics.
 - **Port drift** (manual): point `endpoint.json` at a dead port and run `dsh-rpc ping`; expect exit code 3 and a readable error mentioning `nothing is listening`, `pid` and `health --wait`.
 
-Local verification (2026-11-19, 0.9.0, real repository): all 38 test files in the `npm test` chain pass (**354/354** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.mjs` (`methods: 30` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`). Formatting (UTF-8 without BOM, LF) is a review convention here, not an automated gate.
+Local verification (2026-11-19, 0.9.0, real repository): all 39 test files in the `npm test` chain pass (**358/358** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.mjs` (`methods: 31` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`). Formatting (UTF-8 without BOM, LF) is a review convention here, not an automated gate.
 
 ## License
 

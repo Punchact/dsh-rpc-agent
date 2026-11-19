@@ -749,6 +749,26 @@ async function runTasksCommand(flags, rest, options) {
       note(`${(result.items ?? []).length} task(s)${result.hasMore ? ` (next cursor: ${result.nextCursor})` : ""}`);
       return 0;
     }
+    case "events": {
+      if (!firstId) throw new UsageError("tasks events needs <taskId> or --task <id>");
+      const params = { taskId: firstId };
+      if (flags.after) params.afterSeq = numberOf(flags, "after", { min: 0, max: Number.MAX_SAFE_INTEGER });
+      const limit = numberOf(flags, "limit", { min: 1, max: 500 });
+      if (limit) params.limit = limit;
+      const result = await rpcCall("dsh.tasks.events", params, options);
+      if (flags.json) {
+        print(JSON.stringify(result, null, 2));
+        return 0;
+      }
+      for (const event of result.events ?? []) {
+        const attempt = event.attemptId ? ` · ${event.attemptId}` : "";
+        print(`#${event.seq} ${event.type}${attempt} · ${event.at}`);
+      }
+      note(
+        `${(result.events ?? []).length} event(s)${result.hasMore ? ` (next afterSeq: ${result.nextAfterSeq})` : ""}`,
+      );
+      return 0;
+    }
     case "get": {
       if (!firstId) throw new UsageError("tasks get needs <taskId> or --task <id>");
       const params = { taskId: firstId };

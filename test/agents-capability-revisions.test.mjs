@@ -60,7 +60,6 @@ test("declared capabilities are normalised with read-only defaults", () => {
     sideEffectKind: "read",
     cancelPolicy: "optional",
     schema: { type: "object" },
-    limitations: null,
   });
   // §4.2 rule 4: a write capability must require cancellation.
   assert.equal(card.capabilities[1].cancelPolicy, "required");
