@@ -93,6 +93,9 @@ export async function apply(ctx, input = {}) {
     seedError: null,
     startError: null,
     autopilot: null,
+    // A pass that runs and does nothing looks exactly like a pass that never ran, unless
+    // the last pass says so; ping() reports this object verbatim.
+    autopilotStats: null,
   };
 
   if (config.tasksEnabled) {
@@ -196,8 +199,32 @@ export async function apply(ctx, input = {}) {
           }
         : { enabled: false, intervalMs: null, maxStart: null, maxPump: null };
 
+      const autopilotStats = {
+        passes: 0,
+        lastPassAt: null,
+        lastStarted: 0,
+        lastPumped: 0,
+        lastFailed: 0,
+        lastError: null,
+      };
+      taskCentre.autopilotStats = autopilotStats;
+
       const drainTimer = setInterval(() => {
-        const tick = autopilot ? autopilot.step().catch(() => {}) : Promise.resolve();
+        const tick = autopilot
+          ? autopilot
+              .step()
+              .then((result) => {
+                autopilotStats.passes += 1;
+                autopilotStats.lastPassAt = new Date().toISOString();
+                autopilotStats.lastStarted = result?.started?.length ?? 0;
+                autopilotStats.lastPumped = result?.pumped?.length ?? 0;
+                autopilotStats.lastFailed = result?.failed?.length ?? 0;
+                autopilotStats.lastError = result?.failed?.length ? (result.failed[0]?.message ?? null) : null;
+              })
+              .catch((err) => {
+                autopilotStats.lastError = err?.message ?? String(err);
+              })
+          : Promise.resolve();
         // Effects (adapter stop/kill requests) always drain, even with autopilot off:
         // they are leftovers of decisions already made, not new work.
         tick.finally(() => taskDispatcher.drainEffects({ limit: 50 }).catch(() => {}));

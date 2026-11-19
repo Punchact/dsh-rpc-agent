@@ -7,7 +7,9 @@ function makeEngine(byStatus = {}) {
   const calls = [];
   return {
     calls,
-    list(params = {}) {
+    // The real engine answers from a read transaction, so it is async. Keeping the fake
+    // async too is what makes a forgotten `await` fail here instead of on a live host.
+    async list(params = {}) {
       calls.push({ ...params });
       const all = byStatus[params.status] ?? [];
       const limit = params.limit ?? 50;
@@ -161,9 +163,35 @@ test("the bounded pump budget is passed through to the dispatcher", async () => 
   assert.deepEqual(dispatcher.calls.pump[0], { taskId: "task_r1", maxSteps: 7, deadlineMs: 1_234 });
 });
 
+test("a page answered asynchronously is awaited before dispatch", async () => {
+  // Pins the live defect: `engine.list` returns a Promise, and a pass that forgets to
+  // await it sees `undefined.items` and silently starts nothing.
+  const engine = {
+    async list(params) {
+      await Promise.resolve();
+      return {
+        items: params.status === "queued" ? [{ taskId: "task_async" }] : [],
+        hasMore: false,
+        nextCursor: null,
+      };
+    },
+  };
+  const dispatcher = makeDispatcher();
+  const autopilot = createAutopilot({ engine, dispatcher });
+
+  const result = await autopilot.step();
+
+  assert.deepEqual(
+    dispatcher.calls.start.map((p) => p.taskId),
+    ["task_async"],
+  );
+  assert.deepEqual(result.failed, []);
+  assert.equal(result.started[0].taskId, "task_async");
+});
+
 test("a broken ledger query is reported, not thrown at the timer", async () => {
   const engine = {
-    list(params) {
+    async list(params) {
       if (params.status === "queued") throw new Error("database is gone");
       return { items: [], hasMore: false, nextCursor: null };
     },
