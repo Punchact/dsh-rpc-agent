@@ -135,7 +135,9 @@ jobs:
           set -euo pipefail
           ls -l artifacts
           (cd artifacts && sha256sum -c SHA256SUMS)
-          TARBALL=$(ls artifacts/*.tgz)
+          # `./` matters: npm 11 resolves a bare relative path as a GitHub shorthand spec
+          # (`artifacts/x.tgz` -> git ls-remote ssh://git@github.com/artifacts/x.tgz.git).
+          TARBALL="./$(ls artifacts/*.tgz)"
           echo "tarball: ${TARBALL}"
           tar -xzOf "$TARBALL" package/package.json > /tmp/packed-package.json
           node -e 'const p=require("/tmp/packed-package.json"); console.log("packed version:", p.version, "files:", p.files.length)'
@@ -198,7 +200,9 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          TARBALL=$(ls artifacts/*.tgz)
+          # `./` matters: npm 11 resolves a bare relative path as a GitHub shorthand spec
+          # (`artifacts/x.tgz` -> git ls-remote ssh://git@github.com/artifacts/x.tgz.git).
+          TARBALL="./$(ls artifacts/*.tgz)"
           VERSION=$(tar -xzOf "$TARBALL" package/package.json \
             | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).version))')
           echo "publishing ${VERSION} from ${TARBALL}"

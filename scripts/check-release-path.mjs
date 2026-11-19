@@ -266,6 +266,14 @@ if (!existsSync(RELEASE_WORKFLOW)) {
         `release.yml publish job 有 ${strayPublish.length} 处 publish 没有指向 tarball：${strayPublish[0].slice(0, 120)}`,
       );
     }
+    const tarAssign = [...publishBlock.matchAll(/TARBALL=(?<value>.*)/g)].map((m) => m.groups.value.trim());
+    if (tarAssign.length === 0) {
+      problems.push("release.yml publish job 没有从下载到的 tarball 推出路径变量（应有 TARBALL=$(ls artifacts/*.tgz)）");
+    } else if (!tarAssign.every((value) => value.includes("./"))) {
+      problems.push(
+        "release.yml publish job 的 TARBALL 赋值缺 `./` 前缀：npm 11 会把不带 ./ 的相对路径当 GitHub 简写包名，去 git ls-remote（dry_run 实测 exit 128）",
+      );
+    }
     const bareRootPublish = findRootPublishLines(publishBlock);
     if (bareRootPublish.length > 0) {
       problems.push(
