@@ -7,12 +7,17 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+interface DiscoveredTestFile {
+  rel: string;
+  full: string;
+}
+
 const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const TEST_ROOT = join(REPO, "test");
 
-function walkMjs(absDir, relPrefix = "") {
+function walkMjs(absDir: string, relPrefix = ""): DiscoveredTestFile[] {
   if (!existsSync(absDir)) return [];
-  const results = [];
+  const results: DiscoveredTestFile[] = [];
   const entries = readdirSync(absDir, { withFileTypes: true }).sort((a, b) =>
     a.name.localeCompare(b.name),
   );
@@ -35,7 +40,7 @@ const DIST_REF_RE =
   /(["'])(?:\.\.\/)+dist\/(?:lib\/|bin\/|index\.mjs|client\.js|http-client\.mjs|package\.json|cordis\.patch\.yml)|join\(\s*REPO\s*,\s*(["'])dist\2\s*,\s*(["'])bin\3/g;
 
 const files = walkMjs(TEST_ROOT);
-const violations = [];
+const violations: string[] = [];
 let distRefCount = 0;
 
 for (const file of files) {

@@ -17,11 +17,34 @@ import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+interface SurfaceListSet {
+  rpc: string[];
+  mcpTools: string[];
+  cli: string[];
+}
+
+interface ExtractedPlan extends SurfaceListSet {
+  raw: string;
+  sourceSha256: string;
+}
+
+interface SurfaceSnapshot extends SurfaceListSet {
+  note?: string;
+  source: {
+    path: string;
+    sha256: string;
+  };
+  extractedAt?: string;
+  implementationOnly: SurfaceListSet & {
+    note?: string;
+  };
+}
+
 const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const SNAPSHOT = "docs/api-surface.json";
 const DEFAULT_PLAN = resolve(REPO, "..", "DSH本机Agent任务中心实施方案-合并版v1.0-20261118.md");
-const read = (rel) => readFileSync(join(REPO, rel), "utf8").replace(/\r\n/g, "\n");
-const readDist = (rel) => {
+const read = (rel: string): string => readFileSync(join(REPO, rel), "utf8").replace(/\r\n/g, "\n");
+const readDist = (rel: string): string => {
   const full = join(REPO, "dist", rel);
   if (!existsSync(full)) {
     console.error(`check-surface: 找不到产物文件 dist/${rel} — 请先运行 \`npm run build\``);
@@ -29,10 +52,10 @@ const readDist = (rel) => {
   }
   return readFileSync(full, "utf8").replace(/\r\n/g, "\n");
 };
-const sha256 = (text) => createHash("sha256").update(text, "utf8").digest("hex");
+const sha256 = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
 
 // --- 代码侧的三类接口面（一律扫 dist/ 产物） ------------------------------------------
-function sliceBlock(source, header, footer) {
+function sliceBlock(source: string, header: string, footer: string): string {
   const start = source.indexOf(header);
   if (start < 0) throw new Error(`check-surface: 找不到 ${header}`);
   const end = footer ? source.indexOf(footer, start + header.length) : source.length;
@@ -57,11 +80,11 @@ const codeCli = [
   ...[...agentsCli.matchAll(/case "([a-z][a-z-]*)":/g)].map((m) => `agents ${m[1]}`),
 ].sort();
 
-const familyRpc = (n) => n.startsWith("dsh.tasks.") || n.startsWith("dsh.agents.");
-const familyMcp = (n) => n.startsWith("dsh_task_") || n.startsWith("dsh_agents_");
+const familyRpc = (n: string): boolean => n.startsWith("dsh.tasks.") || n.startsWith("dsh.agents.");
+const familyMcp = (n: string): boolean => n.startsWith("dsh_task_") || n.startsWith("dsh_agents_");
 
 // --- 从方案文档抽取 ---------------------------------------------------------------------
-function extractFromPlan(planPath) {
+function extractFromPlan(planPath: string): ExtractedPlan {
   if (!existsSync(planPath)) {
     throw new Error(
       `check-surface: 找不到方案文档 ${planPath}\n` +
@@ -93,9 +116,9 @@ if (mode === "write") {
   };
   // 与上一版快照比：新冒出来的「实现侧多出来」的条目要人当场点一次头。
   const previous = existsSync(join(REPO, SNAPSHOT))
-    ? JSON.parse(read(SNAPSHOT))
+    ? (JSON.parse(read(SNAPSHOT)) as Partial<SurfaceSnapshot>)
     : { implementationOnly: { rpc: [], mcpTools: [], cli: [] } };
-  const prev = previous.implementationOnly ?? {};
+  const prev: Partial<SurfaceListSet> = previous.implementationOnly ?? {};
   const added = {
     rpc: implementationOnly.rpc.filter((n) => !(prev.rpc ?? []).includes(n)),
     mcpTools: implementationOnly.mcpTools.filter((n) => !(prev.mcpTools ?? []).includes(n)),
@@ -133,8 +156,8 @@ if (mode === "write") {
 }
 
 // --- 核对 ---------------------------------------------------------------------------------
-const snapshot = JSON.parse(read(SNAPSHOT));
-const problems = [];
+const snapshot = JSON.parse(read(SNAPSHOT)) as SurfaceSnapshot;
+const problems: string[] = [];
 
 for (const name of snapshot.rpc) {
   if (!codeRpc.includes(name)) problems.push(`方案要求 RPC ${name}，但 METHOD_CATALOG 里没有`);

@@ -17,9 +17,51 @@ import { fileURLToPath } from "node:url";
 
 import { chainDigest } from "./count-cases.ts";
 
+interface DistPackageJson {
+  scripts: {
+    test: string;
+  };
+}
+
+interface CountsJson {
+  testCases: number;
+  testFiles: number;
+  declaredCases: number;
+  testChainDigest: string;
+}
+
+interface ExpectedDocCounts {
+  rpcTotal: number;
+  mcpBase: number;
+  mcpTask: number;
+  mcpAgent: number;
+  mcpTotal: number;
+  testFiles: number;
+  testCases: number;
+}
+
+interface DocRule {
+  file: string;
+  onlyLatest: boolean;
+  re: RegExp;
+  expect: (m: RegExpExecArray) => Record<string, number>;
+}
+
+interface DocRewrite {
+  file: string;
+  absoluteStart: number;
+  length: number;
+  replacement: string;
+}
+
+interface SuiteTableRule {
+  file: string;
+  header: RegExp;
+}
+
 const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const read = (rel) => readFileSync(join(REPO, rel), "utf8").replace(/\r\n/g, "\n");
-const readDist = (rel) => {
+const read = (rel: string): string => readFileSync(join(REPO, rel), "utf8").replace(/\r\n/g, "\n");
+const readDist = (rel: string): string => {
   const full = join(REPO, "dist", rel);
   if (!existsSync(full)) {
     console.error(`check-docs: 找不到产物文件 dist/${rel} — 请先运行 \`npm run build\``);
@@ -35,7 +77,7 @@ const rpcTotal = rpcNames.length;
 if (rpcTotal === 0) throw new Error("check-docs: no RPC method names found in dist/lib/methods.mjs");
 
 const mcpSource = readDist("bin/dsh-rpc-mcp.mjs");
-const sliceTable = (constName) => {
+const sliceTable = (constName: string): string => {
   const start = mcpSource.indexOf(`const ${constName} = [`);
   if (start < 0) throw new Error(`check-docs: ${constName} not found in dist/bin/dsh-rpc-mcp.mjs`);
   const end = mcpSource.indexOf("\n];", start);
@@ -50,19 +92,19 @@ const mcpTask = taskOnly.length;
 const mcpAgent = agentOnly.length;
 const mcpTotal = mcpBase + mcpTask + mcpAgent;
 
-const pkg = JSON.parse(readDist("package.json"));
+const pkg = JSON.parse(readDist("package.json")) as DistPackageJson;
 const chain = pkg.scripts.test.split("&&").map((s) => s.trim());
 const testChainFiles = chain.filter((s) => /^node test\/.+\.test\.mjs$/.test(s)).length;
 const testOnDisk = readdirSync(join(REPO, "test")).filter((f) => f.endsWith(".test.mjs")).length;
 
 const countsPath = "docs/counts.json";
-const counts = JSON.parse(read(countsPath));
+const counts = JSON.parse(read(countsPath)) as CountsJson;
 
 // 0.9.2（复核 NOTES）：这个数以前是手填的，`--write` 会把写错的值当正确答案刷进文档——手填的数字
 // 没有任何东西能证明它是真的。现在它只能由 `scripts/count-cases.mjs` 真跑一遍后写入，并附带测试
 // 文件摘要与声明条数；这里重算一遍，对不上就说明「文件变了、数字没重算」或者「有人直接改了数字」。
 const chainMeta = chainDigest();
-const staleReasons = [];
+const staleReasons: string[] = [];
 if (counts.testChainDigest !== chainMeta.digest) staleReasons.push("测试文件内容与记录不符");
 if (counts.declaredCases !== chainMeta.declared) staleReasons.push(`声明条数 记录=${counts.declaredCases} 现在=${chainMeta.declared}`);
 if (counts.testFiles !== chainMeta.files) staleReasons.push(`测试文件数 记录=${counts.testFiles} 现在=${chainMeta.files}`);
@@ -79,7 +121,7 @@ if (!Number.isInteger(counts.testCases) || counts.testCases < chainMeta.declared
 }
 const testCases = counts.testCases;
 
-const expected = {
+const expected: ExpectedDocCounts = {
   rpcTotal,
   mcpBase,
   mcpTask,
@@ -92,7 +134,7 @@ const expected = {
 // --- 锚点规则 ---------------------------------------------------------------------------
 // 每条规则：文件、正则（必须带命名组）、每组对应的期望值。`onlyLatest` 表示只作用于
 // CHANGELOG 最新一节（历史章节的数字是当时的事实，不该被后来的改动覆盖）。
-const rules = [
+const rules: DocRule[] = [
   { file: "README.md", onlyLatest: false, re: /跑这 (?<files>\d+) 个测试文件/g, expect: () => ({ files: expected.testFiles }) },
   { file: "README.en.md", onlyLatest: false, re: /runs these (?<files>\d+) test files/g, expect: () => ({ files: expected.testFiles }) },
   { file: "README.md", onlyLatest: false, re: /(?<files>\d+) 个测试文件共 (?<cases>\d+) 例/g, expect: (m) => ({ files: expected.testFiles, cases: expected.testCases }) },
@@ -128,22 +170,22 @@ const rules = [
 ];
 
 // CHANGELOG 最新一节 = 第一个 `## [` 到第二个 `## [` 之间。
-function latestChangelogSlice(text) {
+function latestChangelogSlice(text: string): { start: number; end: number } {
   const first = text.indexOf("\n## [");
   if (first < 0) throw new Error("check-docs: no versioned section in CHANGELOG.md");
   const next = text.indexOf("\n## [", first + 1);
   return { start: first, end: next < 0 ? text.length : next };
 }
 
-const files = new Map();
+const files = new Map<string, string>();
 for (const rel of new Set(rules.map((r) => r.file))) files.set(rel, read(rel));
 
 const mode = process.argv.includes("--write") ? "write" : "check";
-const problems = [];
-const rewrites = [];
+const problems: string[] = [];
+const rewrites: DocRewrite[] = [];
 
 for (const rule of rules) {
-  const text = files.get(rule.file);
+  const text = files.get(rule.file) as string;
   const scope = rule.onlyLatest ? latestChangelogSlice(text) : { start: 0, end: text.length };
   const body = text.slice(scope.start, scope.end);
   const matches = [...body.matchAll(rule.re)];
@@ -153,7 +195,8 @@ for (const rule of rules) {
   }
   for (const m of matches) {
     const want = rule.expect(m);
-    const got = Object.fromEntries(Object.keys(want).map((k) => [k, m.groups[k]]));
+    const groups = m.groups as Record<string, string>;
+    const got: Record<string, string> = Object.fromEntries(Object.keys(want).map((k) => [k, groups[k]]));
     const diffs = Object.keys(want).filter((k) => String(want[k]) !== String(got[k]));
     if (diffs.length === 0) continue;
     const line = text.slice(0, scope.start).split("\n").length + body.slice(0, m.index).split("\n").length - 1;
@@ -162,7 +205,7 @@ for (const rule of rules) {
     );
     if (mode === "write") {
       let replacement = m[0];
-      for (const k of diffs) replacement = replacement.replace(m.groups[k], String(want[k]));
+      for (const k of diffs) replacement = replacement.replace(groups[k], String(want[k]));
       rewrites.push({ file: rule.file, absoluteStart: scope.start + m.index, length: m[0].length, replacement });
     }
   }
@@ -170,7 +213,7 @@ for (const rule of rules) {
 
 // --- 测试表明细：标题说几个文件，表里就得有几行 -------------------------------------------
 // 0.9.2 复核指出来的半同步：只校验标题里的数字、不校验明细表行数，会出现「标题 46、表里 45 行」。
-const suiteTables = [
+const suiteTables: SuiteTableRule[] = [
   { file: "README.md", header: /<summary>(\d+) 个测试文件各自覆盖什么<\/summary>/ },
   { file: "README.en.md", header: /What each of the (\d+) test files covers/ },
 ];
@@ -214,13 +257,13 @@ if (rewrites.length === 0) {
   console.log("docs:counts — 已经是当前值，没有需要写的地方");
   process.exit(0);
 }
-const byFile = new Map();
+const byFile = new Map<string, DocRewrite[]>();
 for (const r of rewrites) {
   if (!byFile.has(r.file)) byFile.set(r.file, []);
-  byFile.get(r.file).push(r);
+  (byFile.get(r.file) as DocRewrite[]).push(r);
 }
 for (const [rel, list] of byFile) {
-  let text = files.get(rel);
+  let text = files.get(rel) as string;
   for (const r of list.sort((a, b) => b.absoluteStart - a.absoluteStart)) {
     text = text.slice(0, r.absoluteStart) + r.replacement + text.slice(r.absoluteStart + r.length);
   }

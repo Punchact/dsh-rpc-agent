@@ -12,13 +12,31 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+interface NpmPackFileEntry {
+  path: string;
+}
+
+interface NpmPackManifest {
+  files: NpmPackFileEntry[];
+}
+
+interface PackageJsonShape {
+  private?: boolean;
+  main?: string;
+  exports?: Record<string, unknown>;
+  bin?: Record<string, unknown>;
+  scripts?: {
+    prepublishOnly?: string;
+  };
+}
+
 const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const DIST = resolve(REPO, "dist");
 const RELEASE_WORKFLOW = resolve(REPO, ".github", "workflows", "release.yml");
 
-const problems = [];
+const problems: string[] = [];
 
-function runNpmPackDryRun(cwd) {
+function runNpmPackDryRun(cwd: string): NpmPackManifest | null {
   const npmExec = process.env.npm_execpath;
   const useShell = !npmExec && process.platform === "win32";
   const command = npmExec ? process.execPath : useShell ? "npm.cmd" : "npm";
@@ -40,16 +58,16 @@ function runNpmPackDryRun(cwd) {
     return null;
   }
   try {
-    const parsed = JSON.parse(out.stdout.slice(start));
-    return Array.isArray(parsed) && parsed.length > 0 ? parsed[0] : null;
+    const parsed = JSON.parse(out.stdout.slice(start)) as unknown;
+    return Array.isArray(parsed) && parsed.length > 0 ? (parsed[0] as NpmPackManifest) : null;
   } catch (err) {
-    problems.push(`npm pack (${cwd}) JSON 解析失败: ${err.message}`);
+    problems.push(`npm pack (${cwd}) JSON 解析失败: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
 }
 
-function collectDeclaredTargets(pkg) {
-  const list = [];
+function collectDeclaredTargets(pkg: PackageJsonShape): Array<[string, string]> {
+  const list: Array<[string, string]> = [];
   if (typeof pkg.main === "string") list.push(["main", pkg.main]);
   for (const [subpath, target] of Object.entries(pkg.exports ?? {})) {
     if (typeof target === "string") list.push([`exports["${subpath}"]`, target]);
@@ -62,7 +80,7 @@ function collectDeclaredTargets(pkg) {
 
 // Comment lines must not satisfy a workflow assertion: a `# - run: npm run build` sitting above
 // `check:version` would otherwise look like a build step that never runs.
-function stripComments(block) {
+function stripComments(block: string): string {
   return block
     .split("\n")
     .filter((line) => !/^\s*#/.test(line))
@@ -77,12 +95,12 @@ const PUBLISH_CALL = /npm\s+(?:stage\s+)?publish\b/g;
 
 // A message that merely *mentions* `npm publish` inside quotes is not a publish step. Replace quoted
 // spans with spaces of the same length so match positions stay aligned with the real line.
-function maskQuotedSpans(line) {
+function maskQuotedSpans(line: string): string {
   return line.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, (span) => " ".repeat(span.length));
 }
 
-function findRootPublishLines(publishBlock) {
-  const offenders = [];
+function findRootPublishLines(publishBlock: string): string[] {
+  const offenders: string[] = [];
   let inDistDir = false;
   for (const raw of publishBlock.split("\n")) {
     const line = raw.trim();
@@ -105,8 +123,8 @@ function findRootPublishLines(publishBlock) {
 // Every publish call in the publish job must name the tarball it downloaded. Checking that *some*
 // call mentions $TARBALL is not enough: a real `cd dist && npm publish` branch sitting next to a
 // rehearsal line that does name it passed the gate (quality review round, 0.9.4 finding 1).
-function nonTarballPublishLines(publishBlock) {
-  const offenders = [];
+function nonTarballPublishLines(publishBlock: string): string[] {
+  const offenders: string[] = [];
   for (const raw of publishBlock.split("\n")) {
     const line = raw.trim();
     if (!line) continue;
@@ -125,7 +143,7 @@ function nonTarballPublishLines(publishBlock) {
 
 // The artifact name an upload/download step declares, so verify and publish can be compared. Stops
 // at the next step so a later step's `name:` cannot be mistaken for this one's.
-function artifactName(block, verb) {
+function artifactName(block: string, verb: string): string | null {
   const marker = `uses: actions/${verb}-artifact@`;
   const at = block.indexOf(marker);
   if (at < 0) return null;
@@ -137,7 +155,7 @@ function artifactName(block, verb) {
   return null;
 }
 
-function checkWildcardInPack(baseDir, shippedSet, pattern) {  const relPattern = pattern.replace(/^\.\//, "");
+function checkWildcardInPack(baseDir: string, shippedSet: Set<string>, pattern: string): boolean {  const relPattern = pattern.replace(/^\.\//, "");
   const dirRel = posix.dirname(relPattern);
   const basePattern = posix.basename(relPattern);
   const [prefix, suffix] = basePattern.split("*");
@@ -152,7 +170,7 @@ function checkWildcardInPack(baseDir, shippedSet, pattern) {  const relPattern =
 if (!existsSync(DIST) || !existsSync(resolve(DIST, "package.json"))) {
   problems.push("dist/ 或 dist/package.json 缺失 — 请先运行 `npm run build`");
 } else {
-  const distPkg = JSON.parse(readFileSync(resolve(DIST, "package.json"), "utf8"));
+  const distPkg = JSON.parse(readFileSync(resolve(DIST, "package.json"), "utf8")) as PackageJsonShape;
   if (distPkg.private === true) {
     problems.push('dist/package.json 带有 "private": true，无法发布');
   }
@@ -178,7 +196,7 @@ if (!existsSync(DIST) || !existsSync(resolve(DIST, "package.json"))) {
 }
 
 // 2. Verify repo root manifest consistency & unpublishable guard
-const rootPkg = JSON.parse(readFileSync(resolve(REPO, "package.json"), "utf8"));
+const rootPkg = JSON.parse(readFileSync(resolve(REPO, "package.json"), "utf8")) as PackageJsonShape;
 const rootDeclared = collectDeclaredTargets(rootPkg);
 for (const [label, target] of rootDeclared) {
   if (target.includes("*")) {
@@ -266,7 +284,9 @@ if (!existsSync(RELEASE_WORKFLOW)) {
         `release.yml publish job 有 ${strayPublish.length} 处 publish 没有指向 tarball：${strayPublish[0].slice(0, 120)}`,
       );
     }
-    const tarAssign = [...publishBlock.matchAll(/TARBALL=(?<value>.*)/g)].map((m) => m.groups.value.trim());
+    const tarAssign = [...publishBlock.matchAll(/TARBALL=(?<value>.*)/g)].map((m) =>
+      (m.groups as Record<string, string>).value.trim(),
+    );
     if (tarAssign.length === 0) {
       problems.push("release.yml publish job 没有从下载到的 tarball 推出路径变量（应有 TARBALL=$(ls artifacts/*.tgz)）");
     } else if (!tarAssign.every((value) => value.includes("./"))) {
