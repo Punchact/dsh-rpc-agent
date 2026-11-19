@@ -304,7 +304,7 @@ test("creation marks ownership; nothing else does", async () => {
   };
   const methods = createMethods(
     { sessionController: controller, webServer: { getOrigin: () => "http://127.0.0.1:0" } },
-    resolveConfig({}),
+    resolveConfig({ tasksEnabled: true }),
     { get: () => undefined },
     {},
   );

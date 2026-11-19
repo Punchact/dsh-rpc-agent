@@ -398,9 +398,12 @@ test("reopening the same SQLite file preserves task state, state_version, and mo
 test("RPC dispatcher wires dsh.tasks.submit/get/list/cancel and updates METHOD_CATALOG", async () => {
   const { store, engine } = await setupEngine();
   try {
+    // The breaker is on by default, and a disabled task centre hides its own
+    // methods — so a test of the wiring has to enable it, exactly like a real
+    // deployment would.
     const methods = createMethods(
       { sessionController: {}, webServer: { getOrigin: () => "http://127.0.0.1:0" }, taskStore: store, taskEngine: engine },
-      resolveConfig({}),
+      resolveConfig({ tasksEnabled: true }),
       { get: () => undefined },
       {},
     );

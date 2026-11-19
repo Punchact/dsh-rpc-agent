@@ -169,7 +169,9 @@ test("reconcileTask rejects tasks outside needs_reconcile / cancel_requested wit
 });
 
 test("RPC wiring covers dsh.agents.{register,list,probe}, dsh.tasks.{preview,reconcile}, and W2 config bounds", async () => {
-  const cfg = resolveConfig({});
+  // Enabled, because a disabled task centre deliberately hides its methods;
+  // the bounds assertions below are independent of the breaker.
+  const cfg = resolveConfig({ tasksEnabled: true });
   assert.equal(describeConfig(cfg).tasksDbPath, null);
   assert.equal(describeConfig(cfg).tasksProbeTimeoutMs, 5_000);
   assert.equal(describeConfig(cfg).tasksPreviewTtlMs, 300_000);

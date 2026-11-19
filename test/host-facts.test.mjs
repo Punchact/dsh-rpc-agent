@@ -206,7 +206,7 @@ test("methods.capabilities works with no live session and does not touch session
   const services = fullServices();
   const methods = createMethods(
     { sessionController, webServer: { getOrigin: () => "http://127.0.0.1:9663" } },
-    resolveConfig({}),
+    resolveConfig({ tasksEnabled: true }),
     { get: (name) => services[name] },
     { tokenSource: "file", endpointUrl: "http://127.0.0.1:9663/dsh-rpc", startedAt: Date.now() },
   );

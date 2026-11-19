@@ -220,7 +220,7 @@ test("a session this bridge did not create keeps its own answerer", async () => 
 // calls: a wrong shape here would make the whole feature unreachable.
 
 const methodsWith = (store) =>
-  createMethods({ sessionController: null, webServer: null, approvals: store }, resolveConfig({}), {}, {});
+  createMethods({ sessionController: null, webServer: null, approvals: store }, resolveConfig({ tasksEnabled: true }), {}, {});
 
 test("the pending method lists what is waiting and reports the mode", async () => {
   const store = createPendingStore({ deadlineMs: 5_000 });

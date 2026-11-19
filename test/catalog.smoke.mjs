@@ -41,14 +41,19 @@ check(
   `the panel's config snippet tells people to load "${snippetName ?? "(missing)"}" but package.json names "${pkg.name}"`,
 );
 
-const methods = createMethods(
-  { sessionController: {}, webServer: { getOrigin: () => "http://127.0.0.1:1" } },
-  resolveConfig({}),
-  { get: () => undefined },
-  {},
-);
+const deps = { sessionController: {}, webServer: { getOrigin: () => "http://127.0.0.1:1" } };
+const ctxStub = { get: () => undefined };
 
-const info = await methods.discover();
+// The circuit breaker changes what the catalogue advertises, so both states are
+// part of the contract: off must hide the whole task family, on must show all of
+// it. Checking only the enabled state is how the first live smoke test found the
+// methods still answering with the breaker off.
+const methodsOff = createMethods(deps, resolveConfig({}), ctxStub, {});
+const methodsOn = createMethods(deps, resolveConfig({ tasksEnabled: true }), ctxStub, {});
+
+const methods = methodsOn;
+const infoOff = await methodsOff.discover();
+const info = await methodsOn.discover();
 const names = (info.methods ?? []).map((method) => method.name).sort();
 const expected = [
   "dsh.agents.list",
@@ -86,6 +91,17 @@ const missing = expected.filter((name) => !names.includes(name));
 const extra = names.filter((name) => !expected.includes(name));
 check(missing.length === 0, `catalogue is missing: ${missing.join(", ")}`);
 check(extra.length === 0, `catalogue advertises unknown methods: ${extra.join(", ")}`);
+
+const TASK_FAMILY = expected.filter((name) => /^dsh\.(tasks|agents)\./.test(name));
+const namesOff = (infoOff.methods ?? []).map((method) => method.name);
+const leaked = namesOff.filter((name) => TASK_FAMILY.includes(name));
+check(leaked.length === 0, `tasksEnabled=false still advertises: ${leaked.join(", ")}`);
+check(
+  namesOff.length === expected.length - TASK_FAMILY.length,
+  `tasksEnabled=false advertises ${namesOff.length} methods, expected ${expected.length - TASK_FAMILY.length}`,
+);
+check(infoOff.config?.tasksEnabled === false, "discover does not report the breaker as off");
+check(info.config?.tasksEnabled === true, "discover does not report the breaker as on");
 
 const paramsOf = (name) =>
   Object.keys(info.methods.find((method) => method.name === name)?.params ?? {});
