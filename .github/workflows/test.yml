@@ -39,9 +39,12 @@ jobs:
       - name: Entry parity between source and dist
         run: node scripts/check-entry-parity.mjs
 
+      - name: Verify test targets point to dist
+        run: node scripts/check-test-targets.mjs
+
       - name: Syntax check every module
         run: |
-          for file in index.mjs client.js lib/*.mjs bin/*.mjs test/*.mjs scripts/*.mjs; do
+          for file in index.mjs client.js lib/*.mjs lib/*/*.mjs bin/*.mjs test/*.mjs scripts/*.mjs; do
             node --check "$file"
           done
 

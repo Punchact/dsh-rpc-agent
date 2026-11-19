@@ -8,7 +8,7 @@
 // Exit code 0 = every check passed, 1 = at least one failed.
 
 import process from "node:process";
-import { rpcCall, rpcStream } from "../lib/client.mjs";
+import { rpcCall, rpcStream } from "../dist/lib/client.mjs";
 
 const argv = process.argv.slice(2);
 const flag = (name, fallback = "") => {

@@ -10,8 +10,8 @@ import {
   MAX_PENDING_APPROVALS,
   createCodexAdapter,
   resolveCodexBinary,
-} from "../lib/adapters/codex.mjs";
-import { TASK_ERROR, isTaskError } from "../lib/tasks/errors.mjs";
+} from "../dist/lib/adapters/codex.mjs";
+import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
 
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

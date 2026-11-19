@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createProber, probesFromAdapter } from "../lib/agents/probe.mjs";
+import { createProber, probesFromAdapter } from "../dist/lib/agents/probe.mjs";
 
 test("probeAll records fast boolean true probes in verified and isolates timeouts, throws, and non-true returns", async () => {
   const prober = createProber({

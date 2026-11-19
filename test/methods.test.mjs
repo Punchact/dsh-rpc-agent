@@ -16,9 +16,9 @@ import test, { after } from "node:test";
 // what ran five minutes ago, so every run gets its own home.
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), "dsh-rpc-home-"));
 
-import { resolveConfig } from "../lib/config.mjs";
-import { collectTurn, createMethods } from "../lib/methods.mjs";
-import { buildDispatcher } from "../lib/http.mjs";
+import { resolveConfig } from "../dist/lib/config.mjs";
+import { collectTurn, createMethods } from "../dist/lib/methods.mjs";
+import { buildDispatcher } from "../dist/lib/http.mjs";
 
 // The bridge deliberately `unref()`s its timers so a bridge run never keeps the
 // Host process alive. In this process those timers are the only handles, so a
@@ -1197,7 +1197,7 @@ test("a project's second ask reuses the session the first one created", async ()
 });
 
 test("an implicit sticky reuse applies options and increments its ask counter", async () => {
-  const { lookupEntry, registryKey } = await import("../lib/registry.mjs");
+  const { lookupEntry, registryKey } = await import("../dist/lib/registry.mjs");
   const controller = fakeController({ models: twoProviderModels, script: happyScript });
   const permissions = fakePermissions({
     options: [{ value: "workspace-write" }, { value: "read-only" }],
@@ -1247,12 +1247,12 @@ test("concurrent first asks for one sticky key create one session", async () => 
   assert.equal([first.created, second.created].filter(Boolean).length, 1);
   assert.equal([first.reused, second.reused].filter(Boolean).length, 1);
   assert.equal(controller.prompts.length, 2, "both prompts are still delivered to the shared session");
-  const { lookupEntry, registryKey } = await import("../lib/registry.mjs");
+  const { lookupEntry, registryKey } = await import("../dist/lib/registry.mjs");
   assert.equal((await lookupEntry(registryKey({ project: "sticky-single-flight" }))).asks, 2);
 });
 
 test("concurrent default-turn asks for one sticky key queue on one active session", async () => {
-  const { lookupEntry, registryKey } = await import("../lib/registry.mjs");
+  const { lookupEntry, registryKey } = await import("../dist/lib/registry.mjs");
   const firstTurnEnd = deferred();
   const timeline = [];
   const controller = fakeController({
@@ -1446,8 +1446,8 @@ test("mode: turn refuses a session that is already running, and names the way ou
 });
 
 test("a sticky session rotates after the bridge's ask budget, and says which one it left", async () => {
-  const { forgetEntry, lookupEntry, registryKey, rememberEntry } = await import("../lib/registry.mjs");
-  const { ROTATE_AFTER_ASKS } = await import("../lib/registry.mjs");
+  const { forgetEntry, lookupEntry, registryKey, rememberEntry } = await import("../dist/lib/registry.mjs");
+  const { ROTATE_AFTER_ASKS } = await import("../dist/lib/registry.mjs");
   const key = registryKey({ namespace: "mcp", project: "sticky-rot" });
   await forgetEntry(key);
   await rememberEntry(key, { sessionId: "session-old", asks: ROTATE_AFTER_ASKS });
@@ -1604,7 +1604,7 @@ test("a turn held on an approval answers while the approval is still open", asyn
   // that is holding the turn, so it cannot ask `approvals.pending` until the call
   // returns. Without the race the deadline always expires first and `delegate`
   // can never actually delegate.
-  const { createPendingStore } = await import("../lib/pending.mjs");
+  const { createPendingStore } = await import("../dist/lib/pending.mjs");
   const store = createPendingStore({ deadlineMs: 60_000 });
   const controller = fakeController({
     historical: [{ type: "turn/start", data: { turn: 1 }, seq: 1 }],

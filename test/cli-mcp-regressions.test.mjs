@@ -45,7 +45,7 @@ async function startServer() {
 
 function runCli(args, extraEnv = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [join(REPO, "bin", "dsh-rpc.mjs"), ...args], {
+    const child = spawn(process.execPath, [join(REPO, "dist", "bin", "dsh-rpc.mjs"), ...args], {
       cwd: REPO,
       env: { ...process.env, DSH_HOME: home, DSH_RPC_TOKEN: "", ...extraEnv },
       stdio: ["ignore", "pipe", "pipe"],
@@ -130,7 +130,7 @@ test("HTTP 503 is a failing CLI call, not an empty success", async () => {
 });
 
 test("MCP approval resolution returns structured tool errors for invalid arguments", async () => {
-  const child = spawn(process.execPath, [join(REPO, "bin", "dsh-rpc-mcp.mjs")], {
+  const child = spawn(process.execPath, [join(REPO, "dist", "bin", "dsh-rpc-mcp.mjs")], {
     cwd: REPO,
     env: { ...process.env, DSH_HOME: home, DSH_RPC_TOKEN: "" },
     stdio: ["pipe", "pipe", "pipe"],

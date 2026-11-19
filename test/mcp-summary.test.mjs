@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { formatTaskSummary as formatTaskSummaryFromBin } from "../bin/dsh-rpc-mcp.mjs";
-import { formatTaskListLine, formatTaskSummary, formatToolError } from "../lib/mcp-format.mjs";
+import { formatTaskSummary as formatTaskSummaryFromBin } from "../dist/bin/dsh-rpc-mcp.mjs";
+import { formatTaskListLine, formatTaskSummary, formatToolError } from "../dist/lib/mcp-format.mjs";
 
 function textOf(result) {
   return result.content.map((part) => part.text).join("\n");

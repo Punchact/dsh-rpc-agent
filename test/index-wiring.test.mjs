@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { apply } from "../index.mjs";
-import { TASK_ERROR, isTaskError } from "../lib/tasks/errors.mjs";
+import { apply } from "../dist/index.mjs";
+import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
 
 function makeFakeCtx() {
   const routes = new Map();

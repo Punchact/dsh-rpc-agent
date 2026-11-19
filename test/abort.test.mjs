@@ -29,10 +29,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { registerRoutes } from "../lib/http.mjs";
-import { resolveConfig } from "../lib/config.mjs";
-import { createStats } from "../lib/stats.mjs";
-import { createInflight } from "../lib/inflight.mjs";
+import { registerRoutes } from "../dist/lib/http.mjs";
+import { resolveConfig } from "../dist/lib/config.mjs";
+import { createStats } from "../dist/lib/stats.mjs";
+import { createInflight } from "../dist/lib/inflight.mjs";
 
 const TOKEN = "b".repeat(48);
 const REPO = fileURLToPath(new URL("..", import.meta.url));
@@ -211,7 +211,7 @@ function talk(child) {
 
 test("notifications/cancelled is accepted, and an unknown id is a no-op", { timeout: 30_000 }, async () => {
   const home = mkdtempSync(join(tmpdir(), "dsh-rpc-abort-"));
-  const child = spawn(process.execPath, [join(REPO, "bin", "dsh-rpc-mcp.mjs")], {
+  const child = spawn(process.execPath, [join(REPO, "dist", "bin", "dsh-rpc-mcp.mjs")], {
     env: { ...process.env, DSH_HOME: home },
     stdio: ["pipe", "pipe", "pipe"],
   });

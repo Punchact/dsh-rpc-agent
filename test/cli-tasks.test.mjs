@@ -9,7 +9,7 @@ import {
   mixedVersionHint,
   parseArgv,
   probeHealth,
-} from "../bin/dsh-rpc.mjs";
+} from "../dist/bin/dsh-rpc.mjs";
 const NEXT_HINT =
   "  next: this Harness plugin predates the task centre (0.9.0). Upgrade the plugin inside the DSH profile — the bridge and the plugin ship together.";
 

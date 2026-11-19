@@ -6,12 +6,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { probesFromAdapter } from "../lib/agents/probe.mjs";
-import { resolveConfig } from "../lib/config.mjs";
-import { buildDispatcher } from "../lib/http.mjs";
-import { createMethods } from "../lib/methods.mjs";
-import { createTaskEngine, seedBaselineEntities } from "../lib/tasks/engine.mjs";
-import { openStore } from "../lib/tasks/store.mjs";
+import { probesFromAdapter } from "../dist/lib/agents/probe.mjs";
+import { resolveConfig } from "../dist/lib/config.mjs";
+import { buildDispatcher } from "../dist/lib/http.mjs";
+import { createMethods } from "../dist/lib/methods.mjs";
+import { createTaskEngine, seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
+import { openStore } from "../dist/lib/tasks/store.mjs";
 
 function card(agentId, kind = "antigravity") {
   return {

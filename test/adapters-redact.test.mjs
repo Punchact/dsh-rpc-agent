@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { redactDeep, redactSecrets } from "../lib/adapters/redact.mjs";
+import { redactDeep, redactSecrets } from "../dist/lib/adapters/redact.mjs";
 
 test("redactSecrets redacts Bearer, GitHub, sk- keys, and CSRF tokens while truncating safely", () => {
   assert.equal(redactSecrets(null), null);

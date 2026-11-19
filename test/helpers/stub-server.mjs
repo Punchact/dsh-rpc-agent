@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 
-import { isFetchBlockedPort } from "../../lib/transport.mjs";
+import { isFetchBlockedPort } from "../../dist/lib/transport.mjs";
 
 export async function closeServer(server) {
   await new Promise((resolve) => server.close(resolve));

@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ConfigError, describeConfig, resolveConfig } from "../lib/config.mjs";
-import { buildDispatcher as buildRpcDispatcher } from "../lib/http.mjs";
-import { createMethods } from "../lib/methods.mjs";
-import { createAutopilot } from "../lib/tasks/autopilot.mjs";
-import { createDispatcher } from "../lib/tasks/dispatch.mjs";
-import { createTaskEngine, seedBaselineEntities } from "../lib/tasks/engine.mjs";
-import { openStore } from "../lib/tasks/store.mjs";
+import { ConfigError, describeConfig, resolveConfig } from "../dist/lib/config.mjs";
+import { buildDispatcher as buildRpcDispatcher } from "../dist/lib/http.mjs";
+import { createMethods } from "../dist/lib/methods.mjs";
+import { createAutopilot } from "../dist/lib/tasks/autopilot.mjs";
+import { createDispatcher } from "../dist/lib/tasks/dispatch.mjs";
+import { createTaskEngine, seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
+import { openStore } from "../dist/lib/tasks/store.mjs";
 
 function makeFakeAdapter(overrides = {}) {
   const calls = { start: 0, inspect: 0, cancel: 0, events: 0, decideApproval: 0 };

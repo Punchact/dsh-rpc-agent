@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createDshAdapter } from "../lib/adapters/dsh.mjs";
-import { createDispatcher } from "../lib/tasks/dispatch.mjs";
-import { createTaskEngine, seedBaselineEntities } from "../lib/tasks/engine.mjs";
-import { TASK_ERROR, isTaskError } from "../lib/tasks/errors.mjs";
-import { createPreview } from "../lib/tasks/preview.mjs";
-import { openStore } from "../lib/tasks/store.mjs";
+import { createDshAdapter } from "../dist/lib/adapters/dsh.mjs";
+import { createDispatcher } from "../dist/lib/tasks/dispatch.mjs";
+import { createTaskEngine, seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
+import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
+import { createPreview } from "../dist/lib/tasks/preview.mjs";
+import { openStore } from "../dist/lib/tasks/store.mjs";
 
 function makeOps(overrides = {}) {
   const calls = [];

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildDispatcher } from "../lib/http.mjs";
-import { createDshAdapterOps, createMethods } from "../lib/methods.mjs";
-import { createTaskEngine, seedBaselineEntities } from "../lib/tasks/engine.mjs";
-import { TASK_ERROR, isTaskError } from "../lib/tasks/errors.mjs";
-import { createPreview } from "../lib/tasks/preview.mjs";
-import { openStore } from "../lib/tasks/store.mjs";
+import { buildDispatcher } from "../dist/lib/http.mjs";
+import { createDshAdapterOps, createMethods } from "../dist/lib/methods.mjs";
+import { createTaskEngine, seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
+import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
+import { createPreview } from "../dist/lib/tasks/preview.mjs";
+import { openStore } from "../dist/lib/tasks/store.mjs";
 
 function makeFakeSessionController(overrides = {}) {
   const calls = [];

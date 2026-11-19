@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { formatCapabilities, normalizeSections, SECTION_IDS } from "../lib/capabilities.mjs";
-import { PLUGIN_VERSION, PROTOCOL_VERSION } from "../lib/version.mjs";
+import { formatCapabilities, normalizeSections, SECTION_IDS } from "../dist/lib/capabilities.mjs";
+import { PLUGIN_VERSION, PROTOCOL_VERSION } from "../dist/lib/version.mjs";
 
 test("formatCapabilities renders exact text for a fixed 3-section input", () => {
   const input = [

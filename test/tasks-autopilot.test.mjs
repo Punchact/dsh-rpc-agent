@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ACTIVE_STATUSES, createAutopilot } from "../lib/tasks/autopilot.mjs";
+import { ACTIVE_STATUSES, createAutopilot } from "../dist/lib/tasks/autopilot.mjs";
 
 function makeEngine(byStatus = {}) {
   const calls = [];

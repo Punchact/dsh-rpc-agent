@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { createAntigravityAdapter, DEFAULT_ANTIGRAVITY_MODEL } from "../lib/adapters/antigravity.mjs";
-import { TASK_ERROR, isTaskError } from "../lib/tasks/errors.mjs";
+import { createAntigravityAdapter, DEFAULT_ANTIGRAVITY_MODEL } from "../dist/lib/adapters/antigravity.mjs";
+import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
 
 function makeFakeFetch(handlers) {
   const calls = [];

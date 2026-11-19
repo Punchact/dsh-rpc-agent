@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { UsageError, main, parseArgv } from "../bin/dsh-rpc.mjs";
+import { UsageError, main, parseArgv } from "../dist/bin/dsh-rpc.mjs";
 
 function withMockCliRpc(responder, fn) {
   const prevFetch = globalThis.fetch;

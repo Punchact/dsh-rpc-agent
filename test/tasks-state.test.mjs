@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 
-import { TASK_ERROR, isTaskError } from "../lib/tasks/errors.mjs";
-import { seedBaselineEntities } from "../lib/tasks/engine.mjs";
+import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
+import { seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
 import {
   ALLOWED_TRANSITIONS,
   TASK_STATES,
@@ -11,8 +11,8 @@ import {
   appendEvent,
   canTransition,
   transition,
-} from "../lib/tasks/state-machine.mjs";
-import { openStore } from "../lib/tasks/store.mjs";
+} from "../dist/lib/tasks/state-machine.mjs";
+import { openStore } from "../dist/lib/tasks/store.mjs";
 
 async function createSeededStoreWithTask(initialStatus = "queued") {
   const store = openStore({ path: ":memory:" });

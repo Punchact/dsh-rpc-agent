@@ -4,12 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { resolveConfig } from "../lib/config.mjs";
-import { buildDispatcher } from "../lib/http.mjs";
-import { createMethods } from "../lib/methods.mjs";
-import { TASK_ERROR, isTaskError } from "../lib/tasks/errors.mjs";
-import { applyReport, createTaskEngine, derivePhase, seedBaselineEntities } from "../lib/tasks/engine.mjs";
-import { openStore } from "../lib/tasks/store.mjs";
+import { resolveConfig } from "../dist/lib/config.mjs";
+import { buildDispatcher } from "../dist/lib/http.mjs";
+import { createMethods } from "../dist/lib/methods.mjs";
+import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
+import { applyReport, createTaskEngine, derivePhase, seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
+import { openStore } from "../dist/lib/tasks/store.mjs";
 
 async function setupEngine(dbPath = ":memory:") {
   const store = openStore({ path: dbPath });

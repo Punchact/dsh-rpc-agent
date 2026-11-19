@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { isTaskError } from "../lib/tasks/errors.mjs";
-import { createMethods } from "../lib/methods.mjs";
-import { createTaskEngine, seedBaselineEntities } from "../lib/tasks/engine.mjs";
-import { openStore } from "../lib/tasks/store.mjs";
+import { isTaskError } from "../dist/lib/tasks/errors.mjs";
+import { createMethods } from "../dist/lib/methods.mjs";
+import { createTaskEngine, seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
+import { openStore } from "../dist/lib/tasks/store.mjs";
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {} };
 

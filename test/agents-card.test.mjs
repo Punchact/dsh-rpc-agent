@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CARD_VERSION, CONTROL_NAMES, hashCard, normalizeCard, withVerified } from "../lib/agents/card.mjs";
-import { TASK_ERROR, isTaskError } from "../lib/tasks/errors.mjs";
+import { CARD_VERSION, CONTROL_NAMES, hashCard, normalizeCard, withVerified } from "../dist/lib/agents/card.mjs";
+import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
 
 function validCard(overrides = {}) {
   return {

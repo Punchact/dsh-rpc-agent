@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { DEFAULT_HISTORY_KINDS, formatHistory } from "../lib/history-format.mjs";
+import { DEFAULT_HISTORY_KINDS, formatHistory } from "../dist/lib/history-format.mjs";
 
 test("DEFAULT_HISTORY_KINDS exports the default event allowlist", () => {
   assert.deepEqual(DEFAULT_HISTORY_KINDS, ["tool/call", "tool/result", "turn/end"]);

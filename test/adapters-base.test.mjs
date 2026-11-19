@@ -9,8 +9,8 @@ import {
   reportOf,
   sanitizeAdapterFailure,
   validateAdapter,
-} from "../lib/adapters/base.mjs";
-import { TASK_ERROR, isTaskError } from "../lib/tasks/errors.mjs";
+} from "../dist/lib/adapters/base.mjs";
+import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
 
 function fullAdapter() {
   const obj = {};

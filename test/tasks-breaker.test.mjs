@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildDispatcher } from "../lib/http.mjs";
+import { buildDispatcher } from "../dist/lib/http.mjs";
 
 // The circuit breaker was the one promise of 0.9.0 that the first live smoke
 // test caught lying: with tasksEnabled=false the RPC methods were still

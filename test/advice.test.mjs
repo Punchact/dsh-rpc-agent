@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { TIMEOUT_ADVICE, shouldAdviseTimeout } from "../lib/advice.mjs";
-import { ConfigError, MAX_RESULT_CHARS, MIN_RESULT_CHARS, describeConfig, resolveConfig } from "../lib/config.mjs";
+import { TIMEOUT_ADVICE, shouldAdviseTimeout } from "../dist/lib/advice.mjs";
+import { ConfigError, MAX_RESULT_CHARS, MIN_RESULT_CHARS, describeConfig, resolveConfig } from "../dist/lib/config.mjs";
 
 test("TIMEOUT_ADVICE explains outer client cap and wait:false + since workflow", () => {
   assert.match(TIMEOUT_ADVICE, /tool_timeout_sec/);

@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { isTaskError } from "../lib/tasks/errors.mjs";
-import { createTaskEngine, seedBaselineEntities } from "../lib/tasks/engine.mjs";
-import { createDispatcher } from "../lib/tasks/dispatch.mjs";
-import { openStore } from "../lib/tasks/store.mjs";
+import { isTaskError } from "../dist/lib/tasks/errors.mjs";
+import { createTaskEngine, seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
+import { createDispatcher } from "../dist/lib/tasks/dispatch.mjs";
+import { openStore } from "../dist/lib/tasks/store.mjs";
 
 const SHA = (buffer) => createHash("sha256").update(buffer).digest("hex");
 

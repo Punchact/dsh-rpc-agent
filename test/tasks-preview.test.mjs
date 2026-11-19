@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { TASK_ERROR, isTaskError } from "../lib/tasks/errors.mjs";
-import { createTaskEngine, seedBaselineEntities } from "../lib/tasks/engine.mjs";
-import { consumePreview, createPreview } from "../lib/tasks/preview.mjs";
-import { openStore } from "../lib/tasks/store.mjs";
+import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
+import { createTaskEngine, seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
+import { consumePreview, createPreview } from "../dist/lib/tasks/preview.mjs";
+import { openStore } from "../dist/lib/tasks/store.mjs";
 
 async function setup() {
   const store = openStore({ path: ":memory:" });
