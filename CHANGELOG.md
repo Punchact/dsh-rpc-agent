@@ -25,7 +25,7 @@
 
 ### 修复
 
-- `scripts.test` 新增并接入 20 个任务中心与 CLI/适配器测试套件（全链 43 个测试文件、373 例，本机 373/373 通过；CI 结果见 PR #30），并更新 `catalog.smoke.mjs` 校验 34 个 RPC 方法。
+- `scripts.test` 新增并接入 20 个任务中心与 CLI/适配器测试套件（全链 43 个测试文件、375 例，本机 375/375 通过；CI 结果见 PR #30），并更新 `catalog.smoke.mjs` 校验 34 个 RPC 方法。
 - `dispatch.mjs` 修复了租约到期回收与原子 `maxConcurrent` 门控竞态，防止同一写事务之外并发超发或将任务卡死在 `dispatching` / `in_flight`。
 - **取消确认后立刻收口**：适配器回报 `confirmedStopped: true`（DSH 会话真停了、Antigravity 回执里含该 cascadeId）时，同一次出箱排水内把任务从 `cancel_requested` 推进到 `cancelled` 并写 `cancel.confirmed`；此前只把 effect 标完成，任务会悬在 `cancel_requested` 等一个已停会话永远不会发出的事件。Codex 的 `turn/interrupt` 只算受理，故不设该标志。
 - **幂等键不再掩盖改过的请求**：`cancel` / `resolve` 的重放分支会比较请求意图（取消原因；处置结论 + 证据引用），同键异载荷抛 `STATE_CONFLICT`（`reason: "idempotency_payload_mismatch"`）。`expectedStateVersion` 属并发护栏、重试时本就会变，不参与比较。
@@ -45,12 +45,13 @@
 - **首轮真机端到端跑出来的三条缺陷（离线套件都看不到）**：①`inspect` 轮询没有稳定事件标识，同一个会话状态被当成新报告反复应用——真机上实录 46 次 `report.invalid`、74 条重复人工问题，任务卡在 `waiting_input`；现由适配器按「会话 + 状态 + 轮次」派生固定 `adapterEventId`，只在状态真变时换号，`pump` 把它交给账本去重。②同一问题重复开单——人工问题改为按 `(任务, 类型, 提问)` 幂等，已开的不再新建。③**执行方只回「请求已受理」而没确认停止时，任务会永远停在 `cancel_requested`**——现在升级为 `needs_reconcile` 并记 `cancel.unconfirmed`，交人工核对，不再等一个已停会话永远不会发出的事件。
 - **未校验的结果没有人工裁决入口（同一轮真机端到端跑出的第四处，属方案级缺口）**：DSH 适配器按「不加验证就不算有效结果」的诚实规则永远报 `ready` + `resultValid: false`，而 `dsh.tasks.resolve` 只接受 `review_pending` / `needs_reconcile`——默认适配器的正常链因此永远到不了 `succeeded`，人工既不能签收、也不能判负，只能看着任务停在 `running` 加一条 review 问题。现在：任务停在 `running` / `waiting_input` / `waiting_approval` 且存在未关闭的 `review` 类人工问题时，`resolve` 允许裁决，并**先推一步 `review_pending`（事件 `review.promoted`，`resultValid: false` 如实标注）再按处置落终态**；成功路径仍然只有一条，审计上能看出「这次成功是人工裁定未校验结果得来的」。没有 review 问题时仍按原规则拒收。同时 `derivePhase` 把 `cancel.unconfirmed` / `cancel.failed` / `dispatch.orphaned` 也认作核对信号，`needs_reconcile` 不再显示成 `machine/working`。
 - **第五、第六处真机缺陷：把「非阻塞信号」当成了「在等人」**：①DSH 会话启动时会写一条 `approval/policy`（内容形如 `{ policy: "ask" }`，说明后续审批会怎么问），适配器却把任何 `approval/*` 记录都判成「等待人工批准」——真机上这条策略记录把已经 `turn/end completed` 的会话挂成了 `waiting_input`，还开了一个谁也没法回答的问题（同期 `dsh.approvals.pending` 返回 `{ pending: [], count: 0, timedOut: true, mode: "off" }`）。现在只有 `approval/requested` / `approval/request` 才阻塞，`approval/policy`、`approval/resolved` 等一律报 `progress`；「有没有待批」的权威判断仍留在会话状态那条路（`waiting_approval`）上。②`needs_reconcile` 的任务如果还挂着一条没关的 `input` 问题，阶段会显示成 `person/answer`——核对期被遗留问题挤到后面，人看到的是「等你回答」而不是「等你核对」。现在核对期排在问题之前（`person/reconcile` 先于 `person/answer`）。两处都补了回归用例。
+- **第七、第八处真机缺陷：同一个问题问了两遍，核对期又被租约压住**：①两次 `pump` 都读到「已就绪但产出不合 schema」时，代码走的是裸 `INSERT INTO attention`，同一个问题开出两条人工问题——真机上 `q_2c53faca…` 与 `q_a4180425…` 相差 186 毫秒并存，直到签收才一起关掉；现在这条分支也走按 `(任务, 类型, 提问)` 去重的 `attentionOnceInTx`，问一次就够，两条 `report.invalid` 仍都留在事件里。②任务因「停止没被确认」进了 `needs_reconcile`，可派发期写的 `effects.lease_expires_at` 还没到期，而派生阶段的核对期分支要求租约缺失才算——于是人看到的是 `machine/working`（机器还在干活），实际在等他对账；现在 `cancel.unsupported` / `cancel.unconfirmed` / `cancel.failed` / `dispatch.orphaned` 任一出现即算核对到期，租约挂不挂着都不影响。
 - **预览不再接受「不相干的能力修订」（重启前补齐的第五处缺口）**：`dsh.tasks.preview` 过去只校验修订存在，不校验它属于所选实例、也不校验探测是否过期，还会把候选列表留空。现在：修订必须在该实例声明的 `capabilityRevisions` 里（否则 `CAPABILITY_VERSION_MISSING`）、探测过期即拒（`PROBE_STALE`），并把同类其它实例的排除原因（`AGENT_DISABLED` / `PROBE_STALE`）与选中项一起写进 `candidates[]`。
 - **顺带修掉一个会吃掉声明的 bug**：`dsh.agents.probe` 重写 `capabilities_json` 时会丢掉已发布的能力修订，导致「注册→探测→预览」直接失败；现在探测只更新证据，不动已发布的能力集合与项目绑定。
 - **注册即发布能力修订（首次真机冒烟发现）**：`dsh.agents.register` 过去只写 `agents` 行，`capability_revisions` 永远为空，而 `dsh.tasks.preview` / `dsh.tasks.submit` 都要求修订 id —— 干净主机上任务中心实际不可用。现在卡片的 `capabilities[]` 在注册时发布为不可变修订（id 由卡片哈希 + 能力派生，同卡幂等、换卡换版本），写类能力必须把 `cancelPolicy` 标 `required`，`dsh.agents.list` 会回显每个实例的 `capabilityRevisions`。
 - **人工问答与产物读取接上**：新增 `dsh.tasks.input`（执行中回答，走 effects 队列投递，带幂等键、载荷冲突、问题归属与陈旧 attempt 拒收）、`dsh.tasks.readArtifact`（按窗口读取已索引产物，非 UTF-8 回 base64）、`dsh.agents.get`（读回单个执行方的卡片与已发布能力修订）。报告里声明的产物按路径/大小/哈希逐条校验后入索引，校验不过的写 `artifact.refused` 事件而不是静默丢弃。
 - **MCP 工具名对齐方案**：`dsh_tasks_*` 更正为 `dsh_task_*`，并补齐 `dsh_task_preview`、`dsh_task_events`、`dsh_task_read_artifact`、`dsh_task_input`、`dsh_agents_get`（共 22 个工具；`resolve`、`decideApproval` 仍不进 MCP）。
-- **测试与文档口径校正**：`scripts.test` 全链 43 个测试文件、**373 例**；`docs/design.md` 的 §7 历史快照后补了「现行口径（2026-11-19）」注，注明 `methods 41 → 85`、`client 6 → 8`、`edge 24 项但本机 23/24`（第 21 项 `create without a cwd` 因宿主返回 `cwd: null` 失败，属既有行为，非本 PR 引入）。
+- **测试与文档口径校正**：`scripts.test` 全链 43 个测试文件、**375 例**；`docs/design.md` 的 §7 历史快照后补了「现行口径（2026-11-19）」注，注明 `methods 41 → 85`、`client 6 → 8`、`edge 24 项但本机 23/24`（第 21 项 `create without a cwd` 因宿主返回 `cwd: null` 失败，属既有行为，非本 PR 引入）。
 
 ### 行为变化
 

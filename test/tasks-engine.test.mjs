@@ -27,6 +27,65 @@ async function setupEngine(dbPath = ":memory:") {
   return { store, engine };
 }
 
+test("a stop nobody confirmed is reconcile-due even while the dispatch lease is open", () => {
+  // 0.9.0 live (acceptance run 10): `needs_reconcile` after `cancel.unconfirmed` still had a live
+  // dispatch lease, and the phase read `machine/working` — the operator was told a machine was
+  // working while nobody could vouch for the stop. The signal outranks the lease.
+  const now = Date.parse("2026-11-18T12:00:00Z");
+  const phase = derivePhase(
+    { status: "needs_reconcile", leaseExpiresAt: "2026-11-18T12:05:00Z" },
+    [],
+    { type: "cancel.unconfirmed" },
+    { nowMs: now },
+  );
+  assert.equal(phase.phase, "person/reconcile", "an unconfirmed stop must not read as an active machine");
+  assert.equal(phase.label, "Needs reconciliation");
+});
+
+test("two ready reports for one task ask one review question", async () => {
+  const { store, engine } = await setupEngine();
+  try {
+    const t = await engine.submit({
+      idempotencyKey: "dup-review-1",
+      capabilityRevisionId: "rev-review-1",
+      workspaceId: "ws-lab",
+      agentId: "ag-cancel-ok",
+    });
+    const att = await engine.recordAttemptStart({ taskId: t.taskId, expectedStateVersion: 1 });
+    const report = { state: "ready", result: { raw: "no schema" }, resultValid: false };
+
+    const first = await applyReport(store, {
+      taskId: t.taskId,
+      attemptId: att.attemptId,
+      adapterEventId: "ev-ready-dup-a",
+      report,
+    });
+    const second = await applyReport(store, {
+      taskId: t.taskId,
+      attemptId: att.attemptId,
+      adapterEventId: "ev-ready-dup-b",
+      report,
+    });
+    assert.equal(first.reportInvalid, true);
+    assert.equal(second.reportInvalid, true);
+    assert.equal(second.questionId, first.questionId, "the same problem must reuse the open question");
+
+    const detail = await engine.get({ taskId: t.taskId });
+    assert.equal(detail.status, "running");
+    assert.equal(detail.pending.attention.length, 1, "one problem, one question");
+    assert.equal(detail.pending.attention[0].kind, "review");
+
+    const events = await engine.events({ taskId: t.taskId, afterSeq: 0 });
+    assert.equal(
+      events.events.filter((evt) => evt.type === "report.invalid").length,
+      2,
+      "both reports stay on the record even though the question is reused",
+    );
+  } finally {
+    store.close();
+  }
+});
+
 test("submit enforces per-(principalId, idempotencyKey) idempotency and detects payload conflict", async () => {
   const { store, engine } = await setupEngine();
   try {

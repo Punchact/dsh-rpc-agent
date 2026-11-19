@@ -186,7 +186,7 @@ Host 抛 `RemoteError(code, message, details)`（`isDSHRemoteError === true`）�
 
 以上数字均为 2026-11-05 在本机实跑，命令见 README §10。
 
-> **现行口径（2026-11-19，0.9.0）**：本表是 2026-11-05 的历史快照，不改写。当前的数量以 README「开发与验证」为准——`npm test` 固定顺序跑 43 个 `*.test.mjs` 共 373 例，外加 `catalog.smoke.mjs`（34 个 RPC 方法）。表中三行随版本长大：`methods` 41 → 85 例，`client` 6 → 8 例；`edge` 仍是 24 项，但**本机 23/24**——第 21 项「create without a cwd reports the directory the Host attached」要求宿主替无 `cwd` 的请求补上工作目录，本机 0.8.1 宿主返回 `null`，属既有环境差异；**CI 不跑 `test:edge`（`.github/workflows/test.yml` 只有 `npm test` / `test:host` / `check:package`），故“CI 下通过”没有证据**，这一项目前只有本机 23/24 的实测。
+> **现行口径（2026-11-19，0.9.0）**：本表是 2026-11-05 的历史快照，不改写。当前的数量以 README「开发与验证」为准——`npm test` 固定顺序跑 43 个 `*.test.mjs` 共 375 例，外加 `catalog.smoke.mjs`（34 个 RPC 方法）。表中三行随版本长大：`methods` 41 → 85 例，`client` 6 → 8 例；`edge` 仍是 24 项，但**本机 23/24**——第 21 项「create without a cwd reports the directory the Host attached」要求宿主替无 `cwd` 的请求补上工作目录，本机 0.8.1 宿主返回 `null`，属既有环境差异；**CI 不跑 `test:edge`（`.github/workflows/test.yml` 只有 `npm test` / `test:host` / `check:package`），故“CI 下通过”没有证据**，这一项目前只有本机 23/24 的实测。
 
 ## 8. 后续可做
 
@@ -695,3 +695,13 @@ compression: gzip
 - **现象二（核对期被问题挤走）**：`needs_reconcile` + 未关闭的 `input` 问题 + `lastEvent = cancel.unconfirmed` 的任务，先命中了 answer 档，显示 `person/answer`。执行方自己的「已停止」都不可信了，它的遗留问题自然也不该由人来答。
 - **取舍三：核对期排在问题之前（仍在 delivery 与 approval 之后）**。顺序为 `person/delivery → person/approval → person/reconcile → person/answer → person/review`：审批是当期状态里真实存在的待决动作，留在前面；核对期一旦成立就压过遗留问题，因为下一步动作是核对而不是应答。
 - **回归钉法**：`approval records that need no decision never block a task`（`test/adapters-dsh.test.mjs`）与 `derivePhase` 的 precedence 用例（`test/tasks-engine.test.mjs`：`needs_reconcile` + open input + `cancel.unconfirmed` → `person/reconcile`）。
+
+## 45. 决策 0.9.0-r：一个问题只问一次，核对期不被租约压住
+
+0.9.0 第七、八处缺陷都出自「同一条判断被写了两遍」：一处少了幂等，一处多了前置条件。
+
+- **现象一（同一个问题问两遍）**：`pump` 两次读到「已就绪但产出不合 schema」时，走的是 ready 分支里的裸 `INSERT INTO attention`——`attentionOnceInTx` 的幂等在别的分支有，这一条漏了。真机上 `q_2c53faca…`（06:21:33.614Z）与 `q_a4180425…`（06:21:33.800Z）相差 186 毫秒并存，直到签收才一起关掉；人看到的是两个一模一样的待办。
+- **取舍一：问题去重，报告留档**。问题去重按 `(任务, 类型, 提问)`，但两条 `report.invalid` 都保留——报告是**发生过的事实**，问题是**要人做的动作**。事实可以重复（每次轮询都真的看到了），动作不能重复（人只需要点头一次）。
+- **现象二（核对期被租约压住）**：任务因「停止没被确认」进了 `needs_reconcile`，派发期写的 `effects.lease_expires_at` 还在未来，而 `derivePhase` 的核对期分支要求 `leaseExpiresRaw == null`——于是阶段还是 `machine/working`，人看到「机器还在干活」，实际在等他对账。
+- **取舍二：停止不可信信号自成核对理由**。租约回答的是「谁在跑这一单」，无从回答「它说停了能不能信」。`cancel.unsupported` / `cancel.unconfirmed` / `cancel.failed` / `dispatch.orphaned` 任一出现即算核对到期，租约到期仍是另一条独立理由，两条都不再互相要求前置条件。
+- **回归钉法**：`two ready reports for one task ask one review question`（只开一单、两条 `report.invalid` 都在）与 `a stop nobody confirmed is reconcile-due even while the dispatch lease is open`（活动租约 + `cancel.unconfirmed` → `person/reconcile`，标签 `Needs reconciliation`），均在 `test/tasks-engine.test.mjs`。
