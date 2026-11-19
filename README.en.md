@@ -156,7 +156,7 @@ Cursor / Codex use the equivalent config form (backslashes in JSON must be escap
 
 On the local-checkout route, replace the path with `<path-to-your-clone>\bin\dsh-rpc-mcp.mjs`. The rest of this document writes `node bin/...`, which means "run from inside the package".
 
-**Eleven tools** are exposed by default (**8** additional task tools — `dsh_task_{submit,list,get,cancel,preview,events,read_artifact,input}` — and **3** agent tools — `dsh_agents_{list,probe,get}` — are mounted when `tasksEnabled: true`, **22** total):
+**11 tools** are exposed by default (**8** additional task tools — `dsh_task_{submit,list,get,cancel,preview,events,read_artifact,input}` — and **3** agent tools — `dsh_agents_{list,probe,get}` — are mounted when `tasksEnabled: true`, **22** total):
 
 | Tool | Purpose |
 | --- | --- |
@@ -759,8 +759,23 @@ node test/e2e.mjs              # 14 cases: end to end against a real Harness (--
 node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a real Harness
 ```
 
+### Two reconciliation gates
+
+The numbers in the docs and the interface surface promised by the plan are now machine-checked, and both run in `npm test`, CI and `prepublishOnly`:
+
+```powershell
+npm run check:docs      # docs numbers vs code and docs/counts.json (RPC methods, MCP tools, test files, cases)
+npm run docs:counts     # rewrite README / README.en / the newest CHANGELOG section when they drift (idempotent)
+npm run check:surface   # code surface vs docs/api-surface.json (plan snapshot), checked in both directions
+npm run docs:surface    # re-extract the snapshot after editing the plan doc (needs it locally; PLAN_DOC overrides the path)
+```
+
+`check:docs` derives what it can: the RPC method count comes from the catalog in `lib/methods.mjs`, the MCP tool count from the two tables in `bin/dsh-rpc-mcp.mjs`, and the test-file count from the `node test/*.test.mjs` entries in `package.json`'s `test` chain. Only the case total needs a full run, so `docs/counts.json` is its single source.
+
+`check:surface` looks both ways: everything the plan promised must exist, and any new task/agent-family interface in code must be either in the plan or recorded in the snapshot's `implementationOnly`. That is the check that would have caught 0.9.0's "plan promised `dsh.tasks.resolve`, implementation missed it".
+
 <details>
-<summary>What each of the forty-two test files covers</summary>
+<summary>What each of the 43 test files covers</summary>
 
 | Suite | Cases | Covers |
 | --- | --- | --- |
