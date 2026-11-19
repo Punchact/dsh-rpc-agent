@@ -3,9 +3,10 @@
 // approval decisions, and human resolution. Contains zero adapter calls.
 
 import { createHash, randomUUID } from "node:crypto";
-import { redactSecrets } from "../adapters/redact.mjs";
-import { degradedFromCapabilities } from "./degraded.mjs";
+import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 
+import { redactSecrets } from "../adapters/redact.mjs";
+import { degradedFromCapabilities, type DegradedControlEntry } from "./degraded.mjs";
 import {
   TASK_ERROR,
   accessDeniedError,
@@ -16,12 +17,73 @@ import {
   taskError,
   validationFailed,
 } from "./errors.mjs";
-import { artifactIdFor, readArtifactWindow, verifyArtifactClaim } from "./artifacts.mjs";
+import { artifactIdFor, readArtifactWindow, verifyArtifactClaim, type ArtifactClaimInput } from "./artifacts.mjs";
 import { consumePreviewInTx } from "./preview.mjs";
-import { TERMINAL_STATES, appendEventInTx, transitionInTx } from "./state-machine.mjs";
+import {
+  TERMINAL_STATES,
+  appendEventInTx,
+  transitionInTx,
+  type AppendEventResult,
+  type TaskStatus,
+} from "./state-machine.mjs";
+import type {
+  AgentRow,
+  ApprovalRow,
+  ArtifactRow,
+  AttemptRow,
+  AttentionKind,
+  AttentionRow,
+  CapabilityRevisionRow,
+  EffectRow,
+  EventRow,
+  InputRow,
+  MandateRow,
+  PreviewRow,
+  PrincipalRow,
+  TaskRow,
+  TaskStore,
+  WorkspaceRow,
+} from "./store.mjs";
 
-const REPORT_STATES = new Set(["progress", "waiting", "ready", "blocked", "failed", "dropped"]);
-const ATTENTION_KINDS = new Set(["decision", "input", "approval", "review"]);
+export type {
+  AgentRow,
+  ApprovalRow,
+  ArtifactRow,
+  AttemptRow,
+  AttentionKind,
+  AttentionRow,
+  CapabilityRevisionRow,
+  EffectRow,
+  EventRow,
+  InputRow,
+  MandateRow,
+  PreviewRow,
+  PrincipalRow,
+  TaskRow,
+  TaskStore,
+  WorkspaceRow,
+};
+
+export const ENGINE_REPORT_STATES = Object.freeze([
+  "progress",
+  "waiting",
+  "ready",
+  "blocked",
+  "failed",
+  "dropped",
+] as const);
+export type EngineReportState = (typeof ENGINE_REPORT_STATES)[number];
+
+export const ENGINE_ATTENTION_KINDS = Object.freeze([
+  "decision",
+  "input",
+  "approval",
+  "review",
+] as const);
+export type EngineAttentionKind = (typeof ENGINE_ATTENTION_KINDS)[number];
+
+const REPORT_STATES: ReadonlySet<string> = new Set(ENGINE_REPORT_STATES);
+const ATTENTION_KINDS: ReadonlySet<string> = new Set(ENGINE_ATTENTION_KINDS);
 
 const PHASE_LABELS = Object.freeze({
   "person/delivery": "Input undelivered",
@@ -32,58 +94,494 @@ const PHASE_LABELS = Object.freeze({
   "machine/queued": "Queued",
   "machine/working": "Working",
   done: "Finished",
-});
+} as const);
 
-function stableStringify(value) {
+export type DerivedPhaseName = keyof typeof PHASE_LABELS;
+
+export interface DerivedPhase {
+  phase: DerivedPhaseName;
+  label: string;
+}
+
+export interface DerivePhaseTaskInput {
+  status: TaskStatus | string;
+  undeliveredInputCount?: number;
+  hasUndeliveredInput?: boolean;
+  leaseExpiresAt?: string | null;
+  reconcileLeaseExpired?: boolean;
+}
+
+export interface DerivePhaseAttentionInput {
+  kind?: AttentionKind | string;
+  status?: string;
+  resolved_at?: string | null;
+  resolvedAt?: string | null;
+}
+
+export interface DerivePhaseLastEventInput {
+  type?: string;
+  seq?: number;
+}
+
+export interface DerivePhaseOptions {
+  nowMs?: number;
+}
+
+export interface AttentionOnceInTxParams {
+  questionId: string;
+  taskId: string;
+  attemptId?: string | null;
+  kind: AttentionKind | string;
+  prompt: string;
+  optionsJson: string;
+  expiresAt?: string | null;
+  now: string;
+}
+
+export interface AttentionOnceResult {
+  questionId: string;
+  deduplicated: boolean;
+}
+
+export interface TaskActiveAttemptProjection {
+  attemptId: string;
+  attemptNo: number;
+  status: string;
+  failureClass: string | null;
+  sideEffectActive: boolean;
+  startedAt: string;
+  endedAt: string | null;
+}
+
+export interface TaskAttentionProjection {
+  questionId: string;
+  kind: AttentionKind | string;
+  prompt: string;
+  options: unknown[];
+  expiresAt: string | null;
+  createdAt: string;
+}
+
+export interface TaskApprovalProjection {
+  approvalId: string;
+  attemptId: string;
+  summary: string;
+  scope: Record<string, unknown>;
+  expiresAt: string;
+}
+
+export interface TaskArtifactProjection {
+  artifactId: string;
+  kind: string;
+  sizeBytes: number;
+  sha256: string | null;
+  createdAt: string;
+}
+
+export interface TaskLastEventProjection {
+  eventId: string;
+  seq: number;
+  type: string;
+  source: string;
+  createdAt: string;
+}
+
+export interface TaskProjection {
+  taskId: string;
+  principalId: string;
+  idempotencyKey: string;
+  capabilityRevisionId: string;
+  workspaceId: string;
+  agentId: string;
+  previewId: string | null;
+  status: TaskStatus;
+  stateVersion: number;
+  phase: DerivedPhaseName;
+  phaseLabel: string;
+  degraded: DegradedControlEntry[];
+  activeAttemptId: string | null;
+  activeAttempt: TaskActiveAttemptProjection | null;
+  pending: {
+    attention: TaskAttentionProjection[];
+    approvals: TaskApprovalProjection[];
+  };
+  artifacts: TaskArtifactProjection[];
+  result: unknown;
+  resultValid: boolean | null;
+  error: unknown;
+  cancelRequestedAt: string | null;
+  cancelReason: string | null;
+  notice?: string;
+  lastEvent: TaskLastEventProjection | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  [key: string]: unknown;
+}
+
+export type TaskDetail = TaskProjection;
+
+export interface SubmitTaskParams {
+  principalId?: string;
+  idempotencyKey?: string;
+  previewId?: string | null;
+  requestDigest?: unknown;
+  capabilityRevisionId?: string | null;
+  capability?: string | null;
+  workspaceId?: string | null;
+  agentId?: string | null;
+  input?: unknown;
+  requestSummary?: unknown;
+  sourceTaskId?: string | null;
+  allowedOps?: unknown[];
+  policyRevision?: string;
+  mandateExpiresAt?: string | null;
+  [key: string]: unknown;
+}
+
+export interface SubmitTaskResult extends TaskProjection {
+  mandateId?: string;
+  deduplicated: boolean;
+}
+
+export interface GetTaskParams {
+  taskId?: string;
+  principalId?: string;
+  [key: string]: unknown;
+}
+
+export interface ListTasksParams {
+  limit?: number;
+  principalId?: string;
+  status?: TaskStatus | string;
+  workspaceId?: string;
+  cursor?: string;
+  [key: string]: unknown;
+}
+
+export interface ListTasksResult {
+  items: TaskProjection[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+export interface TaskEventsParams {
+  taskId?: string;
+  afterSeq?: number;
+  limit?: number;
+  [key: string]: unknown;
+}
+
+export interface TaskEventProjection {
+  eventId: string;
+  taskId: string;
+  seq: number;
+  attemptId: string | null;
+  type: string;
+  source: string;
+  adapterEventId: string | null;
+  payload: unknown;
+  evidence: unknown;
+  createdAt: string;
+}
+
+export interface TaskEventsResult {
+  taskId: string;
+  events: TaskEventProjection[];
+  nextAfterSeq: number;
+  hasMore: boolean;
+}
+
+export interface CancelTaskParams {
+  taskId?: string;
+  idempotencyKey?: string;
+  expectedStateVersion?: number;
+  reason?: string;
+  principalId?: string;
+  [key: string]: unknown;
+}
+
+export interface CancelTaskResult {
+  requestAccepted?: boolean;
+  taskId?: string;
+  status: TaskStatus;
+  stateVersion: number;
+  operationId?: string;
+  unsupported?: boolean;
+  notice?: string;
+  alreadyStopped?: boolean;
+  deduplicated: boolean;
+  [key: string]: unknown;
+}
+
+export interface DecideApprovalParams {
+  taskId?: string;
+  attemptId?: string;
+  approvalId?: string;
+  idempotencyKey?: string;
+  decision?: "allow-once" | "reject" | string;
+  decidedBy?: string;
+  note?: string;
+  [key: string]: unknown;
+}
+
+export interface DecideApprovalResult {
+  approvalId: string;
+  taskId: string;
+  attemptId: string;
+  decision: string;
+  status: TaskStatus;
+  stateVersion: number;
+  operationId?: string;
+  deduplicated: boolean;
+  [key: string]: unknown;
+}
+
+export type ResolveDisposition =
+  | "accept"
+  | "succeeded"
+  | "reject"
+  | "failed"
+  | "cancel"
+  | "cancelled"
+  | "requeue";
+
+export interface ResolveTaskParams {
+  taskId?: string;
+  idempotencyKey?: string;
+  expectedStateVersion?: number;
+  disposition?: ResolveDisposition | string;
+  resolvedBy?: string;
+  evidenceRef?: string | Record<string, unknown> | null;
+  note?: string;
+  [key: string]: unknown;
+}
+
+export interface ResolveTaskResult extends TaskProjection {
+  deduplicated: boolean;
+}
+
+export interface RecordAttemptStartParams {
+  taskId: string;
+  expectedStateVersion?: number;
+  runtimeLocator?: unknown;
+  markRunning?: boolean;
+}
+
+export interface RecordAttemptStartResult {
+  attemptId: string;
+  attemptNo: number;
+  taskId: string;
+  status: TaskStatus | string;
+  stateVersion: number;
+}
+
+export interface RecordInputParams {
+  taskId?: string;
+  idempotencyKey?: string;
+  text?: string;
+  questionId?: string;
+  attemptId?: string;
+  [key: string]: unknown;
+}
+
+export interface RecordInputResult {
+  inputId: string;
+  taskId: string;
+  attemptId: string | null;
+  deliveryStatus: string;
+  operationId?: string;
+  deduplicated: boolean;
+  [key: string]: unknown;
+}
+
+export interface ReadArtifactParams {
+  taskId?: string;
+  artifactId?: string;
+  offset?: number | null;
+  length?: number | null;
+  [key: string]: unknown;
+}
+
+export interface ReadArtifactResult {
+  taskId: string;
+  artifactId: string;
+  kind: string;
+  sizeBytes: number;
+  sha256: string | null;
+  sourcePath: string | null;
+  createdAt: string;
+  encoding: string;
+  content: string;
+  offset: number;
+  bytesRead: number;
+  truncated: boolean;
+  [key: string]: unknown;
+}
+
+export interface EngineReportAttentionInput {
+  questionId?: string;
+  kind: EngineAttentionKind | string;
+  prompt: string;
+  options?: unknown[];
+  expiresAt?: string | null;
+  scope?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface EngineReportInput {
+  state: EngineReportState | string;
+  message?: string | null;
+  summary?: string | null;
+  reason?: string | null;
+  reviewPrompt?: string | null;
+  attention?: EngineReportAttentionInput | unknown;
+  artifacts?: ArtifactClaimInput[] | unknown[];
+  evidence?: unknown;
+  result?: unknown;
+  resultValid?: boolean;
+  schemaValid?: boolean;
+  validationErrors?: unknown;
+  failureClass?: string | null;
+  droppedBy?: string;
+  [key: string]: unknown;
+}
+
+export interface ApplyReportParams {
+  taskId?: string;
+  attemptId?: string | null;
+  adapterEventId?: string | null;
+  source?: string;
+  report?: EngineReportInput | Record<string, unknown>;
+}
+
+export interface ApplyReportResult {
+  taskId: string;
+  status: TaskStatus | string;
+  stateVersion: number;
+  deduplicated?: boolean;
+  ignoredLateReport?: boolean;
+  malformed?: boolean;
+  disputed?: boolean;
+  reportInvalid?: boolean;
+  questionId?: string;
+  event?: AppendEventResult | null;
+  [key: string]: unknown;
+}
+
+export interface SeedBaselineEntitiesOptions {
+  principal?: { principalId: string; kind?: string; scopes?: string[] } | null;
+  workspace?: {
+    workspaceId: string;
+    rootPath: string;
+    allowedSideEffects?: string[];
+    policy?: Record<string, unknown>;
+  } | null;
+  agent?: {
+    agentId: string;
+    adapterKind?: string;
+    adapterConfigRef?: string;
+    manifestRevision?: string;
+    capabilities?: Record<string, unknown>;
+    probeStatus?: string;
+    enabled?: boolean;
+  } | null;
+  capabilityRevision?: {
+    revisionId: string;
+    capability: string;
+    version?: string | number;
+    schema?: Record<string, unknown>;
+    sideEffectKind?: string;
+    cancelPolicy?: string;
+    limitations?: unknown[];
+  } | null;
+  preview?: {
+    previewId: string;
+    principalId: string;
+    normalizedRequest?: Record<string, unknown>;
+    candidates?: unknown[];
+    selectedAgentId?: string | null;
+    selectionReason?: string;
+    policyRevision?: string;
+    capabilityRevisionId: string;
+    expiresAt?: string;
+  } | null;
+}
+
+export interface TaskEngineOptions {
+  defaultPrincipalId?: string;
+}
+
+export interface TaskEngine {
+  readonly store: TaskStore;
+  derivePhase: typeof derivePhase;
+  submit(params?: SubmitTaskParams): Promise<SubmitTaskResult>;
+  get(params?: GetTaskParams): Promise<TaskProjection>;
+  list(params?: ListTasksParams): Promise<ListTasksResult>;
+  events(params?: TaskEventsParams): Promise<TaskEventsResult>;
+  cancel(params?: CancelTaskParams): Promise<CancelTaskResult>;
+  decideApproval(params?: DecideApprovalParams): Promise<DecideApprovalResult>;
+  resolve(params?: ResolveTaskParams): Promise<ResolveTaskResult>;
+  recordAttemptStart(params?: RecordAttemptStartParams): Promise<RecordAttemptStartResult>;
+  applyReport(params?: ApplyReportParams): Promise<ApplyReportResult>;
+  input(params?: RecordInputParams): Promise<RecordInputResult>;
+  readArtifact(params?: ReadArtifactParams): Promise<ReadArtifactResult>;
+}
+
+function stableStringify(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
-  const keys = Object.keys(value).sort();
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
   return `{${keys
-    .filter((k) => value[k] !== undefined)
-    .map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`)
+    .filter((k) => obj[k] !== undefined)
+    .map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`)
     .join(",")}}`;
 }
 
-function hashRequest(payload) {
+function hashRequest(payload: unknown): string {
   return createHash("sha256").update(stableStringify(payload)).digest("hex");
 }
 
-function parseJson(text, fallback = null) {
+function parseJson<T>(text: string | null | undefined, fallback: T): T {
   if (typeof text !== "string" || text.length === 0) return fallback;
   try {
-    return JSON.parse(text);
+    return JSON.parse(text) as T;
   } catch {
     return fallback;
   }
 }
 
-function requireNonEmptyString(value, key) {
+function requireNonEmptyString(value: unknown, key: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw validationFailed(`\`${key}\` must be a non-empty string`, { field: key });
   }
   return value.trim();
 }
 
-function encodeCursor({ updatedAt, taskId }) {
+function encodeCursor({ updatedAt, taskId }: { updatedAt: string; taskId: string }): string {
   return Buffer.from(JSON.stringify({ updatedAt, taskId }), "utf8").toString("base64url");
 }
 
-function decodeCursor(cursor) {
+function decodeCursor(cursor: unknown): { updatedAt: string; taskId: string } {
   if (typeof cursor !== "string" || cursor.trim().length === 0) {
     throw validationFailed("`cursor` must be a non-empty string", { field: "cursor" });
   }
   try {
-    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as {
+      updatedAt?: unknown;
+      taskId?: unknown;
+    } | null;
     if (!parsed || typeof parsed.updatedAt !== "string" || typeof parsed.taskId !== "string") {
       throw new Error("missing fields");
     }
-    return parsed;
+    return { updatedAt: parsed.updatedAt, taskId: parsed.taskId };
   } catch {
     throw validationFailed("invalid pagination cursor", { field: "cursor" });
   }
 }
 
-function isAttentionOpen(row) {
+function isAttentionOpen(row: DerivePhaseAttentionInput | null | undefined): boolean {
   if (!row || typeof row !== "object") return false;
   if (row.status !== undefined) return row.status === "open";
   return !row.resolved_at && !row.resolvedAt;
@@ -92,17 +590,17 @@ function isAttentionOpen(row) {
 /**
  * Pure derived-phase function (§5.4): "phase = who are we waiting on?"
  * Evaluated top-to-bottom; first matching rule wins. Never persisted.
- *
- * @param {object} task Task projection (`status`, optional `undeliveredInputCount`, `leaseExpiresAt`, `reconcileLeaseExpired`)
- * @param {Array<object>} [attentionRows=[]] Attention rows for this task
- * @param {object|null} [lastEvent=null] Most recent event for this task
- * @param {object} [options={}] Optional `{ nowMs }` override for deterministic testing
- * @returns {{ phase: string, label: string }}
  */
 export { degradedFromCapabilities } from "./degraded.mjs";
 
-export function derivePhase(task, attentionRows = [], lastEvent = null, options = {}) {
-  const nowMs = Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
+export function derivePhase(
+  task: DerivePhaseTaskInput,
+  attentionRows: DerivePhaseAttentionInput[] = [],
+  lastEvent: DerivePhaseLastEventInput | null = null,
+  options: DerivePhaseOptions = {},
+): DerivedPhase {
+  const _nowMs = Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
+  void _nowMs;
   const status = task?.status;
   const openAttention = Array.isArray(attentionRows) ? attentionRows.filter(isAttentionOpen) : [];
 
@@ -112,7 +610,7 @@ export function derivePhase(task, attentionRows = [], lastEvent = null, options 
     task?.hasUndeliveredInput === true ||
     lastEvent?.type === "input.queued" ||
     lastEvent?.type === "input.retrying";
-  if (hasUndeliveredInput && !TERMINAL_STATES.has(status)) {
+  if (hasUndeliveredInput && !TERMINAL_STATES.has(status as TaskStatus)) {
     return { phase: "person/delivery", label: PHASE_LABELS["person/delivery"] };
   }
 
@@ -155,7 +653,7 @@ export function derivePhase(task, attentionRows = [], lastEvent = null, options 
 
   // 8. done: terminal states. Checked before the machine/working fallback so a
   //    terminal row can never report `machine/working`; the plan numbers this rung 8.
-  if (TERMINAL_STATES.has(status)) {
+  if (TERMINAL_STATES.has(status as TaskStatus)) {
     return { phase: "done", label: PHASE_LABELS.done };
   }
 
@@ -164,11 +662,12 @@ export function derivePhase(task, attentionRows = [], lastEvent = null, options 
   return { phase: "machine/working", label: PHASE_LABELS["machine/working"] };
 }
 
-function validateStructuredAttention(attention) {
+function validateStructuredAttention(attention: unknown): attention is EngineReportAttentionInput {
   if (!attention || typeof attention !== "object" || Array.isArray(attention)) return false;
-  if (!ATTENTION_KINDS.has(attention.kind)) return false;
-  if (typeof attention.prompt !== "string" || attention.prompt.trim().length === 0) return false;
-  if (attention.options !== undefined && !Array.isArray(attention.options)) return false;
+  const candidate = attention as Record<string, unknown>;
+  if (typeof candidate.kind !== "string" || !ATTENTION_KINDS.has(candidate.kind)) return false;
+  if (typeof candidate.prompt !== "string" || candidate.prompt.trim().length === 0) return false;
+  if (candidate.options !== undefined && !Array.isArray(candidate.options)) return false;
   return true;
 }
 
@@ -179,7 +678,10 @@ function validateStructuredAttention(attention) {
  * 0.9.2 (复核 NOTES)：去重键补上 `attempt_id` 与 `options_json`——同一遍里重复的轮询仍只问
  * 一次，但换了 attempt 或换了可选项就是另一个问题，不该被前一问吞掉。
  */
-function attentionOnceInTx(db, { questionId, taskId, attemptId, kind, prompt, optionsJson, expiresAt, now }) {
+function attentionOnceInTx(
+  db: DatabaseSync,
+  { questionId, taskId, attemptId, kind, prompt, optionsJson, expiresAt, now }: AttentionOnceInTxParams,
+): AttentionOnceResult {
   const existing = db
     .prepare(
       `SELECT question_id FROM attention
@@ -187,7 +689,7 @@ function attentionOnceInTx(db, { questionId, taskId, attemptId, kind, prompt, op
           AND COALESCE(attempt_id, '') = COALESCE(?, '')
           AND COALESCE(options_json, '') = COALESCE(?, '')`,
     )
-    .get(taskId, kind, prompt, attemptId ?? null, optionsJson ?? null);
+    .get(taskId, kind, prompt, attemptId ?? null, optionsJson ?? null) as { question_id: string } | undefined;
   if (existing) {
     return { questionId: existing.question_id, deduplicated: true };
   }
@@ -195,12 +697,27 @@ function attentionOnceInTx(db, { questionId, taskId, attemptId, kind, prompt, op
     `INSERT INTO attention (
        question_id, task_id, attempt_id, kind, prompt, options_json, status, expires_at, created_at
      ) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
-  ).run(questionId, taskId, attemptId, kind, prompt, optionsJson, expiresAt, now);
+  ).run(questionId, taskId, attemptId ?? null, kind, prompt, optionsJson, expiresAt ?? null, now);
   return { questionId, deduplicated: false };
 }
 
-function closeOpenAttentionInTx(db, { taskId, attemptId = null, resolvedBy = "system", resolution = {}, now }) {
-  const params = [resolvedBy, JSON.stringify(resolution), now, taskId];
+function closeOpenAttentionInTx(
+  db: DatabaseSync,
+  {
+    taskId,
+    attemptId = null,
+    resolvedBy = "system",
+    resolution = {},
+    now,
+  }: {
+    taskId: string;
+    attemptId?: string | null;
+    resolvedBy?: string;
+    resolution?: Record<string, unknown>;
+    now: string;
+  },
+): void {
+  const params: SQLInputValue[] = [resolvedBy, JSON.stringify(resolution), now, taskId];
   let sql = `UPDATE attention SET status = 'closed', resolved_by = ?, resolution_json = ?, resolved_at = ?
              WHERE task_id = ? AND status = 'open'`;
   if (attemptId) {
@@ -209,7 +726,7 @@ function closeOpenAttentionInTx(db, { taskId, attemptId = null, resolvedBy = "sy
   }
   db.prepare(sql).run(...params);
 
-  const appParams = [now, taskId];
+  const appParams: SQLInputValue[] = [now, taskId];
   let appSql = `UPDATE approvals SET status = 'closed', decided_at = COALESCE(decided_at, ?)
                 WHERE task_id = ? AND status = 'pending'`;
   if (attemptId) {
@@ -219,35 +736,31 @@ function closeOpenAttentionInTx(db, { taskId, attemptId = null, resolvedBy = "sy
   db.prepare(appSql).run(...appParams);
 }
 
-/**
- * @param {import("node:sqlite").DatabaseSync} db
- * @param {string} taskId
- */
-function readTaskDetailInDb(db, taskId) {
-  const row = db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(taskId);
+function readTaskDetailInDb(db: DatabaseSync, taskId: string): TaskProjection | null {
+  const row = db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(taskId) as TaskRow | undefined;
   if (!row) return null;
 
   const attentionRows = db
     .prepare("SELECT * FROM attention WHERE task_id = ? ORDER BY created_at ASC")
-    .all(taskId);
+    .all(taskId) as unknown as AttentionRow[];
   const openAttention = attentionRows.filter(isAttentionOpen);
 
   const pendingApprovals = db
     .prepare("SELECT * FROM approvals WHERE task_id = ? AND status = 'pending' ORDER BY created_at ASC")
-    .all(taskId);
+    .all(taskId) as unknown as ApprovalRow[];
 
-  const activeAttempt = row.active_attempt_id
-    ? db.prepare("SELECT * FROM attempts WHERE attempt_id = ?").get(row.active_attempt_id)
-    : db
-        .prepare("SELECT * FROM attempts WHERE task_id = ? ORDER BY attempt_no DESC LIMIT 1")
-        .get(taskId);
+  const activeAttempt = (
+    row.active_attempt_id
+      ? db.prepare("SELECT * FROM attempts WHERE attempt_id = ?").get(row.active_attempt_id)
+      : db.prepare("SELECT * FROM attempts WHERE task_id = ? ORDER BY attempt_no DESC LIMIT 1").get(taskId)
+  ) as AttemptRow | undefined;
 
   const undelivered = db
     .prepare(
       `SELECT COUNT(*) AS cnt FROM inputs
        WHERE task_id = ? AND delivery_status IN ('queued', 'retrying')`,
     )
-    .get(taskId);
+    .get(taskId) as { cnt: number };
 
   const activeLeaseEffect = db
     .prepare(
@@ -255,23 +768,25 @@ function readTaskDetailInDb(db, taskId) {
        WHERE task_id = ? AND lease_expires_at IS NOT NULL
        ORDER BY created_at DESC LIMIT 1`,
     )
-    .get(taskId);
+    .get(taskId) as { lease_expires_at: string | null } | undefined;
 
   const lastEvent = db
     .prepare("SELECT * FROM events WHERE task_id = ? ORDER BY seq DESC LIMIT 1")
-    .get(taskId);
+    .get(taskId) as EventRow | undefined;
 
   const unsupportedCancelEvt = db
     .prepare("SELECT * FROM events WHERE task_id = ? AND type = 'cancel.unsupported' ORDER BY seq DESC LIMIT 1")
-    .get(taskId);
+    .get(taskId) as EventRow | undefined;
 
   const artifacts = db
     .prepare("SELECT artifact_id, kind, size_bytes, sha256, created_at FROM artifacts WHERE task_id = ? ORDER BY created_at ASC")
-    .all(taskId);
+    .all(taskId) as unknown as Array<Pick<ArtifactRow, "artifact_id" | "kind" | "size_bytes" | "sha256" | "created_at">>;
 
   const agentRow = row.agent_id
-    ? db.prepare("SELECT capabilities_json FROM agents WHERE agent_id = ?").get(row.agent_id)
-    : null;
+    ? (db.prepare("SELECT capabilities_json FROM agents WHERE agent_id = ?").get(row.agent_id) as
+        | { capabilities_json: string }
+        | undefined)
+    : undefined;
 
   const phaseInfo = derivePhase(
     {
@@ -313,7 +828,7 @@ function readTaskDetailInDb(db, taskId) {
         questionId: a.question_id,
         kind: a.kind,
         prompt: a.prompt,
-        options: parseJson(a.options_json, []),
+        options: parseJson<unknown[]>(a.options_json, []),
         expiresAt: a.expires_at ?? null,
         createdAt: a.created_at,
       })),
@@ -321,7 +836,7 @@ function readTaskDetailInDb(db, taskId) {
         approvalId: ap.approval_id,
         attemptId: ap.attempt_id,
         summary: ap.summary,
-        scope: parseJson(ap.scope_json, {}),
+        scope: parseJson<Record<string, unknown>>(ap.scope_json, {}),
         expiresAt: ap.expires_at,
       })),
     },
@@ -332,14 +847,12 @@ function readTaskDetailInDb(db, taskId) {
       sha256: art.sha256 ?? null,
       createdAt: art.created_at,
     })),
-    result: row.result_json ? parseJson(row.result_json, null) : null,
+    result: row.result_json ? parseJson<unknown>(row.result_json, null) : null,
     resultValid: row.result_valid === null ? null : row.result_valid === 1,
-    error: row.error_json ? parseJson(row.error_json, null) : null,
+    error: row.error_json ? parseJson<unknown>(row.error_json, null) : null,
     cancelRequestedAt: row.cancel_requested_at ?? null,
     cancelReason: row.cancel_reason ?? null,
-    ...(unsupportedCancelEvt
-      ? { notice: "该执行方无法停止，请人工确认" }
-      : {}),
+    ...(unsupportedCancelEvt ? { notice: "该执行方无法停止，请人工确认" } : {}),
     lastEvent: lastEvent
       ? {
           eventId: lastEvent.event_id,
@@ -357,19 +870,17 @@ function readTaskDetailInDb(db, taskId) {
 
 /**
  * Seed helpers for tests and W2/W3 bootstrap.
- *
- * @param {import("./store.mjs").TaskStore} store
  */
 export async function seedBaselineEntities(
-  store,
+  store: TaskStore,
   {
     principal = null,
     workspace = null,
     agent = null,
     capabilityRevision = null,
     preview = null,
-  } = {},
-) {
+  }: SeedBaselineEntitiesOptions = {},
+): Promise<unknown> {
   const now = new Date().toISOString();
   return store.withWriteTx((db) => {
     if (principal) {
@@ -379,7 +890,9 @@ export async function seedBaselineEntities(
       ).run(
         principal.principalId,
         principal.kind ?? "operator",
-        JSON.stringify(principal.scopes ?? ["task:submit", "task:read", "task:cancel", "approval:decide", "task:resolve"]),
+        JSON.stringify(
+          principal.scopes ?? ["task:submit", "task:read", "task:cancel", "approval:decide", "task:resolve"],
+        ),
         now,
         now,
       );
@@ -407,7 +920,7 @@ export async function seedBaselineEntities(
         agent.adapterConfigRef ?? "",
         agent.manifestRevision ?? "rev-1",
         JSON.stringify({
-          cancel: agent.capabilities?.cancel ?? "supported",
+          cancel: (agent.capabilities as Record<string, unknown> | undefined)?.cancel ?? "supported",
           ...(agent.capabilities ?? {}),
           // A seeded instance behaves like a registered one: it declares the
           // revision it can execute, so preview can check ownership.
@@ -452,7 +965,7 @@ export async function seedBaselineEntities(
         preview.principalId,
         JSON.stringify(preview.normalizedRequest ?? {}),
         JSON.stringify(preview.candidates ?? []),
-        preview.selectedAgentId,
+        preview.selectedAgentId ?? null,
         preview.selectionReason ?? "selected",
         preview.policyRevision ?? "v1",
         preview.capabilityRevisionId,
@@ -465,11 +978,8 @@ export async function seedBaselineEntities(
 
 /**
  * Create a service engine bound to a SQLite store (zero adapter calls).
- *
- * @param {import("./store.mjs").TaskStore} store
- * @param {{ defaultPrincipalId?: string }} [options]
  */
-export function createTaskEngine(store, options = {}) {
+export function createTaskEngine(store: TaskStore, options: TaskEngineOptions = {}): TaskEngine {
   const defaultPrincipalId = options.defaultPrincipalId ?? "local-operator";
 
   return {
@@ -482,7 +992,7 @@ export function createTaskEngine(store, options = {}) {
      * the existing task; conflicting request with the same key throws
      * `IDEMPOTENCY_CONFLICT`.
      */
-    async submit(params = {}) {
+    async submit(params: SubmitTaskParams = {}): Promise<SubmitTaskResult> {
       if (!params || typeof params !== "object" || Array.isArray(params)) {
         throw validationFailed("params must be an object");
       }
@@ -510,7 +1020,7 @@ export function createTaskEngine(store, options = {}) {
       return store.withWriteTx((db) => {
         const existing = db
           .prepare("SELECT * FROM tasks WHERE principal_id = ? AND idempotency_key = ?")
-          .get(principalId, idempotencyKey);
+          .get(principalId, idempotencyKey) as TaskRow | undefined;
 
         if (existing) {
           if (existing.request_hash !== requestHash) {
@@ -519,12 +1029,14 @@ export function createTaskEngine(store, options = {}) {
               { principalId, idempotencyKey, existingTaskId: existing.task_id },
             );
           }
-          const detail = readTaskDetailInDb(db, existing.task_id);
+          const detail = readTaskDetailInDb(db, existing.task_id)!;
           return { ...detail, deduplicated: true };
         }
 
         const now = new Date().toISOString();
-        const principal = db.prepare("SELECT * FROM principals WHERE principal_id = ?").get(principalId);
+        const principal = db.prepare("SELECT * FROM principals WHERE principal_id = ?").get(principalId) as
+          | PrincipalRow
+          | undefined;
         if (!principal) {
           throw notFoundError(`principal not found: ${principalId}`, { principalId });
         }
@@ -537,13 +1049,13 @@ export function createTaskEngine(store, options = {}) {
         let capabilityRevisionId = params.capabilityRevisionId
           ? requireNonEmptyString(params.capabilityRevisionId, "capabilityRevisionId")
           : null;
-        let requestSummary = params.requestSummary ?? (params.input ? { input: params.input } : {});
+        let requestSummary: unknown = params.requestSummary ?? (params.input ? { input: params.input } : {});
 
         if (previewId) {
           const consumed = consumePreviewInTx(db, {
             previewId,
             principalId,
-            requestDigest: params.requestDigest,
+            requestDigest: typeof params.requestDigest === "string" ? params.requestDigest : undefined,
           });
           if (workspaceId && consumed.workspaceId && workspaceId !== consumed.workspaceId) {
             throw taskError(TASK_ERROR.PREVIEW_MISMATCH, `preview "${previewId}" workspaceId mismatch`, {
@@ -578,17 +1090,19 @@ export function createTaskEngine(store, options = {}) {
           throw validationFailed("`capabilityRevisionId` is required", { field: "capabilityRevisionId" });
         }
 
-        const workspace = db.prepare("SELECT * FROM workspaces WHERE workspace_id = ?").get(workspaceId);
+        const workspace = db.prepare("SELECT * FROM workspaces WHERE workspace_id = ?").get(workspaceId) as
+          | WorkspaceRow
+          | undefined;
         if (!workspace) throw notFoundError(`workspace not found: ${workspaceId}`, { workspaceId });
         if (workspace.revoked_at) throw accessDeniedError(`workspace "${workspaceId}" is revoked`, { workspaceId });
 
-        const agent = db.prepare("SELECT * FROM agents WHERE agent_id = ?").get(agentId);
+        const agent = db.prepare("SELECT * FROM agents WHERE agent_id = ?").get(agentId) as AgentRow | undefined;
         if (!agent) throw notFoundError(`agent not found: ${agentId}`, { agentId });
         if (agent.enabled !== 1) throw validationFailed(`agent "${agentId}" is disabled`, { agentId });
 
         const capRev = db
           .prepare("SELECT * FROM capability_revisions WHERE revision_id = ?")
-          .get(capabilityRevisionId);
+          .get(capabilityRevisionId) as CapabilityRevisionRow | undefined;
         if (!capRev) {
           throw notFoundError(`capability revision not found: ${capabilityRevisionId}`, {
             capabilityRevisionId,
@@ -597,7 +1111,7 @@ export function createTaskEngine(store, options = {}) {
 
         const taskId = `task_${randomUUID()}`;
         const mandateId = `mnd_${randomUUID()}`;
-        const sourceTaskId = params.sourceTaskId ?? null;
+        const sourceTaskId = (params.sourceTaskId as string | null | undefined) ?? null;
 
         db.prepare(
           `INSERT INTO tasks (
@@ -654,13 +1168,13 @@ export function createTaskEngine(store, options = {}) {
           createdAt: now,
         });
 
-        const detail = readTaskDetailInDb(db, taskId);
+        const detail = readTaskDetailInDb(db, taskId)!;
         return { ...detail, mandateId, deduplicated: false };
       });
     },
 
     /** Read one task with derived phase, active attempt, pending attention, and artifacts. */
-    async get(params = {}) {
+    async get(params: GetTaskParams = {}): Promise<TaskProjection> {
       const taskId = requireNonEmptyString(params.taskId, "taskId");
       const principalId = params.principalId ? requireNonEmptyString(params.principalId, "principalId") : null;
       return store.read((db) => {
@@ -673,13 +1187,13 @@ export function createTaskEngine(store, options = {}) {
     },
 
     /** List tasks with optional status/workspace/principal filters and cursor pagination. */
-    async list(params = {}) {
+    async list(params: ListTasksParams = {}): Promise<ListTasksResult> {
       const limitRaw = params.limit ?? 50;
       if (!Number.isInteger(limitRaw) || limitRaw < 1 || limitRaw > 200) {
         throw validationFailed("`limit` must be an integer between 1 and 200", { limit: limitRaw });
       }
-      const where = [];
-      const args = [];
+      const where: string[] = [];
+      const args: SQLInputValue[] = [];
       if (params.principalId !== undefined && params.principalId !== null && params.principalId !== "") {
         where.push("principal_id = ?");
         args.push(requireNonEmptyString(params.principalId, "principalId"));
@@ -706,11 +1220,11 @@ export function createTaskEngine(store, options = {}) {
              ORDER BY updated_at DESC, task_id DESC
              LIMIT ?`,
           )
-          .all(...args, limitRaw + 1);
+          .all(...args, limitRaw + 1) as Array<{ task_id: string }>;
 
         const hasMore = rows.length > limitRaw;
         const pageRows = hasMore ? rows.slice(0, limitRaw) : rows;
-        const items = pageRows.map((r) => readTaskDetailInDb(db, r.task_id));
+        const items = pageRows.map((r) => readTaskDetailInDb(db, r.task_id)!);
         const last = items[items.length - 1];
         const nextCursor =
           hasMore && last ? encodeCursor({ updatedAt: last.updatedAt, taskId: last.taskId }) : null;
@@ -722,7 +1236,7 @@ export function createTaskEngine(store, options = {}) {
      * Read ordered events for a task. Throws `CURSOR_EXPIRED` if `afterSeq`
      * points before the earliest retained event sequence.
      */
-    async events(params = {}) {
+    async events(params: TaskEventsParams = {}): Promise<TaskEventsResult> {
       const taskId = requireNonEmptyString(params.taskId, "taskId");
       const afterSeq = params.afterSeq ?? 0;
       const limit = params.limit ?? 100;
@@ -733,12 +1247,14 @@ export function createTaskEngine(store, options = {}) {
         throw validationFailed("`limit` must be an integer between 1 and 500", { limit });
       }
       return store.read((db) => {
-        const task = db.prepare("SELECT task_id FROM tasks WHERE task_id = ?").get(taskId);
+        const task = db.prepare("SELECT task_id FROM tasks WHERE task_id = ?").get(taskId) as
+          | { task_id: string }
+          | undefined;
         if (!task) throw notFoundError(`task not found: ${taskId}`, { taskId });
 
         const bounds = db
           .prepare("SELECT MIN(seq) AS min_seq, MAX(seq) AS max_seq FROM events WHERE task_id = ?")
-          .get(taskId);
+          .get(taskId) as { min_seq: number | null; max_seq: number | null };
         if (bounds.min_seq !== null && afterSeq > 0 && afterSeq < bounds.min_seq - 1) {
           throw cursorExpired(`event cursor ${afterSeq} expired; earliest available seq is ${bounds.min_seq}`, {
             taskId,
@@ -754,11 +1270,11 @@ export function createTaskEngine(store, options = {}) {
              ORDER BY seq ASC
              LIMIT ?`,
           )
-          .all(taskId, afterSeq, limit + 1);
+          .all(taskId, afterSeq, limit + 1) as unknown as EventRow[];
 
         const hasMore = rows.length > limit;
         const slice = hasMore ? rows.slice(0, limit) : rows;
-        const items = slice.map((r) => ({
+        const items: TaskEventProjection[] = slice.map((r) => ({
           eventId: r.event_id,
           taskId: r.task_id,
           seq: r.seq,
@@ -766,8 +1282,8 @@ export function createTaskEngine(store, options = {}) {
           type: r.type,
           source: r.source,
           adapterEventId: r.adapter_event_id ?? null,
-          payload: parseJson(r.payload_json, {}),
-          evidence: parseJson(r.evidence_json, null),
+          payload: parseJson<unknown>(r.payload_json, {}),
+          evidence: parseJson<unknown>(r.evidence_json, null),
           createdAt: r.created_at,
         }));
         const nextAfterSeq = items.length > 0 ? items[items.length - 1].seq : afterSeq;
@@ -781,11 +1297,11 @@ export function createTaskEngine(store, options = {}) {
      * `cancel === "unsupported"`, skips `cancel_requested`, transitions straight
      * to `needs_reconcile`, and records a `cancel.unsupported` event.
      */
-    async cancel(params = {}) {
+    async cancel(params: CancelTaskParams = {}): Promise<CancelTaskResult> {
       const taskId = requireNonEmptyString(params.taskId, "taskId");
       const idempotencyKey = requireNonEmptyString(params.idempotencyKey, "idempotencyKey");
       const expectedStateVersion = params.expectedStateVersion;
-      if (!Number.isInteger(expectedStateVersion) || expectedStateVersion < 1) {
+      if (typeof expectedStateVersion !== "number" || !Number.isInteger(expectedStateVersion) || expectedStateVersion < 1) {
         throw validationFailed("`expectedStateVersion` must be a positive integer", {
           expectedStateVersion,
         });
@@ -794,7 +1310,7 @@ export function createTaskEngine(store, options = {}) {
       const principalId = params.principalId ? requireNonEmptyString(params.principalId, "principalId") : null;
 
       return store.withWriteTx((db) => {
-        const task = db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(taskId);
+        const task = db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(taskId) as TaskRow | undefined;
         if (!task || (principalId && task.principal_id !== principalId)) {
           throw notFoundError(`task not found: ${taskId}`, { taskId });
         }
@@ -804,11 +1320,11 @@ export function createTaskEngine(store, options = {}) {
             `SELECT * FROM effects
              WHERE task_id = ? AND op_type = 'cancel' AND idempotency_key = ?`,
           )
-          .get(taskId, idempotencyKey);
+          .get(taskId, idempotencyKey) as EffectRow | undefined;
         if (existingEffect) {
           // A replay must carry the same request; comparing only the key would answer a
           // changed reason with the first receipt and hide the caller's mistake.
-          const storedSummary = parseJson(existingEffect.request_summary_json, null) ?? {};
+          const storedSummary = parseJson<{ reason?: string } | null>(existingEffect.request_summary_json, null) ?? {};
           // Only the intent decides a replay: `expectedStateVersion` is a concurrency guard
           // that naturally moves between retries, so comparing it would break honest retries.
           if ((storedSummary.reason ?? "") !== (reason ?? "")) {
@@ -817,7 +1333,7 @@ export function createTaskEngine(store, options = {}) {
               { taskId, idempotencyKey, reason: "idempotency_payload_mismatch" },
             );
           }
-          const receipt = parseJson(existingEffect.receipt_json, {});
+          const receipt = parseJson<Record<string, unknown>>(existingEffect.receipt_json, {});
           return { ...receipt, stateVersion: task.state_version, status: task.status, deduplicated: true };
         }
 
@@ -828,8 +1344,10 @@ export function createTaskEngine(store, options = {}) {
           );
         }
 
-        const agent = db.prepare("SELECT capabilities_json FROM agents WHERE agent_id = ?").get(task.agent_id);
-        const agentCaps = parseJson(agent?.capabilities_json, {});
+        const agent = db.prepare("SELECT capabilities_json FROM agents WHERE agent_id = ?").get(task.agent_id) as
+          | { capabilities_json: string }
+          | undefined;
+        const agentCaps = parseJson<Record<string, any>>(agent?.capabilities_json, {});
         const cancelCap =
           agentCaps?.controls?.cancel?.support ??
           agentCaps?.card?.controls?.cancel?.support ??
@@ -985,7 +1503,7 @@ export function createTaskEngine(store, options = {}) {
     /**
      * Decide a pending approval bound to `(taskId, attemptId, approvalId)`.
      */
-    async decideApproval(params = {}) {
+    async decideApproval(params: DecideApprovalParams = {}): Promise<DecideApprovalResult> {
       const taskId = requireNonEmptyString(params.taskId, "taskId");
       const attemptId = requireNonEmptyString(params.attemptId, "attemptId");
       const approvalId = requireNonEmptyString(params.approvalId, "approvalId");
@@ -994,11 +1512,12 @@ export function createTaskEngine(store, options = {}) {
       if (!["allow-once", "reject"].includes(decision)) {
         throw validationFailed('`decision` must be "allow-once" or "reject"', { decision });
       }
-      const decidedBy = typeof params.decidedBy === "string" && params.decidedBy.trim() ? params.decidedBy.trim() : defaultPrincipalId;
+      const decidedBy =
+        typeof params.decidedBy === "string" && params.decidedBy.trim() ? params.decidedBy.trim() : defaultPrincipalId;
       const note = typeof params.note === "string" ? params.note.trim() : "";
 
       return store.withWriteTx((db) => {
-        const task = db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(taskId);
+        const task = db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(taskId) as TaskRow | undefined;
         if (!task) throw notFoundError(`task not found: ${taskId}`, { taskId });
         if (TERMINAL_STATES.has(task.status)) {
           throw stateConflict(`task ${taskId} is terminal (${task.status})`, { taskId, status: task.status });
@@ -1013,7 +1532,7 @@ export function createTaskEngine(store, options = {}) {
 
         const approval = db
           .prepare("SELECT * FROM approvals WHERE approval_id = ? AND task_id = ? AND attempt_id = ?")
-          .get(approvalId, taskId, attemptId);
+          .get(approvalId, taskId, attemptId) as ApprovalRow | undefined;
         if (!approval) {
           throw notFoundError(`approval not found: ${approvalId}`, { taskId, attemptId, approvalId });
         }
@@ -1074,7 +1593,7 @@ export function createTaskEngine(store, options = {}) {
         );
 
         let stateVersion = task.state_version;
-        let status = task.status;
+        let status: TaskStatus = task.status;
         if (task.status === "waiting_approval") {
           const tr = transitionInTx(db, {
             taskId,
@@ -1114,17 +1633,17 @@ export function createTaskEngine(store, options = {}) {
     /**
      * Operator resolution for `review_pending` or `needs_reconcile` (§6.1).
      */
-    async resolve(params = {}) {
+    async resolve(params: ResolveTaskParams = {}): Promise<ResolveTaskResult> {
       const taskId = requireNonEmptyString(params.taskId, "taskId");
       const idempotencyKey = requireNonEmptyString(params.idempotencyKey, "idempotencyKey");
       const expectedStateVersion = params.expectedStateVersion;
-      if (!Number.isInteger(expectedStateVersion) || expectedStateVersion < 1) {
+      if (typeof expectedStateVersion !== "number" || !Number.isInteger(expectedStateVersion) || expectedStateVersion < 1) {
         throw validationFailed("`expectedStateVersion` must be a positive integer", {
           expectedStateVersion,
         });
       }
       const disposition = requireNonEmptyString(params.disposition, "disposition");
-      const map = {
+      const map: Record<string, TaskStatus> = {
         accept: "succeeded",
         succeeded: "succeeded",
         reject: "failed",
@@ -1133,7 +1652,7 @@ export function createTaskEngine(store, options = {}) {
         cancelled: "cancelled",
         requeue: "queued",
       };
-      const targetState = map[disposition];
+      const targetState = Object.hasOwn(map, disposition) ? map[disposition] : undefined;
       if (!targetState) {
         throw validationFailed(`unsupported disposition "${disposition}"`, { disposition });
       }
@@ -1145,7 +1664,7 @@ export function createTaskEngine(store, options = {}) {
       const note = typeof params.note === "string" ? params.note.trim() : "";
 
       return store.withWriteTx((db) => {
-        const task = db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(taskId);
+        const task = db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(taskId) as TaskRow | undefined;
         if (!task) throw notFoundError(`task not found: ${taskId}`, { taskId });
 
         const existingEffect = db
@@ -1153,11 +1672,15 @@ export function createTaskEngine(store, options = {}) {
             `SELECT * FROM effects
              WHERE task_id = ? AND op_type = 'resolve' AND idempotency_key = ?`,
           )
-          .get(taskId, idempotencyKey);
+          .get(taskId, idempotencyKey) as EffectRow | undefined;
         if (existingEffect) {
           // Same rule as cancel(): a different disposition under the same key is a
           // conflict, not a replay.
-          const storedSummary = parseJson(existingEffect.request_summary_json, null) ?? {};
+          const storedSummary =
+            parseJson<{ disposition?: string; evidenceRef?: unknown } | null>(
+              existingEffect.request_summary_json,
+              null,
+            ) ?? {};
           if (
             storedSummary.disposition !== disposition ||
             (storedSummary.evidenceRef ?? null) !== (evidenceRef ?? null)
@@ -1167,7 +1690,7 @@ export function createTaskEngine(store, options = {}) {
               { taskId, idempotencyKey, reason: "idempotency_payload_mismatch" },
             );
           }
-          return { ...readTaskDetailInDb(db, taskId), deduplicated: true };
+          return { ...readTaskDetailInDb(db, taskId)!, deduplicated: true };
         }
 
         // §5.3: an unvalidated `ready` report keeps the task `running` and posts an
@@ -1176,15 +1699,15 @@ export function createTaskEngine(store, options = {}) {
         // for both validated and unvalidated results (event `review.promoted`).
         const reviewAttention =
           task.status === "running" || task.status === "waiting_input" || task.status === "waiting_approval"
-            ? db
+            ? (db
                 .prepare(
                   `SELECT * FROM attention
                    WHERE task_id = ? AND kind = 'review' AND status = 'open'
                    ORDER BY created_at LIMIT 1`,
                 )
-                .get(taskId)
+                .get(taskId) as AttentionRow | undefined)
             : null;
-        const adjudicable = reviewAttention && (targetState === "succeeded" || targetState === "failed");
+        const adjudicable = Boolean(reviewAttention) && (targetState === "succeeded" || targetState === "failed");
 
         if (task.status !== "review_pending" && task.status !== "needs_reconcile" && !adjudicable) {
           throw stateConflict(
@@ -1201,7 +1724,7 @@ export function createTaskEngine(store, options = {}) {
         if (targetState === "queued") {
           const activeAttempt = db
             .prepare("SELECT attempt_id FROM attempts WHERE task_id = ? AND side_effect_active = 1")
-            .get(taskId);
+            .get(taskId) as { attempt_id: string } | undefined;
           if (activeAttempt) {
             throw stateConflict(
               `cannot requeue task ${taskId} while attempt ${activeAttempt.attempt_id} still holds active side effects`,
@@ -1212,7 +1735,7 @@ export function createTaskEngine(store, options = {}) {
 
         const now = new Date().toISOString();
         let resolveVersion = expectedStateVersion;
-        if (adjudicable) {
+        if (adjudicable && reviewAttention) {
           // Unvalidated result: the operator's disposition is what promotes it into
           // human review, so the promotion is recorded with `resultValid: false`.
           const promotion = transitionInTx(db, {
@@ -1285,7 +1808,7 @@ export function createTaskEngine(store, options = {}) {
           now,
         );
 
-        return { ...readTaskDetailInDb(db, taskId), deduplicated: false };
+        return { ...readTaskDetailInDb(db, taskId)!, deduplicated: false };
       });
     },
 
@@ -1293,21 +1816,21 @@ export function createTaskEngine(store, options = {}) {
      * Create an attempt record and advance `queued -> dispatching -> running` (or
      * `queued -> dispatching`) in DB. Used by tests and W2 runtime dispatcher.
      */
-    async recordAttemptStart(params = {}) {
+    async recordAttemptStart(params: RecordAttemptStartParams = {} as RecordAttemptStartParams): Promise<RecordAttemptStartResult> {
       const taskId = requireNonEmptyString(params.taskId, "taskId");
       const expectedStateVersion = params.expectedStateVersion;
       const runtimeLocator = params.runtimeLocator ?? null;
       const markRunning = params.markRunning !== false;
 
       return store.withWriteTx((db) => {
-        const task = db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(taskId);
+        const task = db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(taskId) as TaskRow | undefined;
         if (!task) throw notFoundError(`task not found: ${taskId}`, { taskId });
         const mandate = db
           .prepare("SELECT mandate_id FROM mandates WHERE task_id = ? ORDER BY created_at DESC LIMIT 1")
-          .get(taskId);
+          .get(taskId) as { mandate_id: string } | undefined;
         const attemptNoRow = db
           .prepare("SELECT COALESCE(MAX(attempt_no), 0) + 1 AS next_no FROM attempts WHERE task_id = ?")
-          .get(taskId);
+          .get(taskId) as { next_no: number };
 
         const now = new Date().toISOString();
         const attemptId = `att_${randomUUID()}`;
@@ -1331,7 +1854,10 @@ export function createTaskEngine(store, options = {}) {
             now,
           );
 
-          let tr = { to: "dispatching", stateVersion: task.state_version };
+          let tr: { to: TaskStatus | string; stateVersion: number } = {
+            to: "dispatching",
+            stateVersion: task.state_version,
+          };
           if (markRunning) {
             db.prepare("UPDATE tasks SET active_attempt_id = ? WHERE task_id = ?").run(attemptId, taskId);
             tr = transitionInTx(db, {
@@ -1391,7 +1917,7 @@ export function createTaskEngine(store, options = {}) {
 
         let tr = transitionInTx(db, {
           taskId,
-          expectedStateVersion,
+          expectedStateVersion: expectedStateVersion!,
           to: "dispatching",
           eventType: "dispatch.selected",
           attemptId,
@@ -1425,32 +1951,50 @@ export function createTaskEngine(store, options = {}) {
      * Apply a six-state adapter report (`progress`, `waiting`, `ready`, `blocked`,
      * `failed`, `dropped`) onto the authoritative task state machine (§5.3 & §5.5).
      */
-    async applyReport(params = {}) {
+    async applyReport(params: ApplyReportParams = {}): Promise<ApplyReportResult> {
       return applyReport(store, params);
     },
-    async input(params = {}) {
+    async input(params: RecordInputParams = {}): Promise<RecordInputResult> {
       return recordInput(store, params);
     },
-    async readArtifact(params = {}) {
+    async readArtifact(params: ReadArtifactParams = {}): Promise<ReadArtifactResult> {
       return readArtifact(store, params);
     },
   };
 }
 
-
 /**
  * §5: record the artifacts a report claims, verifying the bytes first.
  * Returns what was accepted and what was refused, so the caller can log both.
  */
-export function recordArtifactsInTx(db, { taskId, attemptId = null, claims = [], now } = {}) {
+export function recordArtifactsInTx(
+  db: DatabaseSync,
+  {
+    taskId,
+    attemptId = null,
+    claims = [],
+    now,
+  }: {
+    taskId: string;
+    attemptId?: string | null;
+    claims?: ArtifactClaimInput[] | unknown[];
+    now?: string;
+  } = {} as { taskId: string },
+): {
+  accepted: Array<{ artifactId: string; kind: string; sizeBytes: number; sha256: string }>;
+  refused: Array<{ name: string | null; reason: string }>;
+} {
   const at = now ?? new Date().toISOString();
-  const accepted = [];
-  const refused = [];
+  const accepted: Array<{ artifactId: string; kind: string; sizeBytes: number; sha256: string }> = [];
+  const refused: Array<{ name: string | null; reason: string }> = [];
   for (const claim of claims) {
-    const verdict = verifyArtifactClaim(claim);
+    const verdict = verifyArtifactClaim(claim as ArtifactClaimInput);
     if (!verdict.ok) {
+      const claimName = claim && typeof claim === "object" && "name" in claim && typeof claim.name === "string"
+        ? claim.name
+        : null;
       refused.push({
-        name: typeof claim?.name === "string" ? claim.name : null,
+        name: claimName,
         reason: verdict.reason,
       });
       continue;
@@ -1482,7 +2026,7 @@ export function recordArtifactsInTx(db, { taskId, attemptId = null, claims = [],
  * delivered by the dispatcher (adapter.sendInput); this only records intent, so a
  * crash between accepting and delivering cannot lose the text.
  */
-export async function recordInput(store, params = {}) {
+export async function recordInput(store: TaskStore, params: RecordInputParams = {}): Promise<RecordInputResult> {
   const taskId = requireNonEmptyString(params.taskId, "taskId");
   const idempotencyKey = requireNonEmptyString(params.idempotencyKey, "idempotencyKey");
   const text = requireNonEmptyString(params.text, "text");
@@ -1490,12 +2034,12 @@ export async function recordInput(store, params = {}) {
   const attemptIdParam = params.attemptId ? requireNonEmptyString(params.attemptId, "attemptId") : null;
 
   return store.withWriteTx((db) => {
-    const task = db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(taskId);
+    const task = db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(taskId) as TaskRow | undefined;
     if (!task) throw notFoundError(`task not found: ${taskId}`, { taskId });
 
     const existing = db
       .prepare("SELECT * FROM inputs WHERE task_id = ? AND idempotency_key = ?")
-      .get(taskId, idempotencyKey);
+      .get(taskId, idempotencyKey) as InputRow | undefined;
     if (existing) {
       const same = existing.text === text && (existing.question_id ?? null) === questionId;
       if (!same) {
@@ -1544,7 +2088,7 @@ export async function recordInput(store, params = {}) {
     if (questionId) {
       const question = db
         .prepare("SELECT * FROM attention WHERE question_id = ? AND task_id = ?")
-        .get(questionId, taskId);
+        .get(questionId, taskId) as AttentionRow | undefined;
       if (!question) {
         throw stateConflict(`question ${questionId} is not open on task ${taskId}`, {
           taskId,
@@ -1596,11 +2140,8 @@ export async function recordInput(store, params = {}) {
 
 /**
  * §6.1 dsh.tasks.readArtifact: bounded, authoritative read of a recorded artifact.
- *
- * @param {import("./store.mjs").TaskStore} store
- * @param {{ taskId?: string, artifactId?: string, offset?: number, length?: number }} [params]
  */
-export async function readArtifact(store, params = {}) {
+export async function readArtifact(store: TaskStore, params: ReadArtifactParams = {}): Promise<ReadArtifactResult> {
   const taskId = requireNonEmptyString(params.taskId, "taskId");
   const artifactId = requireNonEmptyString(params.artifactId, "artifactId");
   const offset = params.offset === undefined || params.offset === null ? 0 : params.offset;
@@ -1614,10 +2155,10 @@ export async function readArtifact(store, params = {}) {
 
   const row = store.read((db) =>
     db.prepare("SELECT * FROM artifacts WHERE artifact_id = ? AND task_id = ?").get(artifactId, taskId),
-  );
+  ) as ArtifactRow | undefined;
   if (!row) throw notFoundError(`artifact not found: ${artifactId}`, { taskId, artifactId });
 
-  const window = readArtifactWindow({ sourcePath: row.source_path, offset, length });
+  const window = readArtifactWindow({ sourcePath: row.source_path ?? "", offset, length });
   if (!window.ok) {
     throw notFoundError(`artifact bytes are unavailable: ${window.reason}`, {
       taskId,
@@ -1644,33 +2185,31 @@ export async function readArtifact(store, params = {}) {
 /**
  * Standalone §5.3 report mapper: translates adapter report declarations into
  * authoritative task-state transitions and events.
- *
- * @param {import("./store.mjs").TaskStore} store
- * @param {object} [params]
  */
-export async function applyReport(store, params = {}) {
+export async function applyReport(store: TaskStore, params: ApplyReportParams = {}): Promise<ApplyReportResult> {
   const taskId = requireNonEmptyString(params.taskId, "taskId");
   const attemptId = params.attemptId ? requireNonEmptyString(params.attemptId, "attemptId") : null;
-  const report = params.report;
+  const report = params.report as EngineReportInput | undefined;
   const adapterEventId = params.adapterEventId ?? null;
   const source = typeof params.source === "string" && params.source.trim() ? params.source.trim() : "adapter";
 
   if (!report || typeof report !== "object" || Array.isArray(report)) {
     throw validationFailed("`report` must be an object");
   }
-  if (!REPORT_STATES.has(report.state)) {
+  if (typeof report.state !== "string" || !REPORT_STATES.has(report.state)) {
     throw validationFailed(`invalid report state "${String(report.state)}"`, { state: report.state });
   }
 
-  const sanitizeAtt = (att) => {
+  const sanitizeAtt = (att: unknown): unknown => {
     if (!att || typeof att !== "object" || Array.isArray(att)) return att;
+    const rec = att as Record<string, unknown>;
     return {
-      ...att,
-      ...(typeof att.prompt === "string" ? { prompt: redactSecrets(att.prompt, { maxChars: 2000 }) } : {}),
-      ...(typeof att.summary === "string" ? { summary: redactSecrets(att.summary, { maxChars: 2000 }) } : {}),
+      ...rec,
+      ...(typeof rec.prompt === "string" ? { prompt: redactSecrets(rec.prompt, { maxChars: 2000 }) } : {}),
+      ...(typeof rec.summary === "string" ? { summary: redactSecrets(rec.summary, { maxChars: 2000 }) } : {}),
     };
   };
-  const safeReport = {
+  const safeReport: EngineReportInput = {
     ...report,
     ...(typeof report.message === "string" ? { message: redactSecrets(report.message, { maxChars: 2000 }) } : {}),
     ...(typeof report.summary === "string" ? { summary: redactSecrets(report.summary, { maxChars: 2000 }) } : {}),
@@ -1688,13 +2227,13 @@ export async function applyReport(store, params = {}) {
   };
 
   return store.withWriteTx((db) => {
-    const task = db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(taskId);
+    const task = db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(taskId) as TaskRow | undefined;
     if (!task) throw notFoundError(`task not found: ${taskId}`, { taskId });
 
     if (attemptId) {
       const attempt = db
         .prepare("SELECT * FROM attempts WHERE attempt_id = ? AND task_id = ?")
-        .get(attemptId, taskId);
+        .get(attemptId, taskId) as AttemptRow | undefined;
       if (!attempt) {
         throw notFoundError(`attempt not found: ${attemptId}`, { taskId, attemptId });
       }
@@ -1703,7 +2242,7 @@ export async function applyReport(store, params = {}) {
           .prepare(
             "SELECT event_id, seq FROM events WHERE task_id = ? AND attempt_id = ? AND adapter_event_id = ?",
           )
-          .get(taskId, attemptId, String(adapterEventId));
+          .get(taskId, attemptId, String(adapterEventId)) as { event_id: string; seq: number } | undefined;
         if (dup) {
           return {
             taskId,
@@ -1863,7 +2402,7 @@ export async function applyReport(store, params = {}) {
         );
       }
 
-      const targetState = att.kind === "approval" ? "waiting_approval" : "waiting_input";
+      const targetState: TaskStatus = att.kind === "approval" ? "waiting_approval" : "waiting_input";
       if (task.status === targetState) {
         const evt = appendEventInTx(db, {
           taskId,

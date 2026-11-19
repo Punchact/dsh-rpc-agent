@@ -37,8 +37,11 @@
 // Only bridge-owned sessions are ever touched: every session a human is
 // watching in the GUI keeps its own answerer.
 
+import type { ApprovalState } from "./approval-state.mjs";
+import type { PendingOpenResult, PendingStore } from "./pending.mjs";
 
-export const APPROVAL_MODES = ["off", "deny", "delegate"];
+export const APPROVAL_MODES = ["off", "deny", "delegate"] as const;
+export type ApprovalMode = (typeof APPROVAL_MODES)[number];
 
 /**
  * Escalations this gate is willing to forward. `danger-full-access` is the one
@@ -47,7 +50,8 @@ export const APPROVAL_MODES = ["off", "deny", "delegate"];
  * refused without asking, so a caller can never be talked into a mode the
  * deployment does not offer.
  */
-export const ESCALATION_TARGETS = ["workspace-write", "danger-full-access"];
+export const ESCALATION_TARGETS = ["workspace-write", "danger-full-access"] as const;
+export type EscalationTarget = (typeof ESCALATION_TARGETS)[number];
 
 /** How many escalations one session may win, ever. Delegation is not a grant. */
 export const MAX_ALLOWANCES_PER_SESSION = 3;
@@ -66,6 +70,79 @@ const DENIED_ERROR_CODE = "APPROVAL_DENIED_BY_BRIDGE";
 
 const SECRET_KEY = /(token|secret|password|passwd|api[-_]?key|credential|authorization|cookie)/i;
 
+export interface DescribeArgsResult {
+  argv: string;
+  args: string;
+  truncated: boolean;
+}
+
+export interface ApprovalGateLogger {
+  info?: (message: string) => void;
+  warn?: (message: string) => void;
+}
+
+export interface ApprovalEventInfo {
+  sessionId: string;
+  toolName: string;
+  callId: string;
+  escalation: string;
+}
+
+export interface ApprovalExecSession {
+  id?: string;
+  header?: { cwd?: string | null };
+  meta?: { cwd?: string | null };
+  [key: string]: unknown;
+}
+
+export interface ApprovalExecContext {
+  name?: string;
+  callId?: string;
+  arguments?: Record<string, unknown>;
+  signal?: AbortSignal;
+  agent?: {
+    session?: ApprovalExecSession | null;
+    [key: string]: unknown;
+  } | null;
+  [key: string]: unknown;
+}
+
+export interface ApprovalGate {
+  pre: (...args: any[]) => Promise<unknown>;
+  post: (...args: any[]) => Promise<unknown>;
+  dispose: () => Promise<void>;
+  recover: () => Promise<{ restored: number; failed: number }>;
+  widenedSessions: () => string[];
+}
+
+export interface CreateApprovalGateOptions {
+  mode?: ApprovalMode | string;
+  isOwned?: (sessionId: string) => boolean;
+  onDeny?: (info: ApprovalEventInfo) => void;
+  onAllow?: (info: ApprovalEventInfo) => void;
+  applyPreset?: (sessionId: string, preset: string) => Promise<unknown>;
+  currentPreset?: (sessionId: string) => string | null;
+  store?: PendingStore | null;
+  state?: ApprovalState | null;
+  log?: ApprovalGateLogger | null;
+}
+
+interface ClaimedTarget {
+  sessionId: string;
+  toolName: string;
+  callId: string;
+  session: ApprovalExecSession | null;
+  escalation: string;
+  reservationId?: string | null;
+}
+
+function errorMessage(error: unknown): string {
+  if (error && typeof error === "object" && "message" in error && error.message !== undefined && error.message !== null) {
+    return String(error.message);
+  }
+  return String(error);
+}
+
 /**
  * Read the escalation a pending call is asking for, if any. `sandbox_permissions`
  * is the argument the shell tools use to request a wider sandbox; its absence
@@ -74,14 +151,11 @@ const SECRET_KEY = /(token|secret|password|passwd|api[-_]?key|credential|authori
  * A value we cannot read as a mode is reported verbatim rather than ignored:
  * the whitelist below then refuses it. Silently treating an unreadable request
  * as "no escalation" would fail open on exactly the calls worth looking at.
- *
- * @param {unknown} args parsed tool arguments
- * @returns {string} the requested mode, "" when this is not an escalation
  */
-export function escalationOf(args) {
+export function escalationOf(args: unknown): string {
   if (!args || typeof args !== "object") return "";
   if (!Object.hasOwn(args, "sandbox_permissions")) return "";
-  const requested = args.sandbox_permissions;
+  const requested = (args as Record<string, unknown>).sandbox_permissions;
   if (requested === undefined || requested === null || requested === "") return "";
   if (typeof requested === "string") return requested.trim();
   try {
@@ -97,19 +171,19 @@ export function escalationOf(args) {
  * a harmless looking key — and text substitution alone is not enough either,
  * because a nested object under a sensitive key keeps its children.
  */
-function scrubValue(text) {
+function scrubValue(text: string): string {
   return text.replace(
     /((?:token|secret|password|passwd|api[-_]?key|authorization|cookie)\s*[=:]\s*(?:bearer\s+|basic\s+)?\\?['"]?)([^\s"',;}\\]+)/gi,
-    (_match, head) => `${head}[redacted]`,
+    (_match, head: string) => `${head}[redacted]`,
   );
 }
 
-function redactValue(value, depth = 0) {
+function redactValue(value: unknown, depth = 0): unknown {
   if (depth > 8) return "[redacted: too deep]";
   if (typeof value === "string") return scrubValue(value);
   if (Array.isArray(value)) return value.map((item) => redactValue(item, depth + 1));
   if (value && typeof value === "object") {
-    const out = {};
+    const out: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value)) {
       out[key] = SECRET_KEY.test(key) ? "[redacted]" : redactValue(item, depth + 1);
     }
@@ -126,15 +200,13 @@ function redactValue(value, depth = 0) {
  * `argv` is a *view* of `args`, never a shortcut around it: both are redacted
  * and both are bounded, so a long or secret-bearing command cannot skip the
  * masking that `args` gets.
- *
- * @param {unknown} args parsed tool arguments
- * @returns {{argv: string, args: string, truncated: boolean}}
  */
-export function describeArgs(args) {
+export function describeArgs(args: unknown): DescribeArgsResult {
   if (!args || typeof args !== "object") return { argv: "", args: "", truncated: false };
+  const record = args as Record<string, unknown>;
   let json = "";
   try {
-    json = JSON.stringify(redactValue(args)) ?? "";
+    json = JSON.stringify(redactValue(record)) ?? "";
   } catch {
     json = "";
   }
@@ -143,8 +215,8 @@ export function describeArgs(args) {
   const clipped = truncated
     ? `${safe.slice(0, MAX_ARGV_CHARS)}… (truncated ${safe.length - MAX_ARGV_CHARS} of ${safe.length} chars)`
     : safe;
-  const command = typeof args.command === "string" ? scrubValue(args.command) : "";
-  const target = typeof args.path === "string" ? scrubValue(args.path) : "";
+  const command = typeof record.command === "string" ? scrubValue(record.command) : "";
+  const target = typeof record.path === "string" ? scrubValue(record.path) : "";
   const shorthand = command || target;
   const argv =
     shorthand.length > MAX_ARGV_CHARS
@@ -153,12 +225,12 @@ export function describeArgs(args) {
   return { argv: argv || clipped, args: clipped, truncated };
 }
 
-function denyDecision({ escalation, toolName, why }) {
+function denyDecision({ escalation, toolName, why }: { escalation: string; toolName: string; why: string }) {
   const reason =
     `the dsh-rpc bridge refused a sandbox escalation to "${escalation}" for tool "${toolName}"; ` +
     `the call was not executed. ${why}`;
   return {
-    kind: "deny",
+    kind: "deny" as const,
     reason,
     info: { name: DENIED_ERROR_NAME, code: DENIED_ERROR_CODE, reason },
   };
@@ -168,25 +240,14 @@ function denyDecision({ escalation, toolName, why }) {
  * A call held back only because the session is mid-widening. It is a refusal for
  * this call, but not an escalation decision: nothing about it is counted.
  */
-function holdDecision({ toolName, why }) {
+function holdDecision({ toolName, why }: { toolName: string; why: string }) {
   const reason = `the dsh-rpc bridge held "${toolName}" back for a moment; ${why}`;
-  return { kind: "deny", reason, info: { name: DENIED_ERROR_NAME, code: DENIED_ERROR_CODE, reason } };
+  return { kind: "deny" as const, reason, info: { name: DENIED_ERROR_NAME, code: DENIED_ERROR_CODE, reason } };
 }
 
 /**
  * Build the two listeners the bridge registers. `pre` decides; `post` puts a
  * widened preset back once the approved call has run.
- *
- * @param {object} options
- * @param {"off"|"deny"|"delegate"} options.mode
- * @param {(sessionId: string) => boolean} options.isOwned
- * @param {(info: object) => void} [options.onDeny]
- * @param {(info: object) => void} [options.onAllow]
- * @param {(sessionId: string, preset: string) => Promise<void>} [options.applyPreset]
- * @param {(sessionId: string) => string|null} [options.currentPreset]
- * @param {object} [options.store] pending-approval store (delegate only)
- * @param {{info?: Function, warn?: Function}} [options.log]
- * @returns {{pre: Function, post: Function, widenedSessions: () => string[]} | null}
  */
 export function createApprovalGate({
   mode,
@@ -198,9 +259,9 @@ export function createApprovalGate({
   store,
   state = null,
   log,
-} = {}) {
+}: CreateApprovalGateOptions = {}): ApprovalGate | null {
   if (mode === "off") return null;
-  if (!APPROVAL_MODES.includes(mode)) {
+  if (!mode || !(APPROVAL_MODES as readonly string[]).includes(mode)) {
     log?.warn?.(`[dsh-rpc] approvals.mode "${mode}" is not one of ${APPROVAL_MODES.join(", ")}; approvals stay off`);
     return null;
   }
@@ -217,21 +278,21 @@ export function createApprovalGate({
    * Backed by the on-disk journal when one is supplied: a restart must not hand
    * the session a fresh allowance.
    */
-  const allowances = state?.allowances ?? new Map();
+  const allowances = state?.allowances ?? new Map<string, number>();
   /**
    * sessionId → the preset to put back once the approved call has run. Also the
    * durable record that the Host may still be wide: whatever is left here at the
    * next start is put back by `recover()`.
    */
-  const widened = state?.widened ?? new Map();
+  const widened = state?.widened ?? new Map<string, string>();
   /** callId → how to undo the widening. */
-  const restores = new Map();
-  const pendingApprovals = new Set();
-  const activeOperations = new Set();
-  let recoveryPromise = null;
+  const restores = new Map<string, { restore: () => Promise<boolean>; timer: ReturnType<typeof setTimeout> }>();
+  const pendingApprovals = new Set<PendingOpenResult>();
+  const activeOperations = new Set<Promise<void>>();
+  let recoveryPromise: Promise<{ restored: number; failed: number }> | null = null;
   let closed = false;
 
-  function readPreset(sessionId) {
+  function readPreset(sessionId: string): string | null {
     try {
       const value = currentPreset?.(sessionId);
       return typeof value === "string" && value.length > 0 ? value : null;
@@ -240,7 +301,7 @@ export function createApprovalGate({
     }
   }
 
-  function rollback(target) {
+  function rollback(target: ClaimedTarget): void {
     if (target.reservationId && typeof state?.settleAllowance === "function") {
       state.settleAllowance(target.sessionId, target.reservationId, "refunded");
       return;
@@ -250,10 +311,10 @@ export function createApprovalGate({
     else allowances.set(target.sessionId, used - 1);
   }
 
-  function commit(target) {
+  function commit(target: ClaimedTarget): void {
     if (target.reservationId && typeof state?.settleAllowance === "function") {
       if (!state.settleAllowance(target.sessionId, target.reservationId, "committed")) {
-        const error = new Error("the approval allowance ticket is no longer pending");
+        const error = new Error("the approval allowance ticket is no longer pending") as Error & { code: string };
         error.code = "DSH_RPC_APPROVAL_STATE";
         throw error;
       }
@@ -261,11 +322,11 @@ export function createApprovalGate({
   }
 
   /** One key per (session, call): a bare call id is not unique across sessions. */
-  function restoreKey(sessionId, callId) {
+  function restoreKey(sessionId: string, callId: string): string {
     return `${sessionId}\u0000${callId}`;
   }
 
-  function claim(exec) {
+  function claim(exec: ApprovalExecContext | undefined): ClaimedTarget | null {
     const sessionId = exec?.agent?.session?.id;
     // Ownership is the whole basis for answering on someone else's behalf, so
     // it is checked before anything else — including before trusting the id.
@@ -286,22 +347,35 @@ export function createApprovalGate({
     };
   }
 
-  function refuse(target, why) {
+  function refuse(target: ClaimedTarget, why: string): void {
     try {
-      onDeny?.({ sessionId: target.sessionId, toolName: target.toolName, callId: target.callId, escalation: target.escalation });
+      onDeny?.({
+        sessionId: target.sessionId,
+        toolName: target.toolName,
+        callId: target.callId,
+        escalation: target.escalation,
+      });
     } catch {
       // Accounting must never change the answer.
     }
-    log?.info?.(`[dsh-rpc] refused a sandbox escalation to ${target.escalation} for ${target.toolName} in ${target.sessionId}: ${why}`);
+    log?.info?.(
+      `[dsh-rpc] refused a sandbox escalation to ${target.escalation} for ${target.toolName} in ${target.sessionId}: ${why}`,
+    );
   }
 
-  const pre = async function gateEscalation(exec, next) {
+  const pre = async function gateEscalation(
+    exec: ApprovalExecContext | undefined,
+    next?: () => Promise<unknown>,
+  ): Promise<unknown> {
     const pass = typeof next === "function" ? next : () => Promise.resolve({ kind: "allow" });
     if (closed) return holdDecision({ toolName: exec?.name ?? "unknown", why: "The approval gate is closed." });
     if (recoveryPromise) await recoveryPromise;
     if (closed) return holdDecision({ toolName: exec?.name ?? "unknown", why: "The approval gate is closed." });
     if (state?.pendingWidens?.().some(({ sessionId }) => sessionId === exec?.agent?.session?.id)) {
-      return holdDecision({ toolName: exec?.name ?? "unknown", why: "This session still has an unresolved preset restore." });
+      return holdDecision({
+        toolName: exec?.name ?? "unknown",
+        why: "This session still has an unresolved preset restore.",
+      });
     }
     const target = claim(exec);
     if (!target) return pass();
@@ -322,7 +396,7 @@ export function createApprovalGate({
       return pass();
     }
 
-    if (!ESCALATION_TARGETS.includes(target.escalation)) {
+    if (!(ESCALATION_TARGETS as readonly string[]).includes(target.escalation)) {
       refuse(target, `"${target.escalation}" is not a documented escalation`);
       return denyDecision({
         escalation: target.escalation,
@@ -332,7 +406,7 @@ export function createApprovalGate({
     }
 
     if (!delegating) {
-      refuse(target, "approvals.mode is \"deny\"");
+      refuse(target, 'approvals.mode is "deny"');
       return denyDecision({
         escalation: target.escalation,
         toolName: target.toolName,
@@ -431,7 +505,7 @@ export function createApprovalGate({
         ? scrubValue(exec.arguments.sandbox_justification).slice(0, MAX_REASON_CHARS)
         : null;
 
-    const opened = store.open(
+    const opened = store!.open(
       {
         sessionId: target.sessionId,
         toolName: target.toolName,
@@ -449,7 +523,7 @@ export function createApprovalGate({
       },
       { signal: exec?.signal },
     );
-    const { approvalId, packet } = opened;
+    const { approvalId } = opened;
     pendingApprovals.add(opened);
     log?.info?.(
       `[dsh-rpc] holding ${target.toolName} in ${target.sessionId}: approval ${approvalId} asks the caller ` +
@@ -461,7 +535,10 @@ export function createApprovalGate({
     if (closed || answer.decision !== "allow-once") {
       widened.delete(target.sessionId);
       rollback(target);
-      refuse(target, `${closed ? "the approval gate closed" : `the caller did not allow it (${answer.decision}${answer.note ? `: ${answer.note}` : ""})`}`);
+      refuse(
+        target,
+        `${closed ? "the approval gate closed" : `the caller did not allow it (${answer.decision}${answer.note ? `: ${answer.note}` : ""})`}`,
+      );
       return denyDecision({
         escalation: target.escalation,
         toolName: target.toolName,
@@ -472,8 +549,10 @@ export function createApprovalGate({
       });
     }
 
-    let leaveOperation;
-    const activeOperation = new Promise((resolve) => { leaveOperation = resolve; });
+    let leaveOperation!: () => void;
+    const activeOperation = new Promise<void>((resolvePromise) => {
+      leaveOperation = resolvePromise;
+    });
     activeOperations.add(activeOperation);
     if (closed) {
       activeOperations.delete(activeOperation);
@@ -483,12 +562,12 @@ export function createApprovalGate({
       return holdDecision({ toolName: target.toolName, why: "The approval gate is closed." });
     }
     try {
-      await applyPreset(target.sessionId, target.escalation);
-    } catch (error) {
+      await applyPreset!(target.sessionId, target.escalation);
+    } catch (error: unknown) {
       try {
         widened.delete(target.sessionId);
         rollback(target);
-        refuse(target, `widening the preset failed: ${error?.message ?? String(error)}`);
+        refuse(target, `widening the preset failed: ${errorMessage(error)}`);
         return denyDecision({
           escalation: target.escalation,
           toolName: target.toolName,
@@ -502,25 +581,25 @@ export function createApprovalGate({
 
     if (closed) {
       try {
-        await applyPreset(target.sessionId, previous);
+        await applyPreset!(target.sessionId, previous);
         widened.delete(target.sessionId);
         rollback(target);
-      } catch (error) {
-        log?.warn?.(`[dsh-rpc] could not restore ${target.sessionId} after shutdown: ${error?.message ?? String(error)}`);
+      } catch (error: unknown) {
+        log?.warn?.(`[dsh-rpc] could not restore ${target.sessionId} after shutdown: ${errorMessage(error)}`);
       } finally {
         activeOperations.delete(activeOperation);
         leaveOperation();
       }
       return holdDecision({ toolName: target.toolName, why: "The approval gate closed while applying the preset." });
     }
-    const restore = async () => {
+    const restore = async (): Promise<boolean> => {
       try {
-        await applyPreset(target.sessionId, previous);
+        await applyPreset!(target.sessionId, previous);
         widened.delete(target.sessionId);
         log?.info?.(`[dsh-rpc] restored ${target.sessionId} to ${previous} (${approvalId})`);
         return true;
-      } catch (error) {
-        log?.warn?.(`[dsh-rpc] could not restore ${target.sessionId} to ${previous}: ${error?.message ?? String(error)}`);
+      } catch (error: unknown) {
+        log?.warn?.(`[dsh-rpc] could not restore ${target.sessionId} to ${previous}: ${errorMessage(error)}`);
         return false;
       }
     };
@@ -531,10 +610,10 @@ export function createApprovalGate({
     // put back *before* the error leaves this function, otherwise the session
     // stays wide and `widened` keeps the session blocked forever.
     try {
-      let downstream;
+      let downstream: unknown;
       try {
         downstream = await pass();
-      } catch (error) {
+      } catch (error: unknown) {
         const restored = await restore();
         if (restored) rollback(target);
         throw error;
@@ -544,12 +623,24 @@ export function createApprovalGate({
         if (restored) rollback(target);
         return restored
           ? holdDecision({ toolName: target.toolName, why: "The approval gate closed while the downstream listener was running." })
-          : denyDecision({ escalation: target.escalation, toolName: target.toolName, why: "The approved preset could not be restored; further session calls are held until recovery succeeds." });
+          : denyDecision({
+              escalation: target.escalation,
+              toolName: target.toolName,
+              why: "The approved preset could not be restored; further session calls are held until recovery succeeds.",
+            });
       }
-      if (downstream?.kind !== "allow") {
+      const downstreamKind =
+        downstream && typeof downstream === "object" && "kind" in downstream ? (downstream as { kind?: unknown }).kind : undefined;
+      if (downstreamKind !== "allow") {
         const restored = await restore();
         if (restored) rollback(target);
-        return restored ? downstream : denyDecision({ escalation: target.escalation, toolName: target.toolName, why: "The approved preset could not be restored; further session calls are held until recovery succeeds." });
+        return restored
+          ? downstream
+          : denyDecision({
+              escalation: target.escalation,
+              toolName: target.toolName,
+              why: "The approved preset could not be restored; further session calls are held until recovery succeeds.",
+            });
       }
 
       // Keyed by session *and* call: two sessions can use the same call id
@@ -557,7 +648,7 @@ export function createApprovalGate({
       // completion restore the other's preset while its call is still running.
       try {
         commit(target);
-      } catch (error) {
+      } catch (error: unknown) {
         const restored = await restore();
         if (restored) rollback(target);
         throw error;
@@ -571,7 +662,12 @@ export function createApprovalGate({
       restores.set(key, { restore, timer });
 
       try {
-        onAllow?.({ sessionId: target.sessionId, toolName: target.toolName, callId: target.callId, escalation: target.escalation });
+        onAllow?.({
+          sessionId: target.sessionId,
+          toolName: target.toolName,
+          callId: target.callId,
+          escalation: target.escalation,
+        });
       } catch {
         // Accounting must never change the answer.
       }
@@ -594,7 +690,11 @@ export function createApprovalGate({
    * happened in 0.7.5: this handler was written as `(exec, next)`, so it treated
    * the *result* as the continuation, never called it, and returned undefined.
    */
-  const post = async function restoreAfterRun(exec, result, next) {
+  const post = async function restoreAfterRun(
+    exec: ApprovalExecContext | undefined,
+    _result?: unknown,
+    next?: () => Promise<unknown>,
+  ): Promise<unknown> {
     const callId = typeof exec?.callId === "string" ? exec.callId : "";
     const sessionId = exec?.agent?.session?.id;
     const key = callId && typeof sessionId === "string" ? restoreKey(sessionId, callId) : "";
@@ -617,12 +717,12 @@ export function createApprovalGate({
    * the plugin's `ctx.effect`: a reload or shutdown must not leave a session
    * running wide with nothing left to restore it.
    */
-  async function dispose() {
+  async function dispose(): Promise<void> {
     if (closed) return;
     closed = true;
     for (const opened of [...pendingApprovals]) {
-      if (typeof store.resolve === "function") store.resolve(opened.approvalId, "reject", "approval gate disposed");
-      else store.cancelAll?.();
+      if (typeof store?.resolve === "function") store.resolve(opened.approvalId, "reject", "approval gate disposed");
+      else store?.cancelAll?.();
     }
     await Promise.all([...activeOperations]);
     for (const [, entry] of [...restores]) {
@@ -633,11 +733,11 @@ export function createApprovalGate({
     for (const [sessionId, previous] of [...widened]) {
       try {
         if (typeof applyPreset !== "function") throw new Error("preset setter is unavailable");
-        await applyPreset(sessionId, previous);
+        await applyPreset(sessionId, previous!);
         widened.delete(sessionId);
         log?.info?.(`[dsh-rpc] restored ${sessionId} to ${previous} on shutdown`);
-      } catch (error) {
-        log?.warn?.(`[dsh-rpc] could not restore ${sessionId} on shutdown: ${error?.message ?? String(error)}`);
+      } catch (error: unknown) {
+        log?.warn?.(`[dsh-rpc] could not restore ${sessionId} on shutdown: ${errorMessage(error)}`);
       }
     }
   }
@@ -646,34 +746,47 @@ export function createApprovalGate({
   // failure inside a listener degrades to "this gate does not exist": the call is
   // passed through untouched. 0.7.5 shipped without this, and one wrong arity in
   // `post` took down every tool call in the Host.
-  const guarded = (listener, whenBroken) => async function guardedListener(...args) {
-    const continuationIndex = args.length - 1;
-    const continuation = args[continuationIndex];
-    let continuationCalled = false;
-    const guardedArgs = [...args];
-    if (typeof continuation === "function") {
-      guardedArgs[continuationIndex] = (...continuationArgs) => {
-        continuationCalled = true;
-        return continuation(...continuationArgs);
-      };
-    }
-    try {
-      return await listener(...guardedArgs);
-    } catch (error) {
-      if (continuationCalled) throw error;
-      if (error?.code === "DSH_RPC_APPROVAL_STATE") {
-        log?.warn?.(`[dsh-rpc] approval journal failed; holding the call: ${error.message}`);
-        return holdDecision({ toolName: args[0]?.name, why: "The approval journal is unavailable; restore it before retrying." });
+  const guarded =
+    <TArgs extends any[]>(
+      listener: (...args: TArgs) => Promise<unknown>,
+      whenBroken: (...args: TArgs) => Promise<unknown>,
+    ) =>
+    async function guardedListener(...args: TArgs): Promise<unknown> {
+      const continuationIndex = args.length - 1;
+      const continuation = args[continuationIndex] as ((...cArgs: unknown[]) => unknown) | undefined;
+      let continuationCalled = false;
+      const guardedArgs = [...args] as TArgs;
+      if (typeof continuation === "function") {
+        (guardedArgs as unknown[])[continuationIndex] = (...continuationArgs: unknown[]) => {
+          continuationCalled = true;
+          return continuation(...continuationArgs);
+        };
       }
-      const message = error && error.message ? error.message : String(error);
-      log?.warn?.("[dsh-rpc] approval gate failed, passing the call through: " + message);
-      return whenBroken(...args);
-    }
-  };
+      try {
+        return await listener(...guardedArgs);
+      } catch (error: unknown) {
+        if (continuationCalled) throw error;
+        const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+        if (code === "DSH_RPC_APPROVAL_STATE") {
+          log?.warn?.(`[dsh-rpc] approval journal failed; holding the call: ${errorMessage(error)}`);
+          const first = args[0] as ApprovalExecContext | undefined;
+          return holdDecision({
+            toolName: typeof first?.name === "string" ? first.name : "unknown",
+            why: "The approval journal is unavailable; restore it before retrying.",
+          });
+        }
+        log?.warn?.("[dsh-rpc] approval gate failed, passing the call through: " + errorMessage(error));
+        return whenBroken(...args);
+      }
+    };
 
-  const passThrough = (exec, next) => (typeof next === "function" ? next() : Promise.resolve({ kind: "allow" }));
-  const acceptThrough = (exec, result, next) =>
-    typeof next === "function" ? next() : Promise.resolve({ kind: "accept" });
+  const passThrough = (_exec?: ApprovalExecContext, next?: () => Promise<unknown>): Promise<unknown> =>
+    typeof next === "function" ? next() : Promise.resolve({ kind: "allow" });
+  const acceptThrough = (
+    _exec?: ApprovalExecContext,
+    _result?: unknown,
+    next?: () => Promise<unknown>,
+  ): Promise<unknown> => (typeof next === "function" ? next() : Promise.resolve({ kind: "accept" }));
 
   /**
    * Put back presets this bridge left wide in an earlier life.
@@ -682,7 +795,7 @@ export function createApprovalGate({
    * record that a session may still be widened. Keep failed restores journaled
    * and block that session's calls until a later recovery succeeds.
    */
-  async function recover() {
+  async function recover(): Promise<{ restored: number; failed: number }> {
     if (recoveryPromise) return recoveryPromise;
     recoveryPromise = recoverPending();
     try {
@@ -692,7 +805,7 @@ export function createApprovalGate({
     }
   }
 
-  async function recoverPending() {
+  async function recoverPending(): Promise<{ restored: number; failed: number }> {
     const pending = typeof state?.pendingWidens === "function" ? state.pendingWidens() : [];
     if (pending.length === 0) return { restored: 0, failed: 0 };
     let restored = 0;
@@ -700,14 +813,15 @@ export function createApprovalGate({
     for (const { sessionId, previous } of pending) {
       try {
         if (typeof applyPreset !== "function") throw new Error("preset setter is unavailable");
+        if (!previous) throw new Error("missing previous preset");
         await applyPreset(sessionId, previous);
         widened.delete(sessionId);
         restored += 1;
         log?.info?.(`[dsh-rpc] put ${sessionId} back to "${previous}" after an unclean stop`);
-      } catch (error) {
+      } catch (error: unknown) {
         failed += 1;
         log?.warn?.(
-          `[dsh-rpc] could not put ${sessionId} back to "${previous}" (${error?.message ?? error}); check that session's preset`,
+          `[dsh-rpc] could not put ${sessionId} back to "${previous}" (${errorMessage(error)}); check that session's preset`,
         );
       }
     }
@@ -721,5 +835,4 @@ export function createApprovalGate({
     recover,
     widenedSessions: () => [...widened.keys()],
   };
-
 }

@@ -23,17 +23,129 @@ import { randomUUID } from "node:crypto";
 /** Hard ceiling on simultaneous pending entries; beyond it the oldest expires. */
 export const MAX_PENDING = 32;
 
-/**
- * @param {object} [options]
- * @param {number} [options.deadlineMs] how long an unanswered request waits
- * @param {() => number} [options.now] clock, injectable for tests
- * @param {{warn?: Function}} [options.log]
- */
-export function createPendingStore({ deadlineMs = 60_000, now = Date.now, log } = {}) {
-  const entries = new Map();
-  const waiters = new Set();
+export const APPROVAL_DECISIONS = Object.freeze(["allow-once", "reject"] as const);
+export type ApprovalDecision = (typeof APPROVAL_DECISIONS)[number];
 
-  function notify() {
+export const PENDING_OUTCOMES = Object.freeze([
+  "allow-once",
+  "reject",
+  "expired",
+  "cancelled",
+] as const);
+export type PendingOutcome = (typeof PENDING_OUTCOMES)[number];
+
+export const PENDING_STATES = Object.freeze(["pending", ...PENDING_OUTCOMES] as const);
+export type PendingApprovalState = (typeof PENDING_STATES)[number];
+
+export const PENDING_TRANSITIONS: Readonly<Record<PendingApprovalState, readonly PendingOutcome[]>> = Object.freeze<
+  Record<PendingApprovalState, readonly PendingOutcome[]>
+>({
+  pending: Object.freeze(["allow-once", "reject", "expired", "cancelled"]),
+  "allow-once": Object.freeze([]),
+  reject: Object.freeze([]),
+  expired: Object.freeze([]),
+  cancelled: Object.freeze([]),
+});
+
+export interface PendingApprovalPacket {
+  approvalId: string;
+  sessionId?: string;
+  toolName?: string;
+  callId?: string;
+  escalation?: unknown;
+  argv?: unknown;
+  cwd?: string | null;
+  preset?: string | null;
+  reason?: string | null;
+  createdAt: number;
+  expiresAt: number;
+  [key: string]: unknown;
+}
+
+export interface PendingResolutionOutcome {
+  decision: PendingOutcome | string;
+  note: string | null;
+}
+
+export interface PendingOpenOptions {
+  signal?: AbortSignal;
+}
+
+export interface PendingOpenResult {
+  approvalId: string;
+  packet: PendingApprovalPacket;
+  promise: Promise<PendingResolutionOutcome>;
+}
+
+export interface PendingResolveResult {
+  resolved: boolean;
+  sessionId?: string;
+  toolName?: string;
+  decision?: ApprovalDecision | string;
+}
+
+export interface PendingWaitOptions {
+  sessionId?: string;
+  waitMs?: number;
+  signal?: AbortSignal | null;
+}
+
+export interface PendingWaitResult {
+  pending: PendingApprovalPacket[];
+  timedOut: boolean;
+  aborted?: boolean;
+}
+
+export interface PendingWatchResult {
+  promise: Promise<PendingApprovalPacket>;
+  cancel: () => void;
+}
+
+export interface PendingStoreLogger {
+  warn?: (message: string) => void;
+}
+
+export interface CreatePendingStoreOptions {
+  deadlineMs?: number;
+  now?: () => number;
+  log?: PendingStoreLogger | null;
+}
+
+export interface PendingStore {
+  open(packet: Record<string, unknown>, options?: PendingOpenOptions): PendingOpenResult;
+  open(...args: any[]): PendingOpenResult;
+  resolve(
+    approvalId: string,
+    decision: ApprovalDecision | string,
+    note?: string | null,
+  ): PendingResolveResult;
+  list(sessionId?: string): PendingApprovalPacket[];
+  waitForAny(options?: PendingWaitOptions): Promise<PendingWaitResult>;
+  watch(sessionId: string): PendingWatchResult;
+  size(): number;
+  readonly deadlineMs: number;
+  cancelAll?: () => void;
+}
+
+interface PendingEntry {
+  approvalId: string;
+  packet: PendingApprovalPacket;
+  settle: (outcome: PendingResolutionOutcome) => void;
+  timer: ReturnType<typeof setTimeout> | null;
+  done: boolean;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+}
+
+export function createPendingStore({
+  deadlineMs = 60_000,
+  now = Date.now,
+  log,
+}: CreatePendingStoreOptions = {}): PendingStore {
+  const entries = new Map<string, PendingEntry>();
+  const waiters = new Set<() => void>();
+
+  function notify(): void {
     for (const waiter of [...waiters]) {
       try {
         waiter();
@@ -43,8 +155,8 @@ export function createPendingStore({ deadlineMs = 60_000, now = Date.now, log } 
     }
   }
 
-  function finish(entry, outcome) {
-    if (entry.done) return false;
+  function finish(entry: PendingEntry | undefined, outcome: PendingResolutionOutcome): boolean {
+    if (!entry || entry.done) return false;
     entry.done = true;
     if (entry.timer) clearTimeout(entry.timer);
     if (entry.onAbort) entry.signal?.removeEventListener?.("abort", entry.onAbort);
@@ -56,22 +168,17 @@ export function createPendingStore({ deadlineMs = 60_000, now = Date.now, log } 
 
   /**
    * Register a question and return the promise the gate will await.
-   *
-   * @param {object} packet fields the caller needs to decide
-   * @param {object} [options]
-   * @param {AbortSignal} [options.signal] the call being held; aborting it withdraws the question
-   * @returns {{approvalId: string, packet: object, promise: Promise<{decision: string, note: string|null}>}}
    */
-  function open(packet, { signal } = {}) {
+  function open(packet: Record<string, unknown>, { signal }: PendingOpenOptions = {}): PendingOpenResult {
     const approvalId = `apv-${randomUUID()}`;
-    let settle;
-    const promise = new Promise((resolve) => {
-      settle = resolve;
+    let settle!: (outcome: PendingResolutionOutcome) => void;
+    const promise = new Promise<PendingResolutionOutcome>((resolvePromise) => {
+      settle = resolvePromise;
     });
     const createdAt = now();
-    const entry = {
+    const entry: PendingEntry = {
       approvalId,
-      packet: { approvalId, ...packet, createdAt, expiresAt: createdAt + deadlineMs },
+      packet: { ...packet, approvalId, createdAt, expiresAt: createdAt + deadlineMs },
       settle,
       timer: null,
       done: false,
@@ -105,7 +212,7 @@ export function createPendingStore({ deadlineMs = 60_000, now = Date.now, log } 
     }
 
     while (entries.size > MAX_PENDING) {
-      const oldest = entries.keys().next().value;
+      const oldest = entries.keys().next().value as string;
       log?.warn?.(`[dsh-rpc] approval ${oldest} dropped: too many pending requests`);
       finish(entries.get(oldest), { decision: "expired", note: "dropped: too many pending requests" });
     }
@@ -115,13 +222,12 @@ export function createPendingStore({ deadlineMs = 60_000, now = Date.now, log } 
 
   /**
    * Answer a pending question.
-   *
-   * @param {string} approvalId
-   * @param {"allow-once" | "reject"} decision
-   * @param {string|null} [note]
-   * @returns {{resolved: boolean, sessionId?: string, toolName?: string, decision?: string}}
    */
-  function resolve(approvalId, decision, note = null) {
+  function resolve(
+    approvalId: string,
+    decision: ApprovalDecision | string,
+    note: string | null = null,
+  ): PendingResolveResult {
     const entry = entries.get(approvalId);
     if (!entry) return { resolved: false };
     const { sessionId, toolName } = entry.packet;
@@ -129,9 +235,8 @@ export function createPendingStore({ deadlineMs = 60_000, now = Date.now, log } 
     return { resolved, sessionId, toolName, decision };
   }
 
-  /** @param {string} [sessionId] */
-  function list(sessionId) {
-    const out = [];
+  function list(sessionId?: string): PendingApprovalPacket[] {
+    const out: PendingApprovalPacket[] = [];
     for (const entry of entries.values()) {
       if (typeof sessionId === "string" && entry.packet.sessionId !== sessionId) continue;
       out.push({ ...entry.packet });
@@ -141,24 +246,19 @@ export function createPendingStore({ deadlineMs = 60_000, now = Date.now, log } 
 
   /**
    * Wait until at least one entry exists (or the wait expires).
-   *
-   * @param {object} [options]
-   * @param {string} [options.sessionId]
-   * @param {number} [options.waitMs]
-   * @param {AbortSignal} [options.signal]
    */
-  async function waitForAny({ sessionId, waitMs = 0, signal } = {}) {
+  async function waitForAny({ sessionId, waitMs = 0, signal }: PendingWaitOptions = {}): Promise<PendingWaitResult> {
     const immediate = list(sessionId);
     // A caller whose own call was cancelled is not going to answer anything;
     // resolving "timed out" at once keeps it from sitting out the whole budget.
     if (signal?.aborted === true) return { pending: immediate, timedOut: true, aborted: true };
     if (immediate.length > 0 || waitMs <= 0) return { pending: immediate, timedOut: immediate.length === 0 };
     const budget = Math.min(Math.max(Math.trunc(waitMs), 0), 120_000);
-    return new Promise((resolveResult) => {
+    return new Promise<PendingWaitResult>((resolveResult) => {
       let done = false;
-      let timer = null;
+      let timer: ReturnType<typeof setTimeout> | null = null;
 
-      const settle = (timedOut) => {
+      const settle = (timedOut: boolean): void => {
         if (done) return;
         done = true;
         if (timer) clearTimeout(timer);
@@ -166,10 +266,10 @@ export function createPendingStore({ deadlineMs = 60_000, now = Date.now, log } 
         signal?.removeEventListener?.("abort", onAbort);
         resolveResult({ pending: list(sessionId), timedOut });
       };
-      const check = () => {
+      const check = (): void => {
         if (list(sessionId).length > 0) settle(false);
       };
-      const onAbort = () => settle(true);
+      const onAbort = (): void => settle(true);
       waiters.add(check);
       timer = setTimeout(() => settle(true), budget);
       timer.unref?.();
@@ -185,17 +285,14 @@ export function createPendingStore({ deadlineMs = 60_000, now = Date.now, log } 
    * `dsh.approvals.pending`, so the deadline would always expire first. Racing the
    * stream against this promise lets the turn hand back "I am blocked on an
    * approval" while the approval is still open.
-   *
-   * @param {string} sessionId
-   * @returns {{promise: Promise<object>, cancel: () => void}}
    */
-  function watch(sessionId) {
-    let resolveWatch;
-    const promise = new Promise((resolve) => {
-      resolveWatch = resolve;
+  function watch(sessionId: string): PendingWatchResult {
+    let resolveWatch!: (packet: PendingApprovalPacket) => void;
+    const promise = new Promise<PendingApprovalPacket>((resolvePromise) => {
+      resolveWatch = resolvePromise;
     });
     let active = true;
-    const check = () => {
+    const check = (): void => {
       if (!active) return;
       const found = list(sessionId);
       if (found.length === 0) return;
@@ -207,7 +304,7 @@ export function createPendingStore({ deadlineMs = 60_000, now = Date.now, log } 
     check();
     return {
       promise,
-      cancel() {
+      cancel(): void {
         if (!active) return;
         active = false;
         waiters.delete(check);

@@ -822,3 +822,14 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 - `client.js` 按规划兜底策略原地保留：`dist/client.js` 仍由 `build.mjs` 从根目录 `client.js` 逐字节复制到 `dist/client.js`；根目录 `client.js` 仅在顶部加入 `// @ts-check` 与纯注释 `@typedef`/`@param`/`@returns`/`@type`/`@ts-expect-error`（零非注释代码改动，仅注释增量使 `client.js` 为 `24,525` B / SHA-256 `933020cf...`），同时通过严格 `checkJs`（`es2023` + `dom` 零诊断）及 `dist/client.js` SHA-256 保真断言。
 
 **怎么钉住**：`test/index-wiring.test.mjs` 新增两项测试：① 纯内存 `CompilerHost` 编译期探针，验证 `src/index.mts` 导出契约正反两面在 `tsc` 编译期被准确校验；② 对 `dist/client.js` 执行严格 `checkJs` 零诊断校验与模拟 `window.__ModuleLoader__` 装载测试（验证注册 `settings.section` / `dsh-rpc-status`）。
+
+## 57. 决策 0.9.4-b：账本与审批域（`engine` / `approvals` / `approval-state` / `pending`）类型化
+
+**现象**。PR 5a 将任务引擎 `lib/tasks/engine.mjs` 与审批栈 `lib/approvals.mjs`、`lib/approval-state.mjs`、`lib/pending.mjs` 迁入 `src/**/*.mts` 并移除此前临时的 `types/lib/{approval-state,approvals,pending,tasks/engine}.d.mts` 桥接声明。过程中发现两处“先写临时 `.d.mts` 桥接、后迁真身”留下的契约漂移：`types/lib/tasks/engine.d.mts` 与 `src/lib/methods.mts` 将 `TasksEventsResult.events[]` 写成 `{ at, data }`（真身返回值是 `{ createdAt, payload, eventId, taskId, source, adapterEventId, evidence }`），且 `types/lib/approval-state.d.mts` 曾把 `reserveAllowance(sessionId)` 的返回值误写成对象（真身返回值是 `string | null` 预约票据 ID）；此外 `src/lib/tasks/store.mts` 在 PR 2a 已定义并拥有 15 张表行类型（`TaskRow`/`AttentionRow`/`EventRow`/`AttemptRow` 等）。
+
+**取舍（行类型归哪一层 & 状态穷尽）**。
+- **行类型归属存储层（`store.mts`）而非领域层（`engine.mts`）**：15 张表的原始 SQLite 列结构（含 `snake_case` 字段、JSON 文本列、`0/1` 整数布尔位）唯一由 `src/lib/tasks/store.mts` 定义与演化；`src/lib/tasks/engine.mts` 只 `import type` 并再导出这些 `*Row` 类型，绝不另起一份重复定义。`engine.mts` 自己拥有的则是**领域投影与 API 契约**（`TaskProjection`、`TaskEventProjection`、`DerivedPhase`、`DerivePhaseTaskInput`、`AttentionOnceInTxParams` 以及 `submit/get/list/events/cancel/decideApproval/resolve/recordAttemptStart/applyReport/input/readArtifact` 的入参与返回形状）。
+- **审批域状态迁移表的编译期穷尽**：`src/lib/approval-state.mts` 为预约票据生命周期定义 `RESERVATION_STATES`（`["pending", "committed", "refunded"] as const`）、`SETTLE_OUTCOMES` 与 `RESERVATION_TRANSITIONS: Record<ReservationState, readonly ReservationState[]>`；`src/lib/pending.mts` 为挂起审批定义 `PENDING_STATES`、`PENDING_OUTCOMES` 与 `PENDING_TRANSITIONS: Record<PendingApprovalState, readonly PendingOutcome[]>`；`src/lib/approvals.mts` 固化 `APPROVAL_MODES` 与 `ESCALATION_TARGETS` 元组联合。缺任意一态的迁移项均会在 `tsc` 编译期报错。
+- **调用方最小对齐**：仅在 `src/lib/methods.mts` 将 `TasksEventsResult` 改为复用 `engine.mts` 导出的真身 `TaskEventsResult`、将 `PendingApprovalPacket` 改为复用 `pending.mts` 导出的单一真身，零运行时行为改变。
+
+**怎么钉住**：`test/tasks-engine.test.mjs` 新增纯内存 `CompilerHost` 编译期契约测试，覆盖 `*Row`、`TaskProjection`、`derivePhase`、`AttentionOnceInTxParams` 与 `TaskEngine` 正反两面；`test/approval-state.test.mjs` 新增运行时穷尽断言与编译期负向用例，校验 `RESERVATION_TRANSITIONS`、`PENDING_TRANSITIONS`、`APPROVAL_MODES`、`ESCALATION_TARGETS` 与缺键拒绝。

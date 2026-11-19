@@ -14,33 +14,135 @@ import { randomUUID } from "node:crypto";
 
 import { stateDir } from "./auth.mjs";
 
-export const APPROVAL_STATE_VERSION = 2;
+export const APPROVAL_STATE_VERSION = 2 as const;
 export const STATE_TTL_MS = 7 * 24 * 60 * 60_000;
 export const MAX_STATE_SESSIONS = 2_000;
 export const MAX_PENDING_ALLOWANCES = 3;
 const LOCK_TIMEOUT_MS = 10_000;
 const WAIT_BUFFER = new Int32Array(new SharedArrayBuffer(4));
 
-export function approvalStatePath(env = process.env) {
+export const RESERVATION_STATES = Object.freeze(["pending", "committed", "refunded"] as const);
+export type ReservationState = (typeof RESERVATION_STATES)[number];
+
+export const SETTLE_OUTCOMES = Object.freeze(["committed", "refunded"] as const);
+export type SettleOutcome = (typeof SETTLE_OUTCOMES)[number];
+
+/**
+ * Exhaustive ticket-reservation transition table for persisted approval allowances.
+ */
+export const RESERVATION_TRANSITIONS: Readonly<Record<ReservationState, readonly ReservationState[]>> =
+  Object.freeze<Record<ReservationState, readonly ReservationState[]>>({
+    pending: Object.freeze(["committed", "refunded"]),
+    committed: Object.freeze([]),
+    refunded: Object.freeze([]),
+  });
+
+export interface ApprovalLedgerRecord {
+  ledgerVersion: number;
+  ledgerEpoch: string;
+  sequence: number;
+  legacyBase: number;
+  legacyCommitted: number;
+  legacyPending: Record<string, "pending">;
+  committedUsed: number;
+  reservations: Record<string, "pending">;
+  used: number;
+  owned: boolean;
+  widenedTo: string | null;
+  updatedAt: number;
+  rev: number;
+}
+
+export interface ApprovalStateFile {
+  version: number;
+  sessions: Record<string, ApprovalLedgerRecord>;
+}
+
+export interface ApprovalStateLogger {
+  warn?: (message: string) => void;
+}
+
+export interface CreateApprovalStateOptions {
+  file?: string;
+  log?: ApprovalStateLogger | null;
+  now?: () => number;
+}
+
+export interface ApprovalStateError extends Error {
+  code: "DSH_RPC_APPROVAL_STATE";
+}
+
+export interface ApprovalAllowancesMap {
+  get(sessionId: string): number | undefined;
+  has(sessionId: string): boolean;
+  set(sessionId: string, used: number): this;
+  delete(sessionId: string): boolean;
+  readonly size: number;
+  keys(): IterableIterator<string>;
+}
+
+export interface ApprovalWidenedMap {
+  get(sessionId: string): string | undefined;
+  has(sessionId: string): boolean;
+  set(sessionId: string, previous: string): this;
+  delete(sessionId: string): boolean;
+  readonly size: number;
+  keys(): IterableIterator<string>;
+  entries(): IterableIterator<[string, string | null]>;
+  [Symbol.iterator](): IterableIterator<[string, string | null]>;
+}
+
+export interface ApprovalOwnedMap {
+  get(sessionId: string): number | undefined;
+  has(sessionId: string): boolean;
+  set(sessionId: string, stamp?: number): this;
+  delete(sessionId: string): boolean;
+  readonly size: number;
+  keys(): IterableIterator<string>;
+}
+
+export interface PendingWidenEntry {
+  sessionId: string;
+  previous: string | null;
+}
+
+export interface ApprovalState {
+  readonly path: string;
+  reserveAllowance: (sessionId: string) => string | null;
+  settleAllowance: (sessionId: string, reservationId: string, status: SettleOutcome | string) => boolean;
+  allowances: ApprovalAllowancesMap;
+  widened: ApprovalWidenedMap;
+  owned: ApprovalOwnedMap;
+  pendingWidens(): PendingWidenEntry[];
+  prune(): void;
+}
+
+export function approvalStatePath(env: Record<string, string | undefined> = process.env): string {
   return join(stateDir(env), "approvals.json");
 }
 
-function emptyState() {
-  return { version: APPROVAL_STATE_VERSION, sessions: Object.create(null) };
+function emptyState(): ApprovalStateFile {
+  return { version: APPROVAL_STATE_VERSION, sessions: Object.create(null) as Record<string, ApprovalLedgerRecord> };
 }
 
-function isRecord(value) {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function normalizePending(value) {
+function normalizePending(value: unknown): Record<string, "pending"> {
   if (!isRecord(value)) return {};
-  return Object.fromEntries(Object.entries(value).filter(([id, status]) => id && status === "pending"));
+  return Object.fromEntries(
+    Object.entries(value).filter((entry): entry is [string, "pending"] => Boolean(entry[0]) && entry[1] === "pending"),
+  );
 }
 
-function migrateLegacy(record) {
+function migrateLegacy(record: Record<string, unknown>): {
+  legacyBase: number;
+  legacyCommitted: number;
+  legacyPending: Record<string, "pending">;
+} {
   const reservations = isRecord(record.reservations) ? record.reservations : {};
-  const legacyPending = {};
+  const legacyPending: Record<string, "pending"> = {};
   let legacyCommitted = 0;
   for (const [id, status] of Object.entries(reservations)) {
     if (!id) continue;
@@ -50,15 +152,16 @@ function migrateLegacy(record) {
       legacyCommitted += 1;
     }
   }
-  const legacyBase = Number.isInteger(record.baseUsed) && record.baseUsed >= 0
-    ? record.baseUsed
-    : Object.keys(reservations).length === 0 && Number.isInteger(record.used) && record.used > 0
-      ? record.used
-      : 0;
+  const legacyBase =
+    typeof record.baseUsed === "number" && Number.isInteger(record.baseUsed) && record.baseUsed >= 0
+      ? record.baseUsed
+      : Object.keys(reservations).length === 0 && typeof record.used === "number" && Number.isInteger(record.used) && record.used > 0
+        ? record.used
+        : 0;
   return { legacyBase, legacyCommitted, legacyPending };
 }
 
-function usageOf(record) {
+function usageOf(record: ApprovalLedgerRecord): number {
   const legacyUsed = Math.max(
     record.legacyBase,
     record.legacyCommitted + Object.keys(record.legacyPending).length,
@@ -66,35 +169,45 @@ function usageOf(record) {
   return legacyUsed + record.committedUsed + Object.keys(record.reservations).length;
 }
 
-function sanitize(input, now) {
+function sanitize(input: unknown, now: number): ApprovalStateFile {
   const state = emptyState();
   if (!isRecord(input) || !isRecord(input.sessions)) return state;
-  const entries = [];
+  const entries: Array<[string, ApprovalLedgerRecord]> = [];
   for (const [sessionId, raw] of Object.entries(input.sessions)) {
     if (!sessionId || !isRecord(raw)) continue;
-    const updatedAt = Number.isFinite(raw.updatedAt) ? raw.updatedAt : 0;
+    const updatedAt = typeof raw.updatedAt === "number" && Number.isFinite(raw.updatedAt) ? raw.updatedAt : 0;
     const current = raw.ledgerVersion === 2;
     const legacy = current
       ? {
-          legacyBase: Number.isInteger(raw.legacyBase) ? Math.max(0, raw.legacyBase) : 0,
-          legacyCommitted: Number.isInteger(raw.legacyCommitted) ? Math.max(0, raw.legacyCommitted) : 0,
+          legacyBase:
+            typeof raw.legacyBase === "number" && Number.isInteger(raw.legacyBase) ? Math.max(0, raw.legacyBase) : 0,
+          legacyCommitted:
+            typeof raw.legacyCommitted === "number" && Number.isInteger(raw.legacyCommitted)
+              ? Math.max(0, raw.legacyCommitted)
+              : 0,
           legacyPending: normalizePending(raw.legacyPending),
         }
       : migrateLegacy(raw);
-    const record = {
+    const record: ApprovalLedgerRecord = {
       ledgerVersion: 2,
       ledgerEpoch: current && typeof raw.ledgerEpoch === "string" ? raw.ledgerEpoch : randomUUID(),
-      sequence: current && Number.isSafeInteger(raw.sequence) ? Math.max(0, raw.sequence) : 0,
+      sequence:
+        current && typeof raw.sequence === "number" && Number.isSafeInteger(raw.sequence)
+          ? Math.max(0, raw.sequence)
+          : 0,
       legacyBase: legacy.legacyBase,
       legacyCommitted: legacy.legacyCommitted,
       legacyPending: legacy.legacyPending,
-      committedUsed: current && Number.isInteger(raw.committedUsed) ? Math.max(0, raw.committedUsed) : 0,
+      committedUsed:
+        current && typeof raw.committedUsed === "number" && Number.isInteger(raw.committedUsed)
+          ? Math.max(0, raw.committedUsed)
+          : 0,
       reservations: current ? normalizePending(raw.reservations) : {},
       used: 0,
       owned: raw.owned === true,
       widenedTo: typeof raw.widenedTo === "string" && raw.widenedTo.length > 0 ? raw.widenedTo : null,
       updatedAt,
-      rev: Number.isInteger(raw.rev) ? raw.rev : 0,
+      rev: typeof raw.rev === "number" && Number.isInteger(raw.rev) ? raw.rev : 0,
     };
     record.used = usageOf(record);
     const hasPending = Object.keys(record.legacyPending).length > 0 || Object.keys(record.reservations).length > 0;
@@ -102,7 +215,7 @@ function sanitize(input, now) {
     entries.push([sessionId, record]);
   }
   const obligations = entries.filter(([, record]) =>
-    record.widenedTo || Object.keys(record.legacyPending).length || Object.keys(record.reservations).length,
+    Boolean(record.widenedTo) || Object.keys(record.legacyPending).length > 0 || Object.keys(record.reservations).length > 0,
   );
   const obligationIds = new Set(obligations.map(([sessionId]) => sessionId));
   const ordinary = entries
@@ -117,11 +230,24 @@ function sanitize(input, now) {
   return state;
 }
 
-function lockPath(file) {
+function lockPath(file: string): string {
   return `${file}.lock`;
 }
 
-function acquireFileLock(file) {
+function errCode(error: unknown): string | undefined {
+  return error && typeof error === "object" && "code" in error && typeof error.code === "string"
+    ? error.code
+    : undefined;
+}
+
+function errMessage(error: unknown): string {
+  if (error && typeof error === "object" && "message" in error && error.message !== undefined && error.message !== null) {
+    return String(error.message);
+  }
+  return String(error);
+}
+
+function acquireFileLock(file: string): () => void {
   const path = lockPath(file);
   const token = randomUUID();
   const stage = `${path}.${token}.stage`;
@@ -136,9 +262,9 @@ function acquireFileLock(file) {
         // rename; contenders never see a half-written owner record.
         renameSync(stage, path);
         return () => {
-          let owner;
+          let owner: { token?: unknown };
           try {
-            owner = JSON.parse(readFileSync(join(path, "owner.json"), "utf8"));
+            owner = JSON.parse(readFileSync(join(path, "owner.json"), "utf8")) as { token?: unknown };
           } catch {
             return;
           }
@@ -147,12 +273,13 @@ function acquireFileLock(file) {
           try {
             renameSync(path, released);
             rmSync(released, { recursive: true, force: true });
-          } catch (error) {
-            if (error?.code !== "ENOENT") throw error;
+          } catch (error: unknown) {
+            if (errCode(error) !== "ENOENT") throw error;
           }
         };
-      } catch (error) {
-        if (!["EEXIST", "ENOTEMPTY", "EPERM", "EACCES"].includes(error?.code) || !existsSync(path)) throw error;
+      } catch (error: unknown) {
+        const code = errCode(error);
+        if (!code || !["EEXIST", "ENOTEMPTY", "EPERM", "EACCES"].includes(code) || !existsSync(path)) throw error;
         Atomics.wait(WAIT_BUFFER, 0, 0, 10);
       }
     }
@@ -162,46 +289,61 @@ function acquireFileLock(file) {
   }
 }
 
-function stateError(message, cause) {
-  const error = new Error(message, { cause });
+function stateError(message: string, cause?: unknown): ApprovalStateError {
+  const error = new Error(message, cause !== undefined ? { cause } : undefined) as ApprovalStateError;
   error.code = "DSH_RPC_APPROVAL_STATE";
   return error;
 }
 
-function loadFrom(file, logger, stamp) {
-  let input;
+function loadFrom(file: string, logger: ApprovalStateLogger | null, stamp: number): ApprovalStateFile {
+  let input: unknown;
   try {
     input = JSON.parse(readFileSync(file, "utf8"));
-  } catch (error) {
-    if (error?.code === "ENOENT") return emptyState();
+  } catch (error: unknown) {
+    if (errCode(error) === "ENOENT") return emptyState();
     logger?.warn?.(`[dsh-rpc] approval state at ${file} is unreadable; preserving the original file`);
     throw stateError(`approval state at ${file} is unreadable`, error);
   }
-  if (!isRecord(input) || ![1, 2].includes(input.version) || !isRecord(input.sessions)) {
+  if (!isRecord(input) || ![1, 2].includes(input.version as number) || !isRecord(input.sessions)) {
     throw stateError(`approval state at ${file} has an unsupported format`);
   }
   for (const record of Object.values(input.sessions)) {
     if (!isRecord(record) || (input.version === 2 && record.ledgerVersion !== 2)) {
       throw stateError(`approval state at ${file} contains an invalid session record`);
     }
-    if (record.ledgerVersion === 2 && (
-      typeof record.ledgerEpoch !== "string" || record.ledgerEpoch.length === 0 ||
-      !Number.isSafeInteger(record.sequence) || record.sequence < 0 ||
-      !Number.isSafeInteger(record.committedUsed) || record.committedUsed < 0 ||
-      !Number.isSafeInteger(record.legacyBase) || record.legacyBase < 0 ||
-      !Number.isSafeInteger(record.legacyCommitted) || record.legacyCommitted < 0 ||
-      !isRecord(record.reservations) || !isRecord(record.legacyPending)
-    )) {
+    if (
+      record.ledgerVersion === 2 &&
+      (typeof record.ledgerEpoch !== "string" ||
+        record.ledgerEpoch.length === 0 ||
+        typeof record.sequence !== "number" ||
+        !Number.isSafeInteger(record.sequence) ||
+        record.sequence < 0 ||
+        typeof record.committedUsed !== "number" ||
+        !Number.isSafeInteger(record.committedUsed) ||
+        record.committedUsed < 0 ||
+        typeof record.legacyBase !== "number" ||
+        !Number.isSafeInteger(record.legacyBase) ||
+        record.legacyBase < 0 ||
+        typeof record.legacyCommitted !== "number" ||
+        !Number.isSafeInteger(record.legacyCommitted) ||
+        record.legacyCommitted < 0 ||
+        !isRecord(record.reservations) ||
+        !isRecord(record.legacyPending))
+    ) {
       throw stateError(`approval state at ${file} contains an invalid ticket ledger`);
     }
   }
   return sanitize(input, stamp);
 }
 
-export function createApprovalState({ file = approvalStatePath(), log = null, now = () => Date.now() } = {}) {
+export function createApprovalState({
+  file = approvalStatePath(),
+  log = null,
+  now = () => Date.now(),
+}: CreateApprovalStateOptions = {}): ApprovalState {
   let state = loadFrom(file, log, now());
 
-  function persist(next) {
+  function persist(next: ApprovalStateFile): void {
     const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
     try {
       writeFileSync(temporary, JSON.stringify(next, null, 2), { flag: "wx", mode: 0o600 });
@@ -211,24 +353,27 @@ export function createApprovalState({ file = approvalStatePath(), log = null, no
       } catch {
         // Windows enforces the user profile ACL instead of POSIX mode bits.
       }
-    } catch (error) {
+    } catch (error: unknown) {
       try {
         rmSync(temporary, { force: true });
       } catch {
         // Keep the original write error.
       }
-      log?.warn?.(`[dsh-rpc] could not write approval state to ${file}: ${error?.message ?? error}`);
+      log?.warn?.(`[dsh-rpc] could not write approval state to ${file}: ${errMessage(error)}`);
       throw error;
     }
   }
 
-  function transaction(sessionId, mutate) {
+  function transaction<T>(
+    sessionId: string,
+    mutate: (record: ApprovalLedgerRecord) => { changed?: boolean; value: T },
+  ): { ok: true; value: T } | { ok: false; value: false } {
     if (typeof sessionId !== "string" || sessionId.length === 0) return { ok: false, value: false };
-    let release;
+    let release: (() => void) | undefined;
     try {
       release = acquireFileLock(file);
       const fresh = loadFrom(file, null, now());
-      let record = Object.hasOwn(fresh.sessions, sessionId) ? fresh.sessions[sessionId] : null;
+      let record: ApprovalLedgerRecord | null = Object.hasOwn(fresh.sessions, sessionId) ? fresh.sessions[sessionId] : null;
       if (!record) {
         record = {
           ledgerVersion: 2,
@@ -257,26 +402,26 @@ export function createApprovalState({ file = approvalStatePath(), log = null, no
       record.used = usageOf(record);
       persist(fresh);
       state = fresh;
-      return { ok: true, value: result?.value };
-    } catch (error) {
-      if (error?.code === "DSH_RPC_APPROVAL_STATE") throw error;
+      return { ok: true, value: result.value };
+    } catch (error: unknown) {
+      if (errCode(error) === "DSH_RPC_APPROVAL_STATE") throw error;
       throw stateError(`approval state transaction failed for ${file}`, error);
     } finally {
       release?.();
     }
   }
 
-  function update(sessionId, apply) {
+  function update(sessionId: string, applyFn: (record: ApprovalLedgerRecord) => void): boolean {
     const result = transaction(sessionId, (record) => {
-      apply(record);
+      applyFn(record);
       return { value: true };
     });
     return result.ok && result.value;
   }
 
-  function reserveAllowance(sessionId) {
+  function reserveAllowance(sessionId: string): string | null {
     try {
-      const result = transaction(sessionId, (record) => {
+      const result = transaction<string | null>(sessionId, (record) => {
         if (record.used >= MAX_PENDING_ALLOWANCES || record.sequence >= Number.MAX_SAFE_INTEGER) {
           return { changed: false, value: null };
         }
@@ -286,23 +431,24 @@ export function createApprovalState({ file = approvalStatePath(), log = null, no
         return { value: reservationId };
       });
       return result.ok ? result.value : null;
-    } catch (error) {
-      log?.warn?.(`[dsh-rpc] could not reserve an approval allowance for ${sessionId}: ${error?.message ?? error}`);
+    } catch (error: unknown) {
+      log?.warn?.(`[dsh-rpc] could not reserve an approval allowance for ${sessionId}: ${errMessage(error)}`);
       return null;
     }
   }
 
-  function settleAllowance(sessionId, reservationId, status) {
-    if (typeof reservationId !== "string" || !["committed", "refunded"].includes(status)) return false;
-    const result = transaction(sessionId, (record) => {
+  function settleAllowance(sessionId: string, reservationId: string, status: SettleOutcome | string): boolean {
+    if (typeof reservationId !== "string" || !(SETTLE_OUTCOMES as readonly string[]).includes(status)) return false;
+    const outcome = status as SettleOutcome;
+    const result = transaction<boolean>(sessionId, (record) => {
       if (Object.hasOwn(record.reservations, reservationId)) {
         delete record.reservations[reservationId];
-        if (status === "committed") record.committedUsed += 1;
+        if (outcome === "committed") record.committedUsed += 1;
         return { value: true };
       }
       if (Object.hasOwn(record.legacyPending, reservationId)) {
         delete record.legacyPending[reservationId];
-        if (status === "committed") record.legacyCommitted += 1;
+        if (outcome === "committed") record.legacyCommitted += 1;
         if (Object.keys(record.legacyPending).length === 0) {
           record.legacyBase = Math.max(record.legacyBase, record.legacyCommitted);
           record.legacyCommitted = 0;
@@ -314,8 +460,8 @@ export function createApprovalState({ file = approvalStatePath(), log = null, no
     return result.ok && result.value;
   }
 
-  function idsWhere(predicate) {
-    const found = [];
+  function idsWhere(predicate: (record: ApprovalLedgerRecord) => unknown): Array<[string, ApprovalLedgerRecord]> {
+    const found: Array<[string, ApprovalLedgerRecord]> = [];
     for (const [sessionId, record] of Object.entries(state.sessions)) {
       if (predicate(record)) found.push([sessionId, record]);
     }
@@ -323,7 +469,7 @@ export function createApprovalState({ file = approvalStatePath(), log = null, no
     return found;
   }
 
-  const allowances = {
+  const allowances: ApprovalAllowancesMap = {
     get(sessionId) {
       const used = state.sessions[sessionId]?.used ?? 0;
       return used > 0 ? used : undefined;
@@ -338,18 +484,24 @@ export function createApprovalState({ file = approvalStatePath(), log = null, no
       return this;
     },
     delete(sessionId) {
-      if (state.sessions[sessionId]) update(sessionId, (record) => { record.legacyBase = 0; });
+      if (state.sessions[sessionId]) {
+        update(sessionId, (record) => {
+          record.legacyBase = 0;
+        });
+      }
       return true;
     },
     get size() {
       return idsWhere((record) => record.used > 0).length;
     },
     keys() {
-      return idsWhere((record) => record.used > 0).map(([sessionId]) => sessionId)[Symbol.iterator]();
+      return idsWhere((record) => record.used > 0)
+        .map(([sessionId]) => sessionId)
+        [Symbol.iterator]();
     },
   };
 
-  const widened = {
+  const widened: ApprovalWidenedMap = {
     get(sessionId) {
       return state.sessions[sessionId]?.widenedTo ?? undefined;
     },
@@ -363,24 +515,32 @@ export function createApprovalState({ file = approvalStatePath(), log = null, no
       return this;
     },
     delete(sessionId) {
-      if (state.sessions[sessionId]?.widenedTo) update(sessionId, (record) => { record.widenedTo = null; });
+      if (state.sessions[sessionId]?.widenedTo) {
+        update(sessionId, (record) => {
+          record.widenedTo = null;
+        });
+      }
       return true;
     },
     get size() {
       return idsWhere((record) => record.widenedTo).length;
     },
     keys() {
-      return idsWhere((record) => record.widenedTo).map(([sessionId]) => sessionId)[Symbol.iterator]();
+      return idsWhere((record) => record.widenedTo)
+        .map(([sessionId]) => sessionId)
+        [Symbol.iterator]();
     },
     entries() {
-      return idsWhere((record) => record.widenedTo).map(([sessionId, record]) => [sessionId, record.widenedTo]);
+      return idsWhere((record) => record.widenedTo)
+        .map(([sessionId, record]): [string, string | null] => [sessionId, record.widenedTo])
+        [Symbol.iterator]();
     },
     [Symbol.iterator]() {
-      return this.entries()[Symbol.iterator]();
+      return this.entries();
     },
   };
 
-  const owned = {
+  const owned: ApprovalOwnedMap = {
     get(sessionId) {
       return state.sessions[sessionId]?.owned === true ? state.sessions[sessionId].updatedAt : undefined;
     },
@@ -390,19 +550,25 @@ export function createApprovalState({ file = approvalStatePath(), log = null, no
     set(sessionId, stamp) {
       update(sessionId, (record) => {
         record.owned = true;
-        if (Number.isFinite(stamp)) record.updatedAt = stamp;
+        if (typeof stamp === "number" && Number.isFinite(stamp)) record.updatedAt = stamp;
       });
       return this;
     },
     delete(sessionId) {
-      if (state.sessions[sessionId]?.owned === true) update(sessionId, (record) => { record.owned = false; });
+      if (state.sessions[sessionId]?.owned === true) {
+        update(sessionId, (record) => {
+          record.owned = false;
+        });
+      }
       return true;
     },
     get size() {
       return idsWhere((record) => record.owned).length;
     },
     keys() {
-      return idsWhere((record) => record.owned).map(([sessionId]) => sessionId)[Symbol.iterator]();
+      return idsWhere((record) => record.owned)
+        .map(([sessionId]) => sessionId)
+        [Symbol.iterator]();
     },
   };
 
