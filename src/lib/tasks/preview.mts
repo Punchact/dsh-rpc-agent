@@ -3,22 +3,86 @@
 // capability revision for a bounded TTL, and can be consumed at most once.
 
 import { randomUUID } from "node:crypto";
+import type { DatabaseSync } from "node:sqlite";
 
-import { degradedFromCapabilities } from "./degraded.mjs";
+import { degradedFromCapabilities, type DegradedControlEntry } from "./degraded.mjs";
 import { TASK_ERROR, notFoundError, taskError, validationFailed } from "./errors.mjs";
+import type {
+  AgentRow,
+  CapabilityRevisionRow,
+  PreviewRow,
+  PrincipalRow,
+  TaskStore,
+  WorkspaceRow,
+} from "./store.mjs";
 
 const DEFAULT_PREVIEW_TTL_MS = 300_000;
 
-function parseJson(text, fallback = null) {
+export interface PreviewExclusionCandidate {
+  agentId: string;
+  included: boolean;
+  reason: string;
+  capabilityRevisionId?: string;
+  [key: string]: unknown;
+}
+
+export interface CreatePreviewParams {
+  principalId: string;
+  requestDigest: string;
+  capabilityRevisionId: string;
+  workspaceId: string;
+  agentId: string;
+  ttlMs?: number;
+  normalizedRequest?: Record<string, unknown>;
+  candidates?: PreviewExclusionCandidate[];
+  selectionReason?: string;
+  policyRevision?: string;
+  now?: () => number;
+}
+
+export interface CreatePreviewResult {
+  previewId: string;
+  principalId: string;
+  requestDigest: string;
+  capabilityRevisionId: string;
+  workspaceId: string;
+  agentId: string;
+  candidates: PreviewExclusionCandidate[];
+  selectionReason: string;
+  degraded: DegradedControlEntry[];
+  expiresAt: string;
+  createdAt: string;
+}
+
+export interface ConsumePreviewParams {
+  previewId: string;
+  principalId: string;
+  requestDigest?: string | null;
+  now?: () => number;
+}
+
+export interface ConsumePreviewResult {
+  previewId: string;
+  principalId: string;
+  requestDigest: string | null;
+  workspaceId: string | null;
+  agentId: string | null;
+  capabilityRevisionId: string | null;
+  normalizedRequest: Record<string, unknown>;
+  expiresAt: string;
+  consumedAt: string;
+}
+
+function parseJson<T>(text: string | null | undefined, fallback: T): T {
   if (typeof text !== "string" || text.length === 0) return fallback;
   try {
-    return JSON.parse(text);
+    return JSON.parse(text) as T;
   } catch {
     return fallback;
   }
 }
 
-function requireNonEmptyString(value, field) {
+function requireNonEmptyString(value: unknown, field: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw validationFailed(`\`${field}\` must be a non-empty string`, { field });
   }
@@ -26,7 +90,7 @@ function requireNonEmptyString(value, field) {
 }
 
 export function createPreviewInTx(
-  db,
+  db: DatabaseSync,
   {
     principalId,
     requestDigest,
@@ -39,8 +103,8 @@ export function createPreviewInTx(
     selectionReason = "selected",
     policyRevision = "v1",
     now = Date.now,
-  },
-) {
+  }: CreatePreviewParams,
+): CreatePreviewResult {
   const pid = requireNonEmptyString(principalId, "principalId");
   const digest = requireNonEmptyString(requestDigest, "requestDigest");
   const capRevId = requireNonEmptyString(capabilityRevisionId, "capabilityRevisionId");
@@ -51,30 +115,44 @@ export function createPreviewInTx(
     throw validationFailed("`ttlMs` must be a positive integer", { field: "ttlMs", ttlMs });
   }
 
-  const principal = db.prepare("SELECT principal_id, revoked_at FROM principals WHERE principal_id = ?").get(pid);
+  const principal = db
+    .prepare("SELECT principal_id, revoked_at FROM principals WHERE principal_id = ?")
+    .get(pid) as Pick<PrincipalRow, "principal_id" | "revoked_at"> | undefined;
   if (!principal) throw notFoundError(`principal not found: ${pid}`, { principalId: pid });
-  if (principal.revoked_at) throw taskError(TASK_ERROR.ACCESS_DENIED, `principal "${pid}" is revoked`, { principalId: pid });
+  if (principal.revoked_at) {
+    throw taskError(TASK_ERROR.ACCESS_DENIED, `principal "${pid}" is revoked`, { principalId: pid });
+  }
 
-  const workspace = db.prepare("SELECT workspace_id, revoked_at FROM workspaces WHERE workspace_id = ?").get(wsId);
+  const workspace = db
+    .prepare("SELECT workspace_id, revoked_at FROM workspaces WHERE workspace_id = ?")
+    .get(wsId) as Pick<WorkspaceRow, "workspace_id" | "revoked_at"> | undefined;
   if (!workspace) throw notFoundError(`workspace not found: ${wsId}`, { workspaceId: wsId });
-  if (workspace.revoked_at) throw taskError(TASK_ERROR.ACCESS_DENIED, `workspace "${wsId}" is revoked`, { workspaceId: wsId });
+  if (workspace.revoked_at) {
+    throw taskError(TASK_ERROR.ACCESS_DENIED, `workspace "${wsId}" is revoked`, { workspaceId: wsId });
+  }
 
   const agent = db
     .prepare(
       "SELECT agent_id, enabled, capabilities_json, probe_status, probe_expires_at FROM agents WHERE agent_id = ?",
     )
-    .get(agId);
+    .get(agId) as
+    | Pick<AgentRow, "agent_id" | "enabled" | "capabilities_json" | "probe_status" | "probe_expires_at">
+    | undefined;
   if (!agent) throw notFoundError(`agent not found: ${agId}`, { agentId: agId });
   if (agent.enabled !== 1) throw validationFailed(`agent "${agId}" is disabled`, { agentId: agId });
 
   const capRev = db
     .prepare("SELECT revision_id, capability, version FROM capability_revisions WHERE revision_id = ?")
-    .get(capRevId);
-  if (!capRev) throw notFoundError(`capability revision not found: ${capRevId}`, { capabilityRevisionId: capRevId });
+    .get(capRevId) as Pick<CapabilityRevisionRow, "revision_id" | "capability" | "version"> | undefined;
+  if (!capRev) {
+    throw notFoundError(`capability revision not found: ${capRevId}`, { capabilityRevisionId: capRevId });
+  }
 
   const nowMs = now();
 
-  const declaredRevisionsOf = (row) => {
+  const declaredRevisionsOf = (
+    row: Pick<AgentRow, "capabilities_json"> | null | undefined,
+  ): Array<{ revisionId?: string; capabilityId?: string }> => {
     try {
       const parsed = typeof row?.capabilities_json === "string" ? JSON.parse(row.capabilities_json) : {};
       return Array.isArray(parsed?.capabilityRevisions) ? parsed.capabilityRevisions : [];
@@ -107,29 +185,29 @@ export function createPreviewInTx(
 
   // §4.4: report why the other instances that declare the same capability are not
   // candidates, so the caller can see the routing decision instead of guessing.
-  const exclusions = [];
+  const exclusions: PreviewExclusionCandidate[] = [];
   const peers = db
     .prepare("SELECT agent_id, enabled, capabilities_json, probe_expires_at FROM agents ORDER BY agent_id ASC")
-    .all();
+    .all() as unknown as Array<Pick<AgentRow, "agent_id" | "enabled" | "capabilities_json" | "probe_expires_at">>;
   for (const row of peers) {
     if (row.agent_id === agId) continue;
     const declared = declaredRevisionsOf(row).find((item) => item.capabilityId === capRev.capability);
     if (!declared) continue;
     const peerProbeExpiry = row.probe_expires_at ? Date.parse(row.probe_expires_at) : null;
-    let reason = null;
+    let reason: string | null = null;
     if (row.enabled !== 1) reason = "AGENT_DISABLED";
     else if (peerProbeExpiry !== null && Number.isFinite(peerProbeExpiry) && peerProbeExpiry <= nowMs) {
       reason = "PROBE_STALE";
     }
     if (reason) exclusions.push({ agentId: row.agent_id, included: false, reason });
   }
-  const candidateList = [
+  const candidateList: PreviewExclusionCandidate[] = [
     ...exclusions,
     ...(Array.isArray(candidates) ? candidates : []),
     { agentId: agId, included: true, reason: "SELECTED", capabilityRevisionId: capRevId },
   ];
 
-  const storedNormalized = {
+  const storedNormalized: Record<string, unknown> = {
     ...(normalizedRequest && typeof normalizedRequest === "object" && !Array.isArray(normalizedRequest)
       ? normalizedRequest
       : {}),
@@ -171,15 +249,18 @@ export function createPreviewInTx(
   };
 }
 
-export async function createPreview(store, params) {
+export async function createPreview(store: TaskStore, params: CreatePreviewParams): Promise<CreatePreviewResult> {
   return store.withWriteTx((db) => createPreviewInTx(db, params));
 }
 
-export function consumePreviewInTx(db, { previewId, principalId, requestDigest, now = Date.now }) {
+export function consumePreviewInTx(
+  db: DatabaseSync,
+  { previewId, principalId, requestDigest, now = Date.now }: ConsumePreviewParams,
+): ConsumePreviewResult {
   const pvId = requireNonEmptyString(previewId, "previewId");
   const pid = requireNonEmptyString(principalId, "principalId");
 
-  const preview = db.prepare("SELECT * FROM previews WHERE preview_id = ?").get(pvId);
+  const preview = db.prepare("SELECT * FROM previews WHERE preview_id = ?").get(pvId) as PreviewRow | undefined;
   if (!preview || preview.principal_id !== pid) {
     // Consistent lookup failure avoids leaking existence across principals (§6.1).
     throw notFoundError(`preview not found: ${pvId}`, { previewId: pvId });
@@ -200,8 +281,8 @@ export function consumePreviewInTx(db, { previewId, principalId, requestDigest, 
     });
   }
 
-  const norm = parseJson(preview.normalized_request_json, {});
-  const storedDigest = norm?.requestDigest ?? null;
+  const norm = parseJson<Record<string, unknown>>(preview.normalized_request_json, {});
+  const storedDigest = typeof norm?.requestDigest === "string" ? norm.requestDigest : null;
   if (requestDigest !== undefined && requestDigest !== null) {
     const provided = requireNonEmptyString(requestDigest, "requestDigest");
     if (storedDigest !== provided) {
@@ -225,7 +306,7 @@ export function consumePreviewInTx(db, { previewId, principalId, requestDigest, 
     previewId: pvId,
     principalId: pid,
     requestDigest: storedDigest,
-    workspaceId: norm?.workspaceId ?? null,
+    workspaceId: typeof norm?.workspaceId === "string" ? norm.workspaceId : null,
     agentId: preview.selected_agent_id,
     capabilityRevisionId: preview.capability_revision_id,
     normalizedRequest: norm,
@@ -234,6 +315,6 @@ export function consumePreviewInTx(db, { previewId, principalId, requestDigest, 
   };
 }
 
-export async function consumePreview(store, params) {
+export async function consumePreview(store: TaskStore, params: ConsumePreviewParams): Promise<ConsumePreviewResult> {
   return store.withWriteTx((db) => consumePreviewInTx(db, params));
 }

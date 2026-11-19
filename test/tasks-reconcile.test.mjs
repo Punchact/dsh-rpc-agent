@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 import test from "node:test";
+import ts from "typescript";
 
 import { ConfigError, describeConfig, resolveConfig } from "../dist/lib/config.mjs";
 import { buildDispatcher } from "../dist/lib/http.mjs";
@@ -272,4 +274,38 @@ test("RPC wiring covers dsh.agents.{register,list,probe}, dsh.tasks.{preview,rec
   } finally {
     store.close();
   }
+});
+
+test("reconcileTask rejects invalid evidence.observedState at tsc compile time", () => {
+  const repoRoot = resolve(import.meta.dirname, "..");
+  const configPath = resolve(repoRoot, "tsconfig.json");
+  const parsed = ts.parseJsonConfigFileContent(
+    ts.readConfigFile(configPath, ts.sys.readFile).config,
+    ts.sys,
+    repoRoot,
+  );
+  const virtualFile = resolve(repoRoot, "src/lib/tasks/__typecheck_reconcile__.mts");
+  const badSource = `
+import type { ReconcileTaskParams } from "./reconcile.mjs";
+const badParams: ReconcileTaskParams = {
+  taskId: "t-1",
+  evidence: { observedState: "running" },
+};
+void badParams;
+`;
+  const host = ts.createCompilerHost(parsed.options);
+  const origGetSourceFile = host.getSourceFile.bind(host);
+  host.getSourceFile = (fileName, languageVersion, ...rest) => {
+    if (resolve(fileName) === virtualFile) {
+      return ts.createSourceFile(fileName, badSource, languageVersion);
+    }
+    return origGetSourceFile(fileName, languageVersion, ...rest);
+  };
+  const program = ts.createProgram([virtualFile], parsed.options, host);
+  const diagnostics = ts.getPreEmitDiagnostics(program, program.getSourceFile(virtualFile));
+  assert.ok(diagnostics.length > 0, "tsc must reject invalid observedState");
+  assert.ok(
+    diagnostics.some((d) => d.code === 2322 && String(d.messageText).includes("running")),
+    `expected TS2322 mentioning running, got: ${diagnostics.map((d) => `${d.code}:${d.messageText}`).join("; ")}`,
+  );
 });

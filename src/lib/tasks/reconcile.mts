@@ -3,12 +3,40 @@
 // task through the state machine with a `reconcile.applied` event.
 
 import { notFoundError, stateConflict, validationFailed } from "./errors.mjs";
-import { transitionInTx } from "./state-machine.mjs";
+import { transitionInTx, type AppendEventResult, type TaskStatus, type TransitionPatch } from "./state-machine.mjs";
+import type { TaskRow, TaskStore } from "./store.mjs";
 
-const OBSERVED_STATES = new Set(["succeeded", "failed", "cancelled"]);
-const RECONCILABLE_STATES = new Set(["needs_reconcile", "cancel_requested"]);
+export const RECONCILE_OBSERVED_STATES = Object.freeze(["succeeded", "failed", "cancelled"] as const);
+export type ReconcileObservedState = (typeof RECONCILE_OBSERVED_STATES)[number];
 
-function requireNonEmptyString(value, field) {
+const OBSERVED_STATES: ReadonlySet<string> = new Set(RECONCILE_OBSERVED_STATES);
+const RECONCILABLE_STATES: ReadonlySet<string> = new Set(["needs_reconcile", "cancel_requested"]);
+
+export interface ReconcileEvidence {
+  observedState: ReconcileObservedState;
+  note?: string;
+  adapterEventId?: string | number | null;
+  result?: unknown;
+  resultValid?: boolean;
+  failureClass?: string;
+}
+
+export interface ReconcileTaskParams {
+  taskId: string;
+  evidence: ReconcileEvidence;
+  principalId?: string;
+}
+
+export interface ReconcileTaskResult {
+  taskId: string;
+  from: string;
+  status: TaskStatus;
+  stateVersion: number;
+  attemptsClosed: number | bigint;
+  event: AppendEventResult;
+}
+
+function requireNonEmptyString(value: unknown, field: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw validationFailed(`\`${field}\` must be a non-empty string`, { field });
   }
@@ -17,14 +45,12 @@ function requireNonEmptyString(value, field) {
 
 /**
  * Reconcile a `needs_reconcile` or `cancel_requested` task from external evidence.
- *
- * @param {object} _engine Reserved engine handle (kept for caller symmetry)
- * @param {import("./store.mjs").TaskStore} store SQLite store from `openStore`
- * @param {object} params
- * @param {string} params.taskId
- * @param {object} params.evidence `{ observedState: 'succeeded'|'failed'|'cancelled', note?, adapterEventId?, result?, resultValid?, failureClass? }`
  */
-export async function reconcileTask(_engine, store, params = {}) {
+export async function reconcileTask(
+  _engine: unknown,
+  store: TaskStore,
+  params: ReconcileTaskParams = {} as ReconcileTaskParams,
+): Promise<ReconcileTaskResult> {
   if (!params || typeof params !== "object" || Array.isArray(params)) {
     throw validationFailed("params must be an object");
   }
@@ -33,16 +59,17 @@ export async function reconcileTask(_engine, store, params = {}) {
   if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
     throw validationFailed("`evidence` must be an object", { field: "evidence" });
   }
-  const observedState = requireNonEmptyString(evidence.observedState, "evidence.observedState");
-  if (!OBSERVED_STATES.has(observedState)) {
+  const observedStateRaw = requireNonEmptyString(evidence.observedState, "evidence.observedState");
+  if (!OBSERVED_STATES.has(observedStateRaw)) {
     throw validationFailed(
-      `evidence.observedState must be one of succeeded|failed|cancelled; got "${observedState}"`,
-      { field: "evidence.observedState", observedState },
+      `evidence.observedState must be one of succeeded|failed|cancelled; got "${observedStateRaw}"`,
+      { field: "evidence.observedState", observedState: observedStateRaw },
     );
   }
+  const observedState = observedStateRaw as ReconcileObservedState;
 
   return store.withWriteTx((db) => {
-    const task = db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(taskId);
+    const task = db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(taskId) as TaskRow | undefined;
     if (!task) {
       throw notFoundError(`task not found: ${taskId}`, { taskId });
     }
@@ -90,7 +117,7 @@ export async function reconcileTask(_engine, store, params = {}) {
        WHERE task_id = ? AND status = 'pending'`,
     ).run(now, taskId);
 
-    const patch = { activeAttemptId: null };
+    const patch: TransitionPatch = { activeAttemptId: null };
     if (observedState === "succeeded") {
       patch.resultJson = JSON.stringify(evidence.result ?? null);
       patch.resultValid = evidence.resultValid === false ? false : true;

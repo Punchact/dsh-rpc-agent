@@ -83,8 +83,8 @@ export const ALLOWED_TRANSITIONS: Readonly<Record<TaskStatus, readonly TaskStatu
 });
 
 export interface SqlStatement {
-  get(...params: unknown[]): Record<string, unknown> | undefined;
-  run(...params: unknown[]): { changes: number | bigint };
+  get(...params: any[]): Record<string, unknown> | undefined;
+  run(...params: any[]): { changes: number | bigint };
 }
 
 export interface SqlDatabase {
