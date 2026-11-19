@@ -1,6 +1,10 @@
 # 变更记录
 
-### 0.9.4 开发期
+## [0.9.4] - 2026-11-20
+
+> 本版主题：全仓迁到 TypeScript，并把发布链路改成“发布的就是验过的那一份”。发布面 100% TypeScript（41 个 `.mts` 编译，仅 `client.js` 按决策 0.9.4-a 原位 `@ts-check`）；包内所有 `.mjs` 均为产物，不含源码。
+
+> 本版验证：校验 34 个 RPC 方法、MCP 11（默认）+ 11（`tasksEnabled: true` 时共 22）个工具；全链 47 个测试文件、434 例，本机 434/434 通过。
 
 - **质量复核（Codex，`gpt-6.2-sol`）挖出的三条行为回归 + 发布物绑定**：`bin/` 两个入口的 `IS_MAIN` 拿未解析的 `process.argv[1]` 与已解析的 `import.meta.url` 比较，经 Windows junction（`node_modules/@andy/dsh-rpc` 指向仓库根）调用时被判成“不是入口”而静默 `exit 0`——CLI 一行不输出、MCP 不服务，两者都像“调用方正常结束”；`engine.submit` 把 `requestDigest` 收窄成“字符串或未传”，数字摘要被抹成缺失，`consumePreviewInTx` 的摘要校验整段跳过，一次对不上的提交因此建了单；MCP `tools/call` 把非对象 `arguments`（例如 `[]`）归一成空参数对象，非法输入变成一次带默认值的正常调用。三处统一改成“非法就拒绝”：入口判定两侧都走 `realpathSync`、摘要原样交给校验、`arguments` 非对象直接 `-32602`；回归分别是 `test/bin-entry.test.mjs`（junction 下两个入口）、`test/tasks-preview.test.mjs` 的数字摘要用例、`test/cli-mcp-regressions.test.mjs` 的 `arguments: []` 用例，三条都做过负向控制（把修复改回旧写法，测试必须转红）。发布链路同时从“verify 与 publish 各自构建”改成 **artifact 绑定**：`verify` 用 `npm pack ./dist` 打出 tarball、记 `sha256sum` 并 `upload-artifact`，`publish` 只 `download-artifact` → 校验摘要 → `npm publish "$TARBALL"`，不再重建；`scripts/check-release-path.mjs` 逐条要求“每条 publish 都指向 tarball”“publish 里不许 `npm run build`”“上传/下载 artifact 同名”“下载后必须 `sha256sum -c`”（决策见 `docs/design.md` §60、§61）。复查时又把同类的第四处补上：`dsh.tasks.preview` 收到非字符串 `requestDigest` 时会静默改用计算值，等于丢掉调用方的绑定承诺，现改为拒绝（回归 `test/tasks-events-and-preview.test.mjs`）。
 
