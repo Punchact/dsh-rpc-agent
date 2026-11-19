@@ -186,7 +186,7 @@ Host 抛 `RemoteError(code, message, details)`（`isDSHRemoteError === true`）�
 
 以上数字均为 2026-11-05 在本机实跑，命令见 README §10。
 
-> **现行口径（2026-11-19，0.9.0）**：本表是 2026-11-05 的历史快照，不改写。当前的数量以 README「开发与验证」为准——`npm test` 固定顺序跑 42 个 `*.test.mjs` 共 369 例，外加 `catalog.smoke.mjs`（34 个 RPC 方法）。表中三行随版本长大：`methods` 41 → 85 例，`client` 6 → 8 例；`edge` 仍是 24 项，但**本机 23/24**——第 21 项「create without a cwd reports the directory the Host attached」要求宿主替无 `cwd` 的请求补上工作目录，本机 0.8.1 宿主返回 `null`，属既有环境差异；**CI 不跑 `test:edge`（`.github/workflows/test.yml` 只有 `npm test` / `test:host` / `check:package`），故“CI 下通过”没有证据**，这一项目前只有本机 23/24 的实测。
+> **现行口径（2026-11-19，0.9.0）**：本表是 2026-11-05 的历史快照，不改写。当前的数量以 README「开发与验证」为准——`npm test` 固定顺序跑 43 个 `*.test.mjs` 共 372 例，外加 `catalog.smoke.mjs`（34 个 RPC 方法）。表中三行随版本长大：`methods` 41 → 85 例，`client` 6 → 8 例；`edge` 仍是 24 项，但**本机 23/24**——第 21 项「create without a cwd reports the directory the Host attached」要求宿主替无 `cwd` 的请求补上工作目录，本机 0.8.1 宿主返回 `null`，属既有环境差异；**CI 不跑 `test:edge`（`.github/workflows/test.yml` 只有 `npm test` / `test:host` / `check:package`），故“CI 下通过”没有证据**，这一项目前只有本机 23/24 的实测。
 
 ## 8. 后续可做
 
@@ -673,3 +673,14 @@ compression: gzip
 4. **产物只记能校验的**：报告里的 `artifacts[]` 逐个 stat + 哈希，通过的入 `artifacts` 表并发 `artifact.indexed`，不过的发 `artifact.refused`（只带 `name` 与 `reason`，不回显路径）。读回走窗口（`offset`/`length`，默认 20000、上限 1000000 字节），UTF-8 往返不一致就回 base64，不猜文本。
 5. **执行方的修订按卡片里的声明读**：`capability_revisions` 没有 `agent_id` 列——实例拥有哪几条写在它自己的 `capabilities_json.capabilityRevisions` 里；`getAgent` 先读卡片再解析行，避免用不存在的列过滤（首次实现真的这么写错了，测试当场抓到）。
 6. **不进 MCP 的两条**：`resolve` 是人工签收、`decideApproval` 是人工审批，都必须由人显式发；`input`/`readArtifact` 按方案提供 MCP 工具，但不承载审批与签收。
+
+## 43. 决策 0.9.0-p：未校验的结果必须有人工裁决入口
+
+0.9.0 真机端到端跑出第四处缺口，性质与前三处不同：不是漏了一行代码，而是方案自己没说清「人工判定」怎么动手。
+
+- **现象**：DSH 适配器按诚实规则（`lib/adapters/dsh.mjs:100-107`、`:182-191`）永远报 `ready` + `resultValid: false`；`lib/tasks/engine.mjs` 的 `resolve` 只接受 `review_pending` / `needs_reconcile`。两条规则各自都对，叠在一起的结果是默认适配器的正常链永远到不了 `succeeded`——人工既不能签收，也不能判负，只能看着任务停在 `running` 加一条 review 问题。
+- **取舍一：把「人工裁决」做成 `resolve` 的一种适用状态，而不是新增方法**。方案 §5.3 写的是「ready 校验失败 → 保持 running + 记 `report.invalid` + 投 `attention.kind = review` 待人工判定」，缺的是动词。新增方法与 `resolve` 语义重复，还多一个要门控、要写文档、要进熔断名单的入口。
+- **取舍二：先推 `review_pending` 再落终态，不做一步直达**。一步直达会让「校验过的成功」与「人工裁定未校验结果的成功」在事件流里长得一模一样。现在多一条 `review.promoted` 事件（带 `questionId`、`promotedFrom`、`resultValid: false`），审计能分清；代价是版本号 +2、多一条事件。
+- **取舍三：没有 review 问题时仍然拒收**。放宽只在「有登记在案的人工问题」时生效，否则 `resolve` 就成了绕过状态机的后门；回归用例 `resolve keeps refusing a running task that has no open review attention` 把这条钉住。
+- **附带修掉一处投影错误**：`derivePhase` 的 `reconcileDue` 原先只认 `lease.expired` 与 `cancel.unsupported`，`cancel.unconfirmed` 升级后阶段仍显示 `machine/working`——真机上「等你核对」的任务被显示成「机器在干活」。现在 `cancel.unconfirmed` / `cancel.failed` / `dispatch.orphaned` 都算核对信号。
+- **边界**：`resultValid: false` 会一路带到任务详情与签收记录里，不因为人工接受就改成 `true`。人工接受的是「这份未校验的产出」，不是「它通过了校验」。

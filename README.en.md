@@ -76,7 +76,7 @@ Repository and package name are both `dsh-rpc-agent`; the commands (`dsh-rpc`, `
 - **Self-describing**: `dsh_capabilities` returns an eight-section snapshot (runtime, permission presets, callable tools, MCP prefixes, sessions, workspaces, plugins), so a planner does not have to guess what this machine offers.
 - **No pretend knowledge**: when an outer client caps tool calls below the bridge budget, the bridge says so and recommends polling in slices instead of letting a long job look like a failure.
 - **Managed external agent tasks (Task centre, `tasksEnabled: false` by default)**: a 15-table SQLite ledger, 11-state machine, and capability cards/read-only probes driving DSH itself, Antigravity, and Codex App Server; see [docs/task-center.md](./docs/task-center.md).
-- **Regression tests guard the sharp edges**: 42 test files (366 cases) + catalog smoke (369/369 pass locally, including the 15 `approvals` cases) + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
+- **Regression tests guard the sharp edges**: 43 test files (372 cases) + catalog smoke (372/372 pass locally, including the 15 `approvals` cases) + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
 
 ## Install and update
 
@@ -293,7 +293,7 @@ Every method lives under the `dsh.` namespace; the CLI aliases `ping` / `discove
 | `dsh.tasks.cancel` | `taskId, expectedStateVersion, idempotencyKey, reason?` | `{taskId, status, stateVersion, notice?}` |
 | `dsh.tasks.dispatch` / `pump` | `taskId, …` / `taskId, maxSteps?, deadlineMs?, cursor?` | Dispatches to an adapter or drives bounded events/inspect pumping |
 | `dsh.tasks.reconcile` | `taskId, evidence: { observedState, note?, result? }` | Settles `needs_reconcile`/`cancel_requested` and closes active attempts |
-| `dsh.tasks.resolve` | `taskId, expectedStateVersion, idempotencyKey, disposition: accept\|reject\|cancel\|requeue, evidenceRef?, note?` | Operator sign-off that settles `review_pending` / `needs_reconcile` (RPC + CLI only, never MCP) |
+| `dsh.tasks.resolve` | `taskId, expectedStateVersion, idempotencyKey, disposition: accept\|reject\|cancel\|requeue, evidenceRef?, note?` | Operator sign-off that settles `review_pending` / `needs_reconcile`; a running task with an open `review` attention (unvalidated result) is promoted to `review_pending` first (`review.promoted`) and then settled (RPC + CLI only, never MCP) |
 | `dsh.tasks.decideApproval` | `taskId, attemptId, approvalId, decision: "allow"\|"deny", reason?` | `{approvalId, decision, status, stateVersion, operationId}` |
 | `dsh.agents.register` / `list` / `probe` | `card` / filters / `agentId, controls?` | Capability-card registration, listing, and read-only control probing |
 
@@ -819,7 +819,7 @@ A few worth calling out:
 - **Edge** probes the protocol layer: batches, notifications, id shapes, auth headers, oversized bodies (a genuine 413, not a dropped connection), parameter-injection defences, timeout clamping, concurrent asks, `limit` semantics.
 - **Port drift** (manual): point `endpoint.json` at a dead port and run `dsh-rpc ping`; expect exit code 3 and a readable error mentioning `nothing is listening`, `pid` and `health --wait`.
 
-Local verification (2026-11-19, 0.9.0, real repository): all 42 test files in the `npm test` chain pass (**369/369** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.mjs` (`methods: 34` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`). Formatting (UTF-8 without BOM, LF) is a review convention here, not an automated gate.
+Local verification (2026-11-19, 0.9.0, real repository): all 43 test files in the `npm test` chain pass (**372/372** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.mjs` (`methods: 34` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`). Formatting (UTF-8 without BOM, LF) is a review convention here, not an automated gate.
 
 ## License
 

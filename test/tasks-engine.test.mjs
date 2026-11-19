@@ -490,3 +490,94 @@ test("withdrawing a queued task that was never dispatched is final immediately (
     store.close();
   }
 });
+
+test("resolve adjudicates an unvalidated ready result through review.promoted", async () => {
+  const { store, engine } = await setupEngine();
+  try {
+    const t = await engine.submit({
+      idempotencyKey: "adjudicate-1",
+      capabilityRevisionId: "rev-review-1",
+      workspaceId: "ws-lab",
+      agentId: "ag-cancel-ok",
+    });
+    const att = await engine.recordAttemptStart({ taskId: t.taskId, expectedStateVersion: 1 });
+    const report = await applyReport(store, {
+      taskId: t.taskId,
+      attemptId: att.attemptId,
+      adapterEventId: "ev-unschema",
+      report: { state: "ready", result: { raw: "no schema" }, resultValid: false },
+    });
+    assert.equal(report.reportInvalid, true);
+
+    const before = await engine.get({ taskId: t.taskId });
+    assert.equal(before.status, "running");
+    assert.equal(before.pending.attention.length, 1);
+    assert.equal(before.pending.attention[0].kind, "review");
+
+    // The open review attention is the operator's licence to adjudicate: the resolve
+    // must promote to review_pending first, then apply the disposition.
+    const resolved = await engine.resolve({
+      taskId: t.taskId,
+      expectedStateVersion: before.stateVersion,
+      idempotencyKey: "adjudicate-accept-1",
+      disposition: "accept",
+      note: "operator read the raw reply and accepted it",
+    });
+    assert.equal(resolved.status, "succeeded");
+    assert.equal(resolved.resultValid, false);
+    assert.equal(resolved.pending.attention.length, 0);
+
+    const evts = await engine.events({ taskId: t.taskId, afterSeq: 0 });
+    const types = evts.events.map((e) => e.type);
+    const promotedAt = types.indexOf("review.promoted");
+    const resolvedAt = types.indexOf("task.resolved");
+    assert.ok(promotedAt >= 0, "review.promoted must be recorded");
+    assert.ok(resolvedAt > promotedAt, "the promotion must precede the resolution");
+    const promoted = evts.events[promotedAt];
+    assert.equal(promoted.payload.promotedFrom, "running");
+    assert.equal(promoted.payload.resultValid, false);
+    assert.equal(promoted.payload.questionId, before.pending.attention[0].questionId);
+  } finally {
+    store.close();
+  }
+});
+
+test("resolve keeps refusing a running task that has no open review attention", async () => {
+  const { store, engine } = await setupEngine();
+  try {
+    const t = await engine.submit({
+      idempotencyKey: "adjudicate-2",
+      capabilityRevisionId: "rev-review-1",
+      workspaceId: "ws-lab",
+      agentId: "ag-cancel-ok",
+    });
+    const att = await engine.recordAttemptStart({ taskId: t.taskId, expectedStateVersion: 1 });
+    await assert.rejects(
+      () =>
+        engine.resolve({
+          taskId: t.taskId,
+          expectedStateVersion: att.stateVersion,
+          idempotencyKey: "adjudicate-accept-2",
+          disposition: "accept",
+        }),
+      /cannot be resolved/,
+    );
+    const detail = await engine.get({ taskId: t.taskId });
+    assert.equal(detail.status, "running");
+  } finally {
+    store.close();
+  }
+});
+
+test("needs_reconcile after an unconfirmed stop reports person/reconcile", () => {
+  const now = Date.parse("2026-11-19T12:00:00Z");
+  for (const type of ["cancel.unconfirmed", "cancel.failed", "dispatch.orphaned"]) {
+    assert.equal(
+      derivePhase({ status: "needs_reconcile" }, [], { type }, { nowMs: now }).phase,
+      "person/reconcile",
+      `${type} must route to person/reconcile`,
+    );
+  }
+  // A needs_reconcile with no reconcile signal at all keeps waiting on the machine rung.
+  assert.equal(derivePhase({ status: "needs_reconcile" }, [], null, { nowMs: now }).phase, "machine/working");
+});

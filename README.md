@@ -76,7 +76,7 @@ http://127.0.0.1:<port>/dsh-rpc   ->   DSH agent
 - **会自述**：`dsh_capabilities` 给出八节能力快照（运行时、权限档位、可调工具、MCP 前缀、会话、工作区、插件），做计划前不必猜本机有什么。
 - **不假装知道**：外层客户端有更短的超时上限时，本桥只如实说明并建议分段轮询，不让长任务看起来像失败。
 - **可托管外部 agent 任务（任务中心，`tasksEnabled` 默认关闭）**：内置 15 表 SQLite 账本、11 态状态机与能力卡/只读探测，统一调度 DSH 自身、Antigravity 与 Codex App Server，详情见 [任务中心手册](./docs/task-center.md)。
-- **关键行为有回归用例守着**：43 个测试文件共 369 例 + catalog smoke（本机实测 369/369 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
+- **关键行为有回归用例守着**：43 个测试文件共 372 例 + catalog smoke（本机实测 372/372 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
 
 ## 安装与更新
 
@@ -293,7 +293,7 @@ console.log(answer.text, answer.usage);
 | `dsh.tasks.cancel` | `taskId, expectedStateVersion, idempotencyKey, reason?` | `{taskId, status, stateVersion, notice?}` |
 | `dsh.tasks.dispatch` / `pump` | `taskId, …` / `taskId, maxSteps?, deadlineMs?, cursor?` | 派发至适配器或推进有界事件/状态泵 |
 | `dsh.tasks.reconcile` | `taskId, evidence: { observedState, note?, result? }` | 人工核对后收口终态并关闭残留 attempt |
-| `dsh.tasks.resolve` | `taskId, expectedStateVersion, idempotencyKey, disposition: accept\|reject\|cancel\|requeue, evidenceRef?, note?` | 人工签收：`review_pending` / `needs_reconcile` 的终态处置（只在 RPC/CLI，不进 MCP） |
+| `dsh.tasks.resolve` | `taskId, expectedStateVersion, idempotencyKey, disposition: accept\|reject\|cancel\|requeue, evidenceRef?, note?` | 人工签收：`review_pending` / `needs_reconcile` 的终态处置；运行中若存在未关闭的 `review` 类人工问题（未校验结果），先推 `review_pending`（事件 `review.promoted`）再裁决（只在 RPC/CLI，不进 MCP） |
 | `dsh.tasks.decideApproval` | `taskId, attemptId, approvalId, decision: "allow"\|"deny", reason?` | `{approvalId, decision, status, stateVersion, operationId}` |
 | `dsh.agents.register` / `list` / `probe` | `card` / 过滤项 / `agentId, controls?` | 能力卡注册、查询与只读控制项探测 |
 
@@ -751,7 +751,7 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 43 个测试文件，共 369 例，另有 catalog smoke；无需运行中的 Harness
+npm test                       # 43 个测试文件，共 372 例，另有 catalog smoke；无需运行中的 Harness
 node test/host.test.mjs        # 1 例：真实 WebServer 集成（需先 npm ci）
 node test/e2e.mjs              # 14 例：端到端，打真实 Harness（--cwd 只接受绝对路径）
 node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harness
@@ -820,7 +820,7 @@ node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harnes
 - **边界**检查协议层：batch、通知、id 形态、鉴权头、超大 body（应得真正的 413 而不是断连）、参数注入防护、超时钳制、并发 ask、`limit` 语义。
 - **端口漂移**（手工）：把 `endpoint.json` 的 url 改成死端口再跑 `dsh-rpc ping`，应得退出码 3 与含 `nothing is listening`、`pid`、`health --wait` 的可读报错。
 
-本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 43 个测试文件 **369/369** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.mjs` 输出 `methods: 34` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
+本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 43 个测试文件 **372/372** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.mjs` 输出 `methods: 34` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
 
 ## 许可证
 
