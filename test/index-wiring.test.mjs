@@ -273,3 +273,35 @@ test("an unparseable origin still lets the bridge start and publish", async () =
     rmSync(home, { recursive: true, force: true });
   }
 });
+test("blocked-port startup warning deduplicates per port rather than silencing a port change", async () => {
+  const prevHome = process.env.DSH_HOME;
+  const home = mkdtempSync(join(tmpdir(), "dsh-wire-rewarn-"));
+  process.env.DSH_HOME = home;
+  const fake = makeFakeCtx();
+  const readyHandlers = [];
+  let currentOrigin = null;
+  fake.ctx.webServer.getOrigin = () => {
+    if (!currentOrigin) throw new Error("not bound yet");
+    return currentOrigin;
+  };
+  fake.ctx.on = (event, fn) => {
+    if (event === "ready") readyHandlers.push(fn);
+  };
+  try {
+    await apply(fake.ctx, { token: "e".repeat(32), defaultCwd: home, tasksEnabled: false });
+    assert.equal(readyHandlers.length, 1);
+
+    currentOrigin = "http://127.0.0.1:5060";
+    readyHandlers[0]();
+    readyHandlers[0]();
+    assert.equal(fake.warnings.filter((w) => /port 5060 /.test(w)).length, 1);
+
+    currentOrigin = "http://127.0.0.1:6667";
+    readyHandlers[0]();
+    assert.equal(fake.warnings.filter((w) => /port 6667 /.test(w)).length, 1);
+  } finally {
+    if (prevHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});

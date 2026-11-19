@@ -52,10 +52,15 @@ test("the transport code is recovered from the undici cause chain", () => {
     transportCode(new TypeError("fetch failed", { cause: { code: "UND_ERR_CONNECT_TIMEOUT" } })),
     "ETIMEDOUT",
   );
-  // A code we cannot interpret is reported verbatim instead of guessed at.
+  // A code we cannot interpret is reported verbatim instead of guessed at, even
+  // if a deeper cause happens to say "bad port".
   assert.equal(
     transportCode(new TypeError("fetch failed", { cause: { code: "UND_ERR_ABORTED" } })),
     "UND_ERR_ABORTED",
+  );
+  assert.equal(
+    transportCode(Object.assign(new Error("custom"), { code: "ERR_CUSTOM", cause: new Error("bad port") })),
+    "ERR_CUSTOM",
   );
   assert.equal(transportCode(new Error("plain failure")), undefined);
 });
@@ -69,30 +74,37 @@ test("a blocked port is named instead of left as an undefined code", async () =>
   assert.equal(transportCode(new TypeError("fetch failed", { cause: new Error("bad port") })), "EBADPORT");
   assert.equal(isFetchBlockedPort(5060), true);
   assert.equal(isFetchBlockedPort("6667"), true);
+  assert.equal(isFetchBlockedPort("5060abc"), false);
   assert.equal(isFetchBlockedPort(12345), false);
   assert.equal(isFetchBlockedPort(null), false);
 
+  // Unchanged blocked endpoint: must rethrow EBADPORT directly without "nothing is listening".
+  publishEndpoint("http://127.0.0.1:5060/dsh-rpc");
+  await assert.rejects(rpcCall("dsh.ping", {}, { timeoutMs: 8000 }), (error) => {
+    assert.equal(error.code, "EBADPORT");
+    assert.match(error.message, /bad port/);
+    assert.match(error.message, /--url/);
+    assert.doesNotMatch(error.message, /nothing is listening/);
+    return true;
+  });
+
+  // Stale-endpoint race where the previous run happened to bind a blocked port and
+  // restarted onto a valid one (`second.url !== first.url`): EBADPORT never opened a
+  // socket, so one replay to the new URL is safe and recovers the call.
   let hits = 0;
   const live = await listen((_request, response) => {
     hits += 1;
-    response.end("{}");
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { ok: true } }));
   });
   publishEndpoint("http://127.0.0.1:5060/dsh-rpc");
 
   try {
     const pending = rpcCall("dsh.ping", {}, { timeoutMs: 8000 });
-    // A refused handshake would be retried against this live endpoint. A blocked
-    // port must not be: nothing was ever sent, and reporting it as "nothing is
-    // listening" would send the reader looking for a restart that will not help.
     publishEndpoint(live.url);
-    await assert.rejects(pending, (error) => {
-      assert.equal(error.code, "EBADPORT");
-      assert.match(error.message, /bad port/);
-      assert.match(error.message, /--url/);
-      assert.doesNotMatch(error.message, /nothing is listening/);
-      return true;
-    });
-    assert.equal(hits, 0, "a blocked port is not the stale-endpoint race, so nothing is retried");
+    const res = await pending;
+    assert.deepEqual(res, { ok: true });
+    assert.equal(hits, 1, "EBADPORT replays once when endpoint.json moved to a new URL");
   } finally {
     await close(live.server);
   }
