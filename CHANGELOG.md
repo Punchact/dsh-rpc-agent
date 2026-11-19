@@ -33,7 +33,7 @@
 - **「有 attempt 但没 locator」是同一个坑的另一种形状**：孤儿守卫最初只判「`dispatching` 且没有 attempt 行」，而 `recordAttemptStart({ markRunning: false, runtimeLocator: null })`（或启动成功却没回 locator 的适配器）会留下「有行、无 locator」——守卫被跳过，`adapter.events(null)` 照样每遍抛错。改为按 locator 判断，事件里补 `attemptRecorded` 与 `attemptId` 便于定位；`startOrphanGraceMs` 也按 `maxConcurrent` 的口径归一化（`NaN`/负数回落默认值，不允许静默变成零宽限）。
 - **推进环与停机共用一把锁**：定时器原来只判 `shuttingDown`，`drainEffects` 慢于间隔时第二遍会覆盖 `inFlightPass` 并先置空闲，第一遍仍在写账本时 `cleanupTasks` 已判定可以关库。现在 `passRunning` 兼作重入守卫（上一遍含排水未完则跳过本遍），`cleanupTasks` 只在真有在途遍时等待，其余情况同步关闭。
 - **核对期被事件名枚举漏掉**：`derivePhase` 原先把 `cancel.unsupported` / `cancel.unconfirmed` / `cancel.failed` / `dispatch.orphaned` 与租约过期当作核对理由，而 `dispatch.failed`、`inspect.unknown` 同样会进 `needs_reconcile` —— 于是阶段跌回 `machine/working`，人看到的是「机器还在干活」，实际在等他对账。改为状态本身即职责：`status === "needs_reconcile"` 一律 `person/reconcile`，不再枚举理由。
-- `scripts.test` 新增并接入 20 个任务中心与 CLI/适配器测试套件（全链 46 个测试文件、409 例，本机 409/409 通过；CI 结果见 PR #30），并更新 `catalog.smoke.mjs` 校验 34 个 RPC 方法。
+- `scripts.test` 新增并接入 20 个任务中心与 CLI/适配器测试套件（全链 46 个测试文件、412 例，本机 412/412 通过；CI 结果见 PR #30），并更新 `catalog.smoke.mjs` 校验 34 个 RPC 方法。
 - `dispatch.mjs` 修复了租约到期回收与原子 `maxConcurrent` 门控竞态，防止同一写事务之外并发超发或将任务卡死在 `dispatching` / `in_flight`。
 - **取消确认后立刻收口**：适配器回报 `confirmedStopped: true`（DSH 会话真停了、Antigravity 回执里含该 cascadeId）时，同一次出箱排水内把任务从 `cancel_requested` 推进到 `cancelled` 并写 `cancel.confirmed`；此前只把 effect 标完成，任务会悬在 `cancel_requested` 等一个已停会话永远不会发出的事件。Codex 的 `turn/interrupt` 只算受理，故不设该标志。
 - **幂等键不再掩盖改过的请求**：`cancel` / `resolve` 的重放分支会比较请求意图（取消原因；处置结论 + 证据引用），同键异载荷抛 `STATE_CONFLICT`（`reason: "idempotency_payload_mismatch"`）。`expectedStateVersion` 属并发护栏、重试时本就会变，不参与比较。
@@ -79,12 +79,13 @@
 - **`dispatching` 崩溃窗口的隔离演练**：`audit-tmp/smoke-090/a04b-dispatching-crash.mjs`——worker 子进程在「`dispatching` 已写、attempt 未落库」时被 `exit(9)` 真杀掉，父进程重开账本断言崩溃现场（停在 `dispatching`、无 attempt 行），再让推进环接手：`needs_reconcile` + `person/reconcile` + `dispatch.orphaned`（证据里 `attemptRecorded: false`）、全程不碰适配器事件接口、槽位释放后队列继续走。11/11 PASS。
 - **两道门禁收紧**：①`docs/counts.json` 的用例数不再能手填——`npm run count:cases` 真跑一遍 TAP 才写，并附测试文件摘要与声明条数；`check:docs` 重算后遇到「文件变了数字没重算」或「用例数少于声明条数」直接失败，`docs:surface`/`docs:counts` 也刷不出一个假的数。②`check:surface --write` 新增 `implementationOnly` 条目必须显式 `--accept-new`，否则只列出来并失败，不再能靠重抽快照把新接口自我声明掉。
 
-- 计数：全链 46 个测试文件、409 例，本机 409/409 通过。
+- 计数：全链 46 个测试文件、412 例，本机 412/412 通过。
 
 ### 0.9.3 开发期
 
 - **宿主挑的端口可能是 `fetch` 直接拒绝的端口**：桥没有自己的监听器，端口来自宿主 Web 服务。`fetch` 按标准会拒绝一批「bad port」（`989`、`1720`、`4045`、`5060`、`6000`、`6665`–`6669`、`6697`、`10080` 等），拒绝发生在建立 socket 之前，因此整条 `cause` 链里没有任何 errno——客户端只能看到 `fetch failed`，`error.code` 是 `undefined`，而且重试逻辑按「只重试 `ECONNREFUSED`」的规矩不会介入。这正是 0.9.2 整链偶发失败的原因（测试里的「死端口」被系统分到了 `6667`）。三处一起改：①`lib/transport.mjs` 导出 `FETCH_BLOCKED_PORTS` / `isFetchBlockedPort()`，并把这种拒绝命名为 `EBADPORT`（不是猜 errno，是 `fetch` 自己给出的原因）；②`lib/client.mjs` 的消息带上最深层 cause，并提示换端口或 `--url`；③`index.mjs` 发布端点时若发现宿主端口在拒绝名单里，启动日志直接告警一次——服务端看起来健康、客户端全连不上，是最难查的那种组合。
 - **`EBADPORT` 下游口径与测试桩全链收口（`0.9.3-b/c/d`）**：`transportCode()` 仅在整链无错误码时命名 `EBADPORT`，`isFetchBlockedPort()` 对字符串严格校验 `/^\d+$/`；`withEndpointRetry` 在 `EBADPORT` 且 `endpoint.json` 已切到新 URL 时允许安全重放一次，URL 未变则原样抛 `EBADPORT`；`index.mjs` 启动告警改按端口号去重；`dsh-rpc health --wait` 遇到 `EBADPORT` 立即失败并提示换端口/`--url`（退出码 `3`，CLI 不再误导为 `"is it running?"`）；MCP 任务/代理工具对客户端传输错误（`EBADPORT`/`ECONNREFUSED`/`ECONNRESET` 等）原样透出而不再被 `sanitizeAdapterFailure` 覆写；抽取 `test/helpers/stub-server.mjs` 让 `client`/`wait`/`abort`/`cli-mcp-regressions` 统一跳过 `FETCH_BLOCKED_PORTS`。
+- **复核第三轮的三条 low（`0.9.3-e`）**：①MCP 侧的传输透传判定原来是「任何 `E[A-Z0-9]+` 开头的码」，与适配器的 `ENOENT` 撞形——改成显式白名单 `CLIENT_TRANSPORT_CODES`（`EBADPORT`/`ECONNREFUSED`/`ECONNRESET`/`EPIPE`/`ETIMEDOUT`/`UND_ERR_*`），适配器 errno 不再有搭车的机会；②`formatToolError` 的 `NEXT_BY_CODE` 只收了 `EBADPORT`，透传 `ECONNREFUSED` 时提示是一句「next: ECONNREFUSED」等于没给下一步，补齐四种常见传输码的可执行提示（未知码仍直说，不许编）；③CLI `tasks list` 的非 JSON 输出没复用 `formatTaskListLine`，读文字的人看不到 `unvalidated`/`degraded`/`attention`，现与 MCP 同源。
 - **只读文本显示口径补齐（`0.9.3-a`）**：`formatTaskSummary` 移入 `lib/mcp-format.mjs`（并由 `bin/dsh-rpc-mcp.mjs` 保持重导出），纯文本补齐 `degraded[]`、`pending.attention`（类型/问题号/提示/选项）与 `pending.approvals` 且在 `meta` 行保留计数防止被 `capText` 截断；`dsh_task_preview` 改用 `preview <previewId>` 专有标题（不再出现 `task ? · unknown · unknown`）；`dsh_task_list` 与 CLI `tasks get` 非 JSON 输出补齐 `resultValid` / `unvalidated` 与降级/待处理摘要。
 
 ### 行为变化

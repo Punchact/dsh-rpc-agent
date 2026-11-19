@@ -14,7 +14,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { rpcCall, rpcStream, waitForTurn, WAIT_SLICE_MS } from "../lib/client.mjs";
-import { formatTaskDetailLines } from "../lib/mcp-format.mjs";
+import { formatTaskDetailLines, formatTaskListLine } from "../lib/mcp-format.mjs";
 import { transportCode } from "../lib/transport.mjs";
 import { ADAPTER_FAILURE_MESSAGES, sanitizeAdapterFailure } from "../lib/adapters/base.mjs";
 import { endpointPath, readEndpoint, stateDir, tokenPath } from "../lib/auth.mjs";
@@ -776,7 +776,9 @@ async function runTasksCommand(flags, rest, options) {
         return 0;
       }
       for (const item of result.items ?? []) {
-        print(`task ${item.taskId} · ${item.status} · ${item.phase ?? "?"}  v${item.stateVersion}`);
+        // 0.9.3 复核第三轮：列表也要说出「未校验 / 降级 / 在等谁」，别让读文字的人
+        // 以为看到状态就等于看到事实。MCP 侧用同一个函数，两侧不再各写一遍。
+        print(`${formatTaskListLine(item)}  v${item.stateVersion ?? "?"}`);
       }
       note(`${(result.items ?? []).length} task(s)${result.hasMore ? ` (next cursor: ${result.nextCursor})` : ""}`);
       return 0;

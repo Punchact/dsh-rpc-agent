@@ -522,6 +522,19 @@ const TASK_TOOLS = [
 const TOOLS = [...BASE_TOOLS, ...TASK_TOOLS];
 const TASK_TOOL_NAMES = new Set(TASK_TOOLS.map((t) => t.name));
 
+// 客户端自己产生的传输层失败码。0.9.3 复核第三轮：这里必须是显式白名单，不能写成
+// 「任何 E 开头的码」——适配器的 spawn 失败也长这样（ENOENT），那类消息里带着绝对路径
+// 和命令行参数，必须继续走 sanitizeAdapterFailure，不许跟着这里一起裸奔出去。
+const CLIENT_TRANSPORT_CODES = new Set([
+  "EBADPORT",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EPIPE",
+  "ETIMEDOUT",
+  "UND_ERR_SOCKET",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
+
 // --------------------------------------------------------------- transport --
 
 let buffer = "";
@@ -1506,7 +1519,7 @@ async function callTool(name, args, signal = undefined) {
     // server/internal failures are sanitized.
     const isTransport =
       error?.transport === true ||
-      (/^(?:E[A-Z0-9]+|UND_ERR_[A-Z0-9_]+)$/.test(String(error?.code ?? "")) &&
+      (CLIENT_TRANSPORT_CODES.has(String(error?.code ?? "")) &&
         error?.taskCode !== "ADAPTER_UNAVAILABLE" &&
         error?.data?.kind !== "ADAPTER_UNAVAILABLE");
     const isAdapterOrInternal =

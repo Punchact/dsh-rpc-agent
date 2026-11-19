@@ -409,3 +409,34 @@ test("MCP task tools pass client transport errors (EBADPORT, ECONNREFUSED) throu
     }
   }
 });
+test("a client transport failure passes through with a next step, an adapter errno never rides along", async () => {
+  resetBridgeDefaults();
+  await withMockRpc(
+    (req) => {
+      if (req.method === "dsh.discover") {
+        return { result: { config: { tasksEnabled: true }, methods: [{ name: "dsh.tasks.list" }] } };
+      }
+      if (req.method === "dsh.tasks.get") {
+        // 客户端侧连不上：抛出去才是真实形状，fetch 失败不会变成一条 JSON-RPC 错误。
+        const cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:4035"), { code: "ECONNREFUSED" });
+        throw Object.assign(new TypeError("fetch failed"), { cause });
+      }
+      if (req.method === "dsh.tasks.list") {
+        // 执行方/子进程的 errno 带着绝对路径，它没有 transport 标记，必须继续净化。
+        return { error: { code: "ENOENT", message: "spawn C:\\Users\\Andy\\AppData\\Local\\fake\\codex.exe ENOENT" } };
+      }
+      return { result: {} };
+    },
+    async () => {
+      const refused = await callTool("dsh_task_get", { task_id: "task_x" });
+      assert.equal(refused.isError, true);
+      assert.match(refused.content[0].text, /127\.0\.0\.1:4035/);
+      assert.match(refused.content[0].text, /next: nothing answered on that port/);
+
+      const adapter = await callTool("dsh_task_list", {});
+      assert.equal(adapter.isError, true);
+      assert.doesNotMatch(adapter.content[0].text, /AppData|codex\.exe/);
+      assert.match(adapter.content[0].text, /execution backend (rejected|did not)/);
+    },
+  );
+});

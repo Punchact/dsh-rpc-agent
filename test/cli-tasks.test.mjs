@@ -255,3 +255,40 @@ test("CLI probeHealth and failureExitCode distinguish EBADPORT without waiting o
     process.stderr.write = prevErrWrite;
   }
 });
+test("the text listing says when a result is unvalidated or a task is degraded", async () => {
+  // 0.9.3 复核第三轮：列表是读文字的人第一眼看到的东西，别让他把「看见状态」当成「看见事实」。
+  await withMockCliRpc(
+    (req) => {
+      if (req.method === "dsh.discover") {
+        return { result: { config: { tasksEnabled: true }, methods: [{ name: "dsh.tasks.list" }] } };
+      }
+      if (req.method === "dsh.tasks.list") {
+        return {
+          result: {
+            items: [
+              {
+                taskId: "task_a",
+                status: "review_pending",
+                phase: "person/review",
+                stateVersion: 4,
+                resultValid: false,
+                degraded: [{ control: "approval" }],
+                pending: { attention: [{ questionId: "q_1" }], approvals: [] },
+              },
+              { taskId: "task_b", status: "succeeded", phase: "done/Finished", stateVersion: 7, resultValid: true },
+            ],
+            hasMore: false,
+          },
+        };
+      }
+      return { result: {} };
+    },
+    async ({ getStdout }) => {
+      const exitCode = await main(["tasks", "list"]);
+      assert.equal(exitCode, 0);
+      const out = getStdout();
+      assert.match(out, /task task_a · review_pending · person\/review \[unvalidated · degraded\(approval\) · attention=1\]  v4/);
+      assert.match(out, /task task_b · succeeded · done\/Finished \[resultValid=true\]  v7/);
+    },
+  );
+});

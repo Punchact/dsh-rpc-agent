@@ -807,6 +807,8 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 - `EBADPORT` 收紧与重放边界：`transportCode` 仅在 `codes.length === 0` 时认 `bad port`；`isFetchBlockedPort` 对字符串要求 `/^\d+$/`；`withEndpointRetry` 在 `EBADPORT` 且 `endpoint.json` 已切到新 URL（`second.url !== first.url`）时重放一次，URL 未变则原样抛 `EBADPORT`（不冒充 `"nothing is listening"`）；`index.mjs` 按端口号去重启动告警。
 - 下游出口补齐：`probeHealth` 改走 `transportCode()`，命中 `EBADPORT` 立即跳出并提示换端口或 `--url`；`CONNECTION_FAILURES` 纳入 `EBADPORT`（退出码 `3`，但 CLI 错误文案不打印 `"is it running?"`）；`lib/client.mjs` 为客户端传输异常标 `transport = true`，`bin/dsh-rpc-mcp.mjs` 透传传输错误（保留 `code`、原消息与 `NEXT_BY_CODE.EBADPORT` 提示），只净化执行方/服务端异常；抽共用 `test/helpers/stub-server.mjs` 让 `client` / `wait` / `abort` / `cli-mcp-regressions` 统一跳过 `FETCH_BLOCKED_PORTS`。
 
+- 复核第三轮补的三条 low：MCP 侧的传输透传把「任何 `E*` 形状的码」收成显式白名单 `CLIENT_TRANSPORT_CODES`（适配器 `ENOENT` 与客户端 `ECONNREFUSED` 长得很像，但前者消息里带绝对路径，不能同路透出）；`NEXT_BY_CODE` 补齐 `ECONNREFUSED`/`ECONNRESET`/`EPIPE`/`ETIMEDOUT`/`UND_ERR_*`，未知字符串码仍原样直说而不是编一个下一步；CLI `tasks list` 改调 `formatTaskListLine`，与 MCP 列表同源。
+
 **残余边界**（如实记）：插件仍然不能替宿主选端口（由 `@deepseek-ai/dsh-host-webserver` 决定）；Antigravity 适配器直连本地语言服务器 `fetch` 故意维持 `ADAPTER_UNAVAILABLE` 脱敏收敛。
 
-**怎么钉住**：`test/mcp-summary.test.mjs`、`test/mcp-tasks-tools.test.mjs`、`test/cli-tasks.test.mjs`、`test/client.test.mjs`、`test/index-wiring.test.mjs` 与 `test/helpers/stub-server.mjs` 均已补齐确定性回归（含截断保真、预览标题、端口切换重放、按端口去重告警、`health --wait` 快速失败、MCP 传输透传与 `listenSafe` 跳过坏端口桩测）。
+**怎么钉住**：`test/mcp-summary.test.mjs`（含第三轮的 `next:` 提示断言）、`test/mcp-tasks-tools.test.mjs`（客户端传输失败原样透出、服务端字符串码仍被净化）、`test/cli-tasks.test.mjs`（含列表标签）、`test/client.test.mjs`、`test/index-wiring.test.mjs` 与 `test/helpers/stub-server.mjs` 均已补齐确定性回归（含截断保真、预览标题、端口切换重放、按端口去重告警、`health --wait` 快速失败、MCP 传输透传与 `listenSafe` 跳过坏端口桩测）。
