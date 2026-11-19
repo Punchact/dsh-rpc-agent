@@ -44,7 +44,10 @@ jobs:
 
       - name: Syntax check every module
         run: |
-          for file in index.mjs client.js lib/*.mjs lib/*/*.mjs bin/*.mjs test/*.mjs scripts/*.mjs; do
+          # Source is TypeScript now; what actually ships is dist/ (built two steps up).
+          # client.js is still the browser-side script, so it is checked from the source tree.
+          shopt -s globstar nullglob
+          for file in dist/**/*.mjs client.js test/*.mjs scripts/*.mjs; do
             node --check "$file"
           done
 
