@@ -3,9 +3,103 @@
 // installed into a profile must not need `@deepseek-ai/schemastery` to resolve.
 // Validation is therefore explicit, and every failure names the offending key.
 
-import { isTraceLevel, normalizeTraceLevel } from "./trace-format.mjs";
+import { isTraceLevel, normalizeTraceLevel, type TraceLevel } from "./trace-format.mjs";
 
-const DEFAULTS = {
+export const APPROVAL_MODES = ["off", "deny", "delegate"] as const;
+export type ConfigApprovalMode = (typeof APPROVAL_MODES)[number];
+
+export const TASKS_EXTERNAL_ADAPTERS = Object.freeze(["none", "antigravity", "codex"] as const);
+export type TasksExternalAdapterKind = (typeof TASKS_EXTERNAL_ADAPTERS)[number];
+
+export interface ApprovalConfig {
+  mode: ConfigApprovalMode | string;
+  deadlineMs: number;
+}
+
+export interface TaskAdapterConfig {
+  enabled?: boolean;
+  adapterConfigRef?: string;
+  binary?: string;
+  projectId?: string;
+  model?: string;
+  [key: string]: unknown;
+}
+
+export interface ResolvedConfig {
+  enabled: boolean;
+  token?: string;
+  tokenFile?: string;
+  path: string;
+  allowRemote: boolean;
+  defaultCwd: string;
+  defaultAgentPreset: string;
+  defaultTimeoutMs: number;
+  maxWaitSliceMs: number;
+  maxWaitSliceMsRequested?: number;
+  historyBudgetMs: number;
+  historyBudgetMsRequested?: number;
+  maxBodyBytes: number;
+  maxSessions: number;
+  logRequests?: boolean;
+  traceDefault: TraceLevel;
+  traceDefaultRequested?: unknown;
+  maxResultChars: number;
+  timeoutAdvice: boolean;
+  approvals: ApprovalConfig;
+  tasksDbPath: string | null;
+  tasksProbeTimeoutMs: number;
+  tasksPreviewTtlMs: number;
+  tasksAdapters: Record<string, TaskAdapterConfig>;
+  tasksDispatchMaxSteps: number;
+  tasksEnabled: boolean;
+  tasksMaxConcurrent: number;
+  tasksRequireReconcileOnUnknown: boolean;
+  tasksExternalAdapter: string;
+  tasksAdapterDebugDetail: boolean;
+  tasksAutopilot: boolean;
+  tasksAutopilotIntervalMs: number;
+  tasksAutopilotMaxStart: number;
+  tasksAutopilotMaxPump: number;
+}
+
+export interface DescribedConfig {
+  enabled: boolean;
+  path: string;
+  allowRemote: boolean;
+  defaultCwd: string | null;
+  defaultAgentPreset: string | null;
+  defaultTimeoutMs: number;
+  historyBudgetMs: number;
+  maxWaitSliceMs: number;
+  maxWaitSliceMsRequested?: number;
+  historyBudgetMsRequested?: number;
+  maxBodyBytes: number;
+  maxSessions: number;
+  traceDefault: string;
+  traceDefaultRequested?: unknown;
+  maxResultChars: number;
+  timeoutAdvice: boolean;
+  approvals: {
+    mode: string;
+    deadlineMs: number;
+  };
+  tasksDbPath: string | null;
+  tasksProbeTimeoutMs: number;
+  tasksPreviewTtlMs: number;
+  tasksAdapters: Record<string, TaskAdapterConfig>;
+  tasksDispatchMaxSteps: number;
+  tasksEnabled: boolean;
+  tasksMaxConcurrent: number;
+  tasksRequireReconcileOnUnknown: boolean;
+  tasksExternalAdapter: string;
+  tasksAdapterDebugDetail: boolean;
+  tasksAutopilot: boolean;
+  tasksAutopilotIntervalMs: number;
+  tasksAutopilotMaxStart: number;
+  tasksAutopilotMaxPump: number;
+}
+
+const DEFAULTS: ResolvedConfig = {
   enabled: true,
   token: "",
   tokenFile: "",
@@ -50,9 +144,6 @@ const DEFAULTS = {
   tasksAutopilotMaxStart: 2,
   tasksAutopilotMaxPump: 4,
 };
-
-/** The approval modes this build understands. */
-export const APPROVAL_MODES = ["off", "deny", "delegate"];
 
 /**
  * Ceiling and floor for a slice, as transport facts rather than preferences:
@@ -101,59 +192,69 @@ export const MIN_TASKS_AUTOPILOT_MAX_START = 1;
 export const MAX_TASKS_AUTOPILOT_MAX_START = 32;
 export const MIN_TASKS_AUTOPILOT_MAX_PUMP = 1;
 export const MAX_TASKS_AUTOPILOT_MAX_PUMP = 200;
-export const TASKS_EXTERNAL_ADAPTERS = Object.freeze(["none", "antigravity", "codex"]);
 
 export class ConfigError extends Error {
-  constructor(problems) {
+  readonly problems: string[];
+
+  constructor(problems: string[]) {
     super(`invalid dsh-rpc config: ${problems.join("; ")}`);
     this.name = "ConfigError";
     this.problems = problems;
   }
 }
 
-export function resolveConfig(input = {}) {
+export function resolveConfig(input: Record<string, unknown> | null | undefined = {}): ResolvedConfig {
   if (input === null || input === undefined) input = {};
   if (typeof input !== "object" || Array.isArray(input)) {
     throw new ConfigError(["config must be an object"]);
   }
 
-  const problems = [];
-  const take = (key, check, message) => {
-    const raw = input[key];
+  const problems: string[] = [];
+  const take = <K extends keyof ResolvedConfig>(
+    key: K,
+    check: (raw: unknown) => ResolvedConfig[K] | undefined,
+    message: string,
+  ): ResolvedConfig[K] => {
+    const raw = input[key as string];
     if (raw === undefined) return DEFAULTS[key];
     const value = check(raw);
-    if (value === undefined) problems.push(`${key}: ${message}`);
-    return value;
+    if (value === undefined) problems.push(`${String(key)}: ${message}`);
+    return value as ResolvedConfig[K];
   };
 
-  const asBoolean = (raw) => (typeof raw === "boolean" ? raw : undefined);
-  const asString = (raw) => (typeof raw === "string" ? raw.trim() : undefined);
-  const asPositiveInt = (raw) =>
-    Number.isInteger(raw) && raw > 0 ? raw : undefined;
-  const asResultChars = (raw) =>
-    Number.isInteger(raw) && raw >= MIN_RESULT_CHARS && raw <= MAX_RESULT_CHARS ? raw : undefined;
-  const asNullablePath = (raw) => {
+  const asBoolean = (raw: unknown): boolean | undefined => (typeof raw === "boolean" ? raw : undefined);
+  const asString = (raw: unknown): string | undefined => (typeof raw === "string" ? raw.trim() : undefined);
+  const asPositiveInt = (raw: unknown): number | undefined =>
+    typeof raw === "number" && Number.isInteger(raw) && raw > 0 ? raw : undefined;
+  const asResultChars = (raw: unknown): number | undefined =>
+    typeof raw === "number" && Number.isInteger(raw) && raw >= MIN_RESULT_CHARS && raw <= MAX_RESULT_CHARS
+      ? raw
+      : undefined;
+  const asNullablePath = (raw: unknown): string | null | undefined => {
     if (raw === null) return null;
     if (typeof raw !== "string") return undefined;
     const trimmed = raw.trim();
     return trimmed.length === 0 ? null : trimmed;
   };
-  const asBoundedInt = (min, max) => (raw) =>
-    Number.isInteger(raw) && raw >= min && raw <= max ? raw : undefined;
-  const asAdaptersMap = (raw) => {
+  const asBoundedInt =
+    (min: number, max: number) =>
+    (raw: unknown): number | undefined =>
+      typeof raw === "number" && Number.isInteger(raw) && raw >= min && raw <= max ? raw : undefined;
+  const asAdaptersMap = (raw: unknown): Record<string, TaskAdapterConfig> | undefined => {
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
-    const out = {};
+    const out: Record<string, TaskAdapterConfig> = {};
     for (const [kind, entry] of Object.entries(raw)) {
       if (!kind.trim() || entry === null || typeof entry !== "object" || Array.isArray(entry)) {
         return undefined;
       }
-      const enabled = entry.enabled === undefined ? true : entry.enabled;
+      const rec = entry as Record<string, unknown>;
+      const enabled = rec.enabled === undefined ? true : rec.enabled;
       if (typeof enabled !== "boolean") return undefined;
-      const clean = { enabled };
-      for (const strKey of ["adapterConfigRef", "binary", "projectId", "model"]) {
-        if (entry[strKey] !== undefined) {
-          if (typeof entry[strKey] !== "string") return undefined;
-          clean[strKey] = entry[strKey].trim();
+      const clean: TaskAdapterConfig = { enabled };
+      for (const strKey of ["adapterConfigRef", "binary", "projectId", "model"] as const) {
+        if (rec[strKey] !== undefined) {
+          if (typeof rec[strKey] !== "string") return undefined;
+          clean[strKey] = (rec[strKey] as string).trim();
         }
       }
       out[kind.trim()] = clean;
@@ -165,18 +266,24 @@ export function resolveConfig(input = {}) {
   // accepted and a wrong mode is a named error rather than a silent fallback to
   // `off`: an operator who wrote `deny` and got `off` would believe their
   // unattended sessions answer themselves when they still hang.
-  const asApprovalConfig = (raw) => {
+  const asApprovalConfig = (raw: unknown): ApprovalConfig | undefined => {
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
-    const mode = raw.mode === undefined ? "off" : raw.mode;
-    if (!APPROVAL_MODES.includes(mode)) return undefined;
-    const deadlineMs = raw.deadlineMs === undefined ? DEFAULTS.approvals.deadlineMs : raw.deadlineMs;
-    if (!Number.isInteger(deadlineMs) || deadlineMs < MIN_APPROVAL_DEADLINE_MS || deadlineMs > MAX_APPROVAL_DEADLINE_MS) {
+    const obj = raw as Record<string, unknown>;
+    const mode = obj.mode === undefined ? "off" : obj.mode;
+    if (typeof mode !== "string" || !(APPROVAL_MODES as readonly string[]).includes(mode)) return undefined;
+    const deadlineMs = obj.deadlineMs === undefined ? DEFAULTS.approvals.deadlineMs : obj.deadlineMs;
+    if (
+      typeof deadlineMs !== "number" ||
+      !Number.isInteger(deadlineMs) ||
+      deadlineMs < MIN_APPROVAL_DEADLINE_MS ||
+      deadlineMs > MAX_APPROVAL_DEADLINE_MS
+    ) {
       return undefined;
     }
-    return { mode, deadlineMs };
+    return { mode: mode as ConfigApprovalMode, deadlineMs };
   };
 
-  const config = {
+  const config: ResolvedConfig = {
     enabled: take("enabled", asBoolean, "expected a boolean"),
     token: take("token", asString, "expected a string"),
     tokenFile: take("tokenFile", asString, "expected a string"),
@@ -232,7 +339,10 @@ export function resolveConfig(input = {}) {
     tasksRequireReconcileOnUnknown: take("tasksRequireReconcileOnUnknown", asBoolean, "expected a boolean"),
     tasksExternalAdapter: take(
       "tasksExternalAdapter",
-      (raw) => (typeof raw === "string" && TASKS_EXTERNAL_ADAPTERS.includes(raw.trim()) ? raw.trim() : undefined),
+      (raw) =>
+        typeof raw === "string" && (TASKS_EXTERNAL_ADAPTERS as readonly string[]).includes(raw.trim())
+          ? raw.trim()
+          : undefined,
       `expected one of ${TASKS_EXTERNAL_ADAPTERS.map((v) => `"${v}"`).join(" | ")}`,
     ),
     tasksAdapterDebugDetail: take("tasksAdapterDebugDetail", asBoolean, "expected a boolean"),
@@ -300,27 +410,27 @@ export function resolveConfig(input = {}) {
 }
 
 /** Public projection: never leak the shared secret through `dsh.ping`. */
-export function describeConfig(config) {
+export function describeConfig(config: Partial<ResolvedConfig>): DescribedConfig {
   return {
-    enabled: config.enabled,
-    path: config.path,
-    allowRemote: config.allowRemote,
+    enabled: config.enabled ?? DEFAULTS.enabled,
+    path: config.path ?? DEFAULTS.path,
+    allowRemote: config.allowRemote ?? DEFAULTS.allowRemote,
     defaultCwd: config.defaultCwd || null,
     defaultAgentPreset: config.defaultAgentPreset || null,
-    defaultTimeoutMs: config.defaultTimeoutMs,
-    historyBudgetMs: config.historyBudgetMs,
-    maxWaitSliceMs: config.maxWaitSliceMs,
+    defaultTimeoutMs: config.defaultTimeoutMs ?? DEFAULTS.defaultTimeoutMs,
+    historyBudgetMs: config.historyBudgetMs ?? DEFAULTS.historyBudgetMs,
+    maxWaitSliceMs: config.maxWaitSliceMs ?? DEFAULTS.maxWaitSliceMs,
     ...(config.maxWaitSliceMsRequested === undefined
       ? {}
       : { maxWaitSliceMsRequested: config.maxWaitSliceMsRequested }),
-    maxBodyBytes: config.maxBodyBytes,
-    maxSessions: config.maxSessions,
-    traceDefault: config.traceDefault,
+    maxBodyBytes: config.maxBodyBytes ?? DEFAULTS.maxBodyBytes,
+    maxSessions: config.maxSessions ?? DEFAULTS.maxSessions,
+    traceDefault: config.traceDefault ?? DEFAULTS.traceDefault,
     ...(config.traceDefaultRequested === undefined
       ? {}
       : { traceDefaultRequested: config.traceDefaultRequested }),
-    maxResultChars: config.maxResultChars,
-    timeoutAdvice: config.timeoutAdvice,
+    maxResultChars: config.maxResultChars ?? DEFAULTS.maxResultChars,
+    timeoutAdvice: config.timeoutAdvice ?? DEFAULTS.timeoutAdvice,
     approvals: {
       mode: config.approvals?.mode ?? "off",
       deadlineMs: config.approvals?.deadlineMs ?? DEFAULTS.approvals.deadlineMs,

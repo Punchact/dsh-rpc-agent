@@ -66,10 +66,17 @@ jobs:
           echo "tag: $actual   package.json: $expected"
           test "$actual" = "$expected"
 
+      # Source lives in `src/**/*.mts`; `check:version` imports `./dist/lib/version.mjs` and
+      # `check-docs`/`check-surface`/`check-release-path` inspect built `dist/` outputs.
+      # Build MUST run before `check:version` on a clean checkout, otherwise `check:version`
+      # fails with ERR_MODULE_NOT_FOUND when `dist/` does not exist yet.
+      - run: npm run build
       - run: npm run check:version
+      - run: npm run check:types
       - run: npm test
       - run: npm run test:host
       - run: npm run check:package
+      - run: node scripts/check-release-path.mjs
 
   publish:
     name: publish
@@ -97,6 +104,9 @@ jobs:
           # Deliberately no dependency cache in the publishing job: a release build should not
           # reuse a download cache that something else could have poisoned.
       - run: npm ci
+      # Build the publishable `dist/` package before publishing (the repo root is marked `private: true`
+      # and ships no `index.mjs`/`lib/`/`bin/`; every publish runs inside `dist/`).
+      - run: npm run build
       - name: toolchain
         run: |
           echo "node $(node --version), npm $(npm --version)"
@@ -170,7 +180,7 @@ jobs:
             # again against an already-released commit is a normal thing to do, so report that state
             # and treat it as the end of the rehearsal instead of a failure. Nothing is lost: the
             # pack contents were already checked by `check:package` in the verify job.
-            VERSION=$(node -p "require('./package.json').version")
+            VERSION=$(node -p "require('./dist/package.json').version")
             CODE=$(curl -sS -o /dev/null -w '%{http_code}' \
               "https://registry.npmjs.org/@punchact%2Fdsh-rpc-agent/${VERSION}")
             if [ "$CODE" = "200" ]; then
@@ -178,8 +188,8 @@ jobs:
               echo "::notice::version ${VERSION} already exists, so this rehearsal stops here — bump the version to rehearse a publish"
               exit 0
             fi
-            echo "rehearsal: npm publish --access public --dry-run"
-            npm publish --access public --dry-run
+            echo "rehearsal: (cd dist && npm publish --access public --dry-run)"
+            (cd dist && npm publish --access public --dry-run)
             exit 0
           fi
 
@@ -187,12 +197,12 @@ jobs:
           # while `npm publish` needs the extra "Allowed actions" tick. Staging tells the two
           # failure modes apart — a staging publish that authenticates proves the entry matches.
           if [ "${{ inputs.stage }}" = "true" ]; then
-            echo "diagnostic: npm stage publish --access public"
-            npm stage publish --access public
+            echo "diagnostic: (cd dist && npm stage publish --access public)"
+            (cd dist && npm stage publish --access public)
             exit 0
           fi
 
-          if npm publish --access public; then
+          if (cd dist && npm publish --access public); then
             echo "published"
             exit 0
           fi

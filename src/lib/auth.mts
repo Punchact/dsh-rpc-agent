@@ -17,26 +17,65 @@ import { PLUGIN_NAME } from "./version.mjs";
 
 export const MIN_TOKEN_LENGTH = 16;
 
-export function dshHome(env = process.env) {
+export type TokenSource = "config" | "env" | "file" | "generated";
+
+export interface AuthConfigInput {
+  token?: string;
+  tokenFile?: string;
+}
+
+export interface LoadOrCreateTokenResult {
+  token: string;
+  source: TokenSource;
+  path: string | null;
+}
+
+export interface PublishedEndpoint {
+  url: string;
+  origin?: string;
+  path?: string;
+  version?: string;
+  plugin?: string;
+  pid?: number;
+  startedAt?: string;
+  updatedAt?: string;
+}
+
+export interface WriteEndpointOptions {
+  url: string;
+  origin: string;
+  path: string;
+  version: string;
+}
+
+export interface WriteEndpointResult {
+  path: string;
+  payload: Required<PublishedEndpoint>;
+}
+
+export function dshHome(env: Record<string, string | undefined> = process.env): string {
   const explicit = env.DSH_HOME?.trim();
   if (explicit) return explicit;
   return join(homedir(), ".dsh");
 }
 
-export function stateDir(env = process.env) {
+export function stateDir(env: Record<string, string | undefined> = process.env): string {
   return join(dshHome(env), "dsh-rpc");
 }
 
-export function tokenPath(config = {}, env = process.env) {
+export function tokenPath(
+  config: AuthConfigInput = {},
+  env: Record<string, string | undefined> = process.env,
+): string {
   const explicit = typeof config.tokenFile === "string" ? config.tokenFile.trim() : "";
   return explicit ? explicit : join(stateDir(env), "token");
 }
 
-export function endpointPath(env = process.env) {
+export function endpointPath(env: Record<string, string | undefined> = process.env): string {
   return join(stateDir(env), "endpoint.json");
 }
 
-function readText(path) {
+function readText(path: string): string | null {
   try {
     return readFileSync(path, "utf8");
   } catch {
@@ -49,7 +88,10 @@ function readText(path) {
  * then the persisted file, then a freshly generated secret that is written back
  * so later CLI/MCP invocations find the same value.
  */
-export function loadOrCreateToken(config = {}, env = process.env) {
+export function loadOrCreateToken(
+  config: AuthConfigInput = {},
+  env: Record<string, string | undefined> = process.env,
+): LoadOrCreateTokenResult {
   const configured = typeof config.token === "string" ? config.token.trim() : "";
   if (configured) {
     if (configured.length < MIN_TOKEN_LENGTH) {
@@ -83,8 +125,9 @@ export function loadOrCreateToken(config = {}, env = process.env) {
     // `wx` refuses to clobber a secret another process wrote between the read
     // above and this write, which would leave two instances with different tokens.
     writeFileSync(path, `${token}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
-  } catch (error) {
-    if (error?.code === "EEXIST") {
+  } catch (error: unknown) {
+    const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+    if (code === "EEXIST") {
       const winner = readText(path)?.trim();
       if (winner && winner.length >= MIN_TOKEN_LENGTH) return { token: winner, source: "file", path };
       throw new ConfigError([`token file ${path}: raced with another writer and is unusable; delete it and retry`]);
@@ -101,7 +144,7 @@ export function loadOrCreateToken(config = {}, env = process.env) {
 }
 
 /** Constant-time comparison over fixed-length digests. */
-export function tokenMatches(expected, presented) {
+export function tokenMatches(expected: unknown, presented: unknown): boolean {
   if (typeof presented !== "string" || presented.length === 0) return false;
   if (typeof expected !== "string" || expected.length === 0) return false;
   const a = createHash("sha256").update(expected, "utf8").digest();
@@ -110,7 +153,9 @@ export function tokenMatches(expected, presented) {
 }
 
 /** Accept `Authorization: Bearer <token>` or `X-DSH-RPC-Token: <token>`. */
-export function extractToken(headers) {
+export function extractToken(
+  headers: Record<string, string | string[] | undefined> | undefined,
+): string {
   const auth = headers?.authorization;
   if (typeof auth === "string") {
     const match = /^Bearer\s+(.+)$/i.exec(auth.trim());
@@ -127,9 +172,12 @@ export function extractToken(headers) {
 // difference between retrying and reporting.
 const PROCESS_STARTED_AT = new Date(Date.now() - Math.round(process.uptime() * 1000)).toISOString();
 
-export function writeEndpoint({ url, origin, path, version }, env = process.env) {
+export function writeEndpoint(
+  { url, origin, path, version }: WriteEndpointOptions,
+  env: Record<string, string | undefined> = process.env,
+): WriteEndpointResult {
   const target = endpointPath(env);
-  const payload = {
+  const payload: Required<PublishedEndpoint> = {
     url,
     origin,
     path,
@@ -148,17 +196,20 @@ export function writeEndpoint({ url, origin, path, version }, env = process.env)
   return { path: target, payload };
 }
 
-export function readEndpoint(env = process.env) {
+export function readEndpoint(env: Record<string, string | undefined> = process.env): PublishedEndpoint | null {
   const raw = readText(endpointPath(env));
   if (!raw) return null;
   try {
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : null;
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as PublishedEndpoint) : null;
   } catch {
     return null;
   }
 }
 
-export function readTokenFromFile(config = {}, env = process.env) {
+export function readTokenFromFile(
+  config: AuthConfigInput = {},
+  env: Record<string, string | undefined> = process.env,
+): string | null {
   return readText(tokenPath(config, env))?.trim() || null;
 }

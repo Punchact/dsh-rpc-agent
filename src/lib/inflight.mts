@@ -11,15 +11,27 @@
  * guarded by identity, so a late completion can never evict a live controller.
  */
 
-export function createInflight() {
-  const controllers = new Map();
+export interface InflightBeginResult {
+  controller: AbortController;
+  previous: AbortController | undefined;
+}
+
+export interface InflightRegistry {
+  begin(id: string | number, controller?: AbortController): InflightBeginResult;
+  cancel(id: string | number): boolean;
+  settle(id: string | number, controller: AbortController): boolean;
+  readonly size: number;
+}
+
+export function createInflight(): InflightRegistry {
+  const controllers = new Map<string, AbortController>();
 
   return {
     /**
      * Register a controller for `id`. Returns the controller and whatever it
      * replaced, so a caller can tell an overlap from a fresh request.
      */
-    begin(id, controller = new AbortController()) {
+    begin(id: string | number, controller: AbortController = new AbortController()): InflightBeginResult {
       const key = String(id);
       const previous = controllers.get(key);
       controllers.set(key, controller);
@@ -27,7 +39,7 @@ export function createInflight() {
     },
 
     /** Abort the controller currently registered for `id`; false when absent. */
-    cancel(id) {
+    cancel(id: string | number): boolean {
       const controller = controllers.get(String(id));
       if (!controller) return false;
       controller.abort();
@@ -38,14 +50,14 @@ export function createInflight() {
      * Remove `controller` only when it is still the registered one for `id`.
      * Returns false when a newer request took the id over — nothing is removed.
      */
-    settle(id, controller) {
+    settle(id: string | number, controller: AbortController): boolean {
       const key = String(id);
       if (controllers.get(key) !== controller) return false;
       controllers.delete(key);
       return true;
     },
 
-    get size() {
+    get size(): number {
       return controllers.size;
     },
   };

@@ -41,16 +41,45 @@ export const DEFAULT_NAMESPACE = "mcp";
  */
 export const ROTATE_AFTER_ASKS = 200;
 
+export interface StickyRegistryEntry {
+  key: string;
+  sessionId: string;
+  project?: string | null;
+  cwd?: string | null;
+  previousSessionId?: string | null;
+  asks?: number;
+  updatedAt?: string;
+}
+
+export interface StickyRegistryRecordInput {
+  sessionId: string;
+  project?: string | null;
+  cwd?: string | null;
+  previousSessionId?: string | null;
+  asks?: number;
+}
+
+export interface StickyRegistryFile {
+  version: number;
+  sessions: Record<string, Omit<StickyRegistryEntry, "key">>;
+}
+
+export interface RegistryKeyOptions {
+  namespace?: string | null;
+  project?: string | null;
+  cwd?: string | null;
+}
+
 // This lock protects callers sharing this registry module in one Node process.
 // It deliberately makes no cross-process coordination guarantee.
-const writes = new Map();
+const writes = new Map<string, Promise<void>>();
 
-async function withRegistryWriteLock(file, operation) {
+async function withRegistryWriteLock<T>(file: string, operation: () => Promise<T>): Promise<T> {
   const key = resolve(file);
   const previous = writes.get(key) ?? Promise.resolve();
-  let release;
-  const current = new Promise((resolve) => {
-    release = resolve;
+  let release!: () => void;
+  const current = new Promise<void>((resolvePromise) => {
+    release = resolvePromise;
   });
   const queued = previous.then(() => current);
   writes.set(key, queued);
@@ -63,7 +92,7 @@ async function withRegistryWriteLock(file, operation) {
   }
 }
 
-export function registryPath(env = process.env) {
+export function registryPath(env: Record<string, string | undefined> = process.env): string {
   return join(stateDir(env), "sessions.json");
 }
 
@@ -73,7 +102,7 @@ export function registryPath(env = process.env) {
  * `project` wins over `cwd` on purpose: a project may be worked on from several
  * checkouts, and the caller that names a project is asking for exactly that.
  */
-export function registryKey({ namespace, project, cwd } = {}) {
+export function registryKey({ namespace, project, cwd }: RegistryKeyOptions = {}): string | null {
   const ns = typeof namespace === "string" && namespace.trim() ? namespace.trim() : DEFAULT_NAMESPACE;
   const scope = (typeof project === "string" && project.trim()) || (typeof cwd === "string" && cwd.trim()) || "";
   if (!scope) return null;
@@ -83,36 +112,46 @@ export function registryKey({ namespace, project, cwd } = {}) {
   return `v2:${Buffer.from(JSON.stringify([ns, scope])).toString("base64url")}`;
 }
 
-function emptyRegistry() {
+function emptyRegistry(): StickyRegistryFile {
   return { version: REGISTRY_VERSION, sessions: {} };
 }
 
-export async function readRegistry(file = registryPath()) {
-  let text;
+export async function readRegistry(file: string = registryPath()): Promise<StickyRegistryFile> {
+  let text: string;
   try {
     text = await readFile(file, "utf8");
   } catch {
     return emptyRegistry();
   }
-  let parsed;
+  let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
     return emptyRegistry();
   }
-  if (!parsed || typeof parsed !== "object" || !parsed.sessions || typeof parsed.sessions !== "object") {
+  if (!parsed || typeof parsed !== "object") {
     return emptyRegistry();
   }
-  return { version: REGISTRY_VERSION, sessions: { ...parsed.sessions } };
+  const obj = parsed as { sessions?: unknown };
+  if (!obj.sessions || typeof obj.sessions !== "object") {
+    return emptyRegistry();
+  }
+  return {
+    version: REGISTRY_VERSION,
+    sessions: { ...(obj.sessions as Record<string, Omit<StickyRegistryEntry, "key">>) },
+  };
 }
 
-export async function writeRegistry(registry, file = registryPath()) {
+export async function writeRegistry(
+  registry: { version: number; sessions: Record<string, unknown> },
+  file: string = registryPath(),
+): Promise<string> {
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(tmp, `${JSON.stringify(registry, null, 2)}\n`, { mode: 0o600, encoding: "utf8" });
   try {
     await rename(tmp, file);
-  } catch (error) {
+  } catch (error: unknown) {
     await unlink(tmp).catch(() => {});
     throw error;
   }
@@ -122,7 +161,7 @@ export async function writeRegistry(registry, file = registryPath()) {
   return file;
 }
 
-export async function lookupEntry(key, file = registryPath()) {
+export async function lookupEntry(key: string | null, file: string = registryPath()): Promise<StickyRegistryEntry | null> {
   if (!key) return null;
   const registry = await readRegistry(file);
   const entry = registry.sessions[key];
@@ -134,26 +173,35 @@ export async function lookupEntry(key, file = registryPath()) {
  * Record (or refresh) a mapping and bump its use counter in one atomic write.
  * Returns the stored entry so the caller can report `asks`/rotation state.
  */
-async function rememberEntryUnlocked(key, entry, file) {
+async function rememberEntryUnlocked(
+  key: string,
+  entry: StickyRegistryRecordInput,
+  file: string,
+): Promise<StickyRegistryEntry> {
   const registry = await readRegistry(file);
   const previous = registry.sessions[key];
-  const asks = Number.isInteger(entry.asks)
-    ? entry.asks
-    : Number.isInteger(previous?.asks) && previous?.sessionId === entry.sessionId
-      ? previous.asks + 1
-      : 1;
-  const stored = { ...entry, asks, updatedAt: new Date().toISOString() };
+  const asks =
+    typeof entry.asks === "number" && Number.isInteger(entry.asks)
+      ? entry.asks
+      : typeof previous?.asks === "number" && Number.isInteger(previous.asks) && previous?.sessionId === entry.sessionId
+        ? previous.asks + 1
+        : 1;
+  const stored: Omit<StickyRegistryEntry, "key"> = { ...entry, asks, updatedAt: new Date().toISOString() };
   registry.sessions[key] = stored;
   await writeRegistry(registry, file);
   return { key, ...stored };
 }
 
-export async function rememberEntry(key, entry, file = registryPath()) {
+export async function rememberEntry(
+  key: string | null,
+  entry: StickyRegistryRecordInput,
+  file: string = registryPath(),
+): Promise<StickyRegistryEntry | null> {
   if (!key) return null;
   return withRegistryWriteLock(file, () => rememberEntryUnlocked(key, entry, file));
 }
 
-export async function forgetEntry(key, file = registryPath()) {
+export async function forgetEntry(key: string | null, file: string = registryPath()): Promise<boolean> {
   if (!key) return false;
   return withRegistryWriteLock(file, async () => {
     const registry = await readRegistry(file);

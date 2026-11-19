@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 import { formatCapabilities, normalizeSections, SECTION_IDS } from "../dist/lib/capabilities.mjs";
 import { PLUGIN_VERSION, PROTOCOL_VERSION } from "../dist/lib/version.mjs";
@@ -105,4 +108,67 @@ test("normalizeSections handles null, [], [*], subset, duplicates, and unknown i
   const wildcardWithUnknown = normalizeSections(["*", "bogus"]);
   assert.deepEqual(wildcardWithUnknown.sections, [...SECTION_IDS]);
   assert.deepEqual(wildcardWithUnknown.missing, ["bogus"]);
+});
+
+test("capabilities and host-facts export structured TypeScript contracts checked at compile time", () => {
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const validProbe = resolve(repoRoot, "src/__caps_valid_probe__.mts");
+  const badProbe = resolve(repoRoot, "src/__caps_bad_probe__.mts");
+
+  const validSource = `
+import {
+  formatCapabilities,
+  normalizeSections,
+  type CapabilitySectionId,
+  type CollectedCapabilitySection,
+  type FormattedCapabilities,
+} from "./lib/capabilities.mjs";
+import { collectFacts } from "./lib/host-facts.mjs";
+
+const _section: CapabilitySectionId = "identity";
+const _norm = normalizeSections([_section]);
+const _items: CollectedCapabilitySection[] = [{ id: _section, status: "ok", source: "plugin", lines: ["ok"] }];
+const _formatted: FormattedCapabilities = formatCapabilities(_items, { maxChars: 1000, missing: _norm.missing });
+const _collected: Promise<CollectedCapabilitySection[]> = collectFacts({ sections: ["identity", "runtime"] });
+void [_formatted, _collected];
+`;
+
+  const badSource = `
+import type { CapabilitySectionId } from "./lib/capabilities.mjs";
+import { collectFacts } from "./lib/host-facts.mjs";
+
+const badSection: CapabilitySectionId = "nonexistent";
+void collectFacts({ sections: [123 as unknown as CapabilitySectionId], sessionId: 42 });
+void badSection;
+`;
+
+  const configPath = resolve(repoRoot, "tsconfig.json");
+  const parsed = ts.readConfigFile(configPath, ts.sys.readFile);
+  const cmd = ts.parseJsonConfigFileContent(parsed.config, ts.sys, repoRoot);
+  const options = { ...cmd.options, noEmit: true };
+
+  const runProbe = (filePath, content) => {
+    const virtualFiles = new Map([[resolve(filePath), content]]);
+    const host = ts.createCompilerHost(options, true);
+    const origGetSourceFile = host.getSourceFile.bind(host);
+    const origFileExists = host.fileExists.bind(host);
+    host.fileExists = (p) => virtualFiles.has(resolve(p)) || origFileExists(p);
+    host.getSourceFile = (p, lang) => {
+      const hit = virtualFiles.get(resolve(p));
+      if (hit !== undefined) return ts.createSourceFile(p, hit, lang, true);
+      return origGetSourceFile(p, lang);
+    };
+    host.writeFile = () => {
+      throw new Error("unexpected write during in-memory compiler check");
+    };
+    const program = ts.createProgram([filePath], options, host);
+    return ts.getPreEmitDiagnostics(program).filter((d) => d.file && resolve(d.file.fileName) === resolve(filePath));
+  };
+
+  assert.deepEqual(
+    runProbe(validProbe, validSource).map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n")),
+    [],
+  );
+  const badDiagnostics = runProbe(badProbe, badSource);
+  assert.ok(badDiagnostics.length >= 2, `expected >= 2 compile-time rejections, got ${badDiagnostics.length}`);
 });
