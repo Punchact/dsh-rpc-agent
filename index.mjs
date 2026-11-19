@@ -17,6 +17,7 @@ import { createDshAdapter } from "./lib/adapters/dsh.mjs";
 import { dshHome, endpointPath, loadOrCreateToken, tokenPath, writeEndpoint } from "./lib/auth.mjs";
 import { createApprovalState } from "./lib/approval-state.mjs";
 import { createApprovalGate } from "./lib/approvals.mjs";
+import { probesFromAdapter } from "./lib/agents/probe.mjs";
 import { MAX_WAIT_SLICE_MS, MIN_WAIT_SLICE_MS, resolveConfig } from "./lib/config.mjs";
 import { buildDispatcher, registerRoutes } from "./lib/http.mjs";
 import { createDshAdapterOps, createMethods } from "./lib/methods.mjs";
@@ -276,6 +277,11 @@ export async function apply(ctx, input = {}) {
       taskDispatcher,
       adapters,
       taskCentre,
+      // A capability card describes one executor, so only that executor can verify it:
+      // resolve the adapter the agent is assigned to and hand its read-only control
+      // table to the probe runner. Without this the runner sees no probe for any
+      // control and reports every card as `unknown`, forever.
+      agentProbes: (row) => probesFromAdapter(adapters?.[row?.adapter_kind]),
     },
     config,
     ctx,

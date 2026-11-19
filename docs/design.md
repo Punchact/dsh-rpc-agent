@@ -736,3 +736,17 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 - **规矩一：缺适配器不许编状态**。没有适配器就不是「派发中」，也不是「等待执行」——任务停在 `queued`，失败留在 `autopilotStats.lastFailed` 里；不给它一个看似正常的中间态。
 - **规矩二：可观测必须给出「为什么没动」**。只记录「本遍 0 启动」等于什么都没说；`autopilotStats` 要带上失败条数与最后一条错误，`ping` 必须把这些字段投影出来（0.9.1 之前的投影把它们滤掉了，见 CHANGELOG 同名条目）。
 - **怎么钉住**：真机侧由 `a07-antigravity-executor.mjs` 断言「能力卡被接受 + probe 有证据 + cascadeId 出现 + cancel 有回执」；配置侧由 profile 的 `tasksExternalAdapter` / `tasksAdapters` 两个键决定，README 的配置表已写明。
+
+## 50. 决策 0.9.1-d：能力卡必须由执行方自己作证
+
+**现象。** 真机 A07 探针第一次跑就撞上：`dsh.agents.probe` 返回六项控制全 `rejected`、`probeStatus: "unknown"`，而同一个代理紧接着就真的在 Antigravity 里建出了 cascade（`cascadeId 87647d49…`，两步：`USER_INPUT` + `PLANNER_RESPONSE`）。探针说它不会，派发说它能——两边对不上。
+
+**为什么。** `lib/agents/probe.mjs` 的编排器要的是「一个控制项一个探针函数」，适配器给的却是「一次调用、一张控制表」。中间那层桥在真实装配里是空的：`createMethods` 的 `agentProbes` 参数没人传，编排器对每个控制项都拿不到函数，于是统一报 `rejected`。这类缺陷不会让任何东西崩，只会让"未经证实"永远成立——卡的诚实性反而成了掩盖缺陷的帘子。
+
+**规矩。**
+
+1. 探针的答案只能来自**执行方自己**：由 `row.adapter_kind` 找到装配好的适配器，读它的 `probe()` 控制表，别在旁边再写一套判断。
+2. 一轮探针只打一次执行方（记忆化），不拿六个控制项去打六次语言服务器。
+3. 执行方缺席或撒谎时，结论必须是 `unknown`，不是"大概可以"——没装配的适配器不许借别人的证据。
+4. 回归钉住两件事：活适配器必须验得出来（`verified` + `verifiedControls`），未装配适配器的代理必须停在 `unknown`。
+
