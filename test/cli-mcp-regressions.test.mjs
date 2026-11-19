@@ -1,11 +1,12 @@
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createServer } from "node:http";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { closeServer, listenSafe } from "./helpers/stub-server.mjs";
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 const token = "cli-mcp-regression-token-0123456789";
@@ -20,7 +21,7 @@ let responseBody = "{}";
 let responseStatus = 200;
 
 after(async () => {
-  if (server) await new Promise((resolve) => server.close(resolve));
+  if (server) await closeServer(server);
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -28,7 +29,7 @@ async function startServer() {
   calls = [];
   responseBody = "{}";
   responseStatus = 200;
-  server = createServer(async (request, response) => {
+  const bound = await listenSafe(async (request, response) => {
     let raw = "";
     for await (const chunk of request) raw += chunk;
     const envelope = JSON.parse(raw);
@@ -37,8 +38,8 @@ async function startServer() {
     response.setHeader("content-type", "application/json");
     response.end(typeof responseBody === "function" ? responseBody(envelope) : responseBody);
   });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const url = `http://127.0.0.1:${server.address().port}/dsh-rpc`;
+  server = bound.server;
+  const url = bound.url;
   writeFileSync(endpointFile, JSON.stringify({ url, origin: url.replace(/\/dsh-rpc$/, ""), path: "/dsh-rpc" }));
 }
 

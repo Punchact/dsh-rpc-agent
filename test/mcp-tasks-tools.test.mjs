@@ -303,3 +303,140 @@ test("MCP refuses prototype keys and schema constraints deeper than the old cap"
     /a\.b\.c\.d — must be >= 10/,
   );
 });
+
+test("MCP dsh_task_preview and dsh_task_list surface preview headers, degraded, pending, and resultValid", async () => {
+  resetBridgeDefaults();
+  await withMockRpc(
+    (req) => {
+      if (req.method === "dsh.discover") {
+        return { result: { config: { tasksEnabled: true }, methods: [{ name: "dsh.tasks.list" }] } };
+      }
+      if (req.method === "dsh.tasks.preview") {
+        return {
+          result: {
+            previewId: "pv_mcp_1",
+            agentId: "ag-1",
+            workspaceId: "local",
+            capabilityRevisionId: "rev-1",
+            degraded: [{ control: "cancel", effect: "no cancel" }],
+            expiresAt: "2026-11-19T20:00:00.000Z",
+          },
+        };
+      }
+      if (req.method === "dsh.tasks.list") {
+        return {
+          result: {
+            items: [
+              {
+                taskId: "t_bad",
+                status: "succeeded",
+                phase: "done/Finished",
+                resultValid: false,
+                degraded: [{ control: "cancel" }],
+                pending: { attention: [{ questionId: "q_1" }], approvals: [{ approvalId: "ap_1" }] },
+              },
+            ],
+            hasMore: false,
+          },
+        };
+      }
+      return { result: {} };
+    },
+    async () => {
+      const previewRes = await callTool("dsh_task_preview", {
+        workspace_id: "local",
+        agent_id: "ag-1",
+        capability_revision_id: "rev-1",
+      });
+      assert.equal(previewRes.isError, false);
+      assert.match(previewRes.content[0].text, /^preview pv_mcp_1 · ag-1 · expires /);
+      assert.doesNotMatch(previewRes.content[0].text, /task \? · unknown/);
+      assert.match(previewRes.content[1].text, /degraded \(1\): cancel/);
+
+      const listRes = await callTool("dsh_task_list", {});
+      assert.equal(listRes.isError, false);
+      assert.match(
+        listRes.content[1].text,
+        /task t_bad · succeeded · done\/Finished \[unvalidated · degraded\(cancel\) · attention=1 · approvals=1\]/,
+      );
+    },
+  );
+});
+
+test("MCP task tools pass client transport errors (EBADPORT, ECONNREFUSED) through verbatim instead of adapter-sanitizing them", async () => {
+  for (const [cause, expectPattern] of [
+    [new Error("bad port"), /EBADPORT/],
+    [Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:9"), { code: "ECONNREFUSED" }), /ECONNREFUSED/],
+  ]) {
+    resetBridgeDefaults();
+    const prevFetch = globalThis.fetch;
+    const prevUrl = process.env.DSH_RPC_URL;
+    const prevToken = process.env.DSH_RPC_TOKEN;
+    process.env.DSH_RPC_URL = "http://127.0.0.1:1/dsh-rpc";
+    process.env.DSH_RPC_TOKEN = "mcp-test-token-0123456789abcdef";
+
+    globalThis.fetch = async (_url, init) => {
+      const req = JSON.parse(init.body);
+      if (req.method === "dsh.discover") {
+        return {
+          ok: true,
+          status: 200,
+          async text() {
+            return JSON.stringify({
+              jsonrpc: "2.0",
+              id: req.id,
+              result: { config: { tasksEnabled: true }, methods: [{ name: "dsh.tasks.list" }] },
+            });
+          },
+        };
+      }
+      throw new TypeError("fetch failed", { cause });
+    };
+
+    try {
+      const res = await callTool("dsh_task_list", {});
+      assert.equal(res.isError, true);
+      const text = res.content.map((p) => p.text).join("\n");
+      assert.match(text, expectPattern);
+      assert.doesNotMatch(text, /request rejected by adapter|executor is currently unavailable/);
+    } finally {
+      globalThis.fetch = prevFetch;
+      if (prevUrl === undefined) delete process.env.DSH_RPC_URL;
+      else process.env.DSH_RPC_URL = prevUrl;
+      if (prevToken === undefined) delete process.env.DSH_RPC_TOKEN;
+      else process.env.DSH_RPC_TOKEN = prevToken;
+      resetBridgeDefaults();
+    }
+  }
+});
+test("a client transport failure passes through with a next step, an adapter errno never rides along", async () => {
+  resetBridgeDefaults();
+  await withMockRpc(
+    (req) => {
+      if (req.method === "dsh.discover") {
+        return { result: { config: { tasksEnabled: true }, methods: [{ name: "dsh.tasks.list" }] } };
+      }
+      if (req.method === "dsh.tasks.get") {
+        // 客户端侧连不上：抛出去才是真实形状，fetch 失败不会变成一条 JSON-RPC 错误。
+        const cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:4035"), { code: "ECONNREFUSED" });
+        throw Object.assign(new TypeError("fetch failed"), { cause });
+      }
+      if (req.method === "dsh.tasks.list") {
+        // 执行方/子进程的 errno 带着绝对路径，它没有 transport 标记，必须继续净化。
+        return { error: { code: "ENOENT", message: "spawn C:\\Users\\Andy\\AppData\\Local\\fake\\codex.exe ENOENT" } };
+      }
+      return { result: {} };
+    },
+    async () => {
+      const refused = await callTool("dsh_task_get", { task_id: "task_x" });
+      assert.equal(refused.isError, true);
+      assert.match(refused.content[0].text, /127\.0\.0\.1:4035/);
+      assert.match(refused.content[0].text, /next: nothing answered on that port/);
+
+      const adapter = await callTool("dsh_task_list", {});
+      assert.equal(adapter.isError, true);
+      assert.doesNotMatch(adapter.content[0].text, /AppData|codex\.exe/);
+      assert.match(adapter.content[0].text, /execution backend (rejected|did not)/);
+    },
+  );
+});

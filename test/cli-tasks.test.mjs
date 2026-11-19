@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { UsageError, main, mixedVersionHint, parseArgv } from "../bin/dsh-rpc.mjs";
+import {
+  UsageError,
+  failureExitCode,
+  formatCliError,
+  main,
+  mixedVersionHint,
+  parseArgv,
+  probeHealth,
+} from "../bin/dsh-rpc.mjs";
 const NEXT_HINT =
   "  next: this Harness plugin predates the task centre (0.9.0). Upgrade the plugin inside the DSH profile — the bridge and the plugin ship together.";
 
@@ -175,6 +183,112 @@ test("CLI rejects out-of-range numeric flags, unsafe integers, and malformed JSO
       const code = await main(["tasks", "dispatch", "t_fail"]);
       assert.equal(code, 1);
       assert.doesNotMatch(getStdout(), /4035|secret_token/);
+    },
+  );
+});
+
+test("CLI tasks get non-JSON output prints resultValid, degraded, and pending attention/approvals", async () => {
+  await withMockCliRpc(
+    (req) => {
+      if (req.method === "dsh.tasks.get") {
+        return {
+          result: {
+            taskId: "t_unval",
+            status: "running",
+            phase: "person/review",
+            stateVersion: 4,
+            degraded: [{ control: "cancel", effect: "cancel moves to needs_reconcile" }],
+            pending: {
+              attention: [{ questionId: "q_rev", kind: "review", prompt: "check schema" }],
+              approvals: [{ approvalId: "ap_1", attemptId: "att_1", summary: "write file" }],
+            },
+            result: { draft: "ok" },
+            resultValid: false,
+          },
+        };
+      }
+      return { result: {} };
+    },
+    async ({ getStdout }) => {
+      const code = await main(["tasks", "get", "t_unval"]);
+      assert.equal(code, 0);
+      const out = getStdout();
+      assert.match(out, /task t_unval · running · person\/review · v4/);
+      assert.match(out, /degraded \(1\): cancel — cancel moves to needs_reconcile/);
+      assert.match(out, /pending attention \(1\): \[review q_rev\] check schema/);
+      assert.match(out, /pending approvals \(1\): \[ap_1@att_1\] write file/);
+      assert.match(out, /resultValid: false \(unvalidated: failed schema validation\)/);
+      assert.match(out, /result: \{"draft":"ok"\} \(unvalidated: failed schema validation\)/);
+    },
+  );
+});
+
+test("CLI probeHealth and failureExitCode distinguish EBADPORT without waiting out --wait or blaming a stopped Harness", async () => {
+  assert.equal(failureExitCode({ code: "EBADPORT" }), 3);
+  const badPortFmt = formatCliError({
+    code: "EBADPORT",
+    message: "dsh-rpc dsh.ping: fetch failed (bad port) — fetch refuses this port",
+  });
+  assert.equal(badPortFmt.exitCode, 3);
+  assert.doesNotMatch(badPortFmt.line, /is it running\?/);
+  assert.match(badPortFmt.line, /bad port/);
+
+  const refusedFmt = formatCliError({ code: "ECONNREFUSED", message: "refused" });
+  assert.equal(refusedFmt.exitCode, 3);
+  assert.match(refusedFmt.line, /is it running\?/);
+
+  const prevErrWrite = process.stderr.write;
+  let stderr = "";
+  process.stderr.write = (chunk) => {
+    stderr += String(chunk);
+    return true;
+  };
+  const startedAt = Date.now();
+  try {
+    const exitCode = await probeHealth("http://127.0.0.1:5060/dsh-rpc", 5_000);
+    const elapsed = Date.now() - startedAt;
+    assert.equal(exitCode, 3);
+    assert.ok(elapsed < 1_000, `EBADPORT must fail fast instead of polling --wait, took ${elapsed}ms`);
+    assert.match(stderr, /bad port/);
+    assert.match(stderr, /--url/);
+  } finally {
+    process.stderr.write = prevErrWrite;
+  }
+});
+test("the text listing says when a result is unvalidated or a task is degraded", async () => {
+  // 0.9.3 复核第三轮：列表是读文字的人第一眼看到的东西，别让他把「看见状态」当成「看见事实」。
+  await withMockCliRpc(
+    (req) => {
+      if (req.method === "dsh.discover") {
+        return { result: { config: { tasksEnabled: true }, methods: [{ name: "dsh.tasks.list" }] } };
+      }
+      if (req.method === "dsh.tasks.list") {
+        return {
+          result: {
+            items: [
+              {
+                taskId: "task_a",
+                status: "review_pending",
+                phase: "person/review",
+                stateVersion: 4,
+                resultValid: false,
+                degraded: [{ control: "approval" }],
+                pending: { attention: [{ questionId: "q_1" }], approvals: [] },
+              },
+              { taskId: "task_b", status: "succeeded", phase: "done/Finished", stateVersion: 7, resultValid: true },
+            ],
+            hasMore: false,
+          },
+        };
+      }
+      return { result: {} };
+    },
+    async ({ getStdout }) => {
+      const exitCode = await main(["tasks", "list"]);
+      assert.equal(exitCode, 0);
+      const out = getStdout();
+      assert.match(out, /task task_a · review_pending · person\/review \[unvalidated · degraded\(approval\) · attention=1\]  v4/);
+      assert.match(out, /task task_b · succeeded · done\/Finished \[resultValid=true\]  v7/);
     },
   );
 });

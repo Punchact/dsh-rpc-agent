@@ -21,7 +21,13 @@ import { fileURLToPath } from "node:url";
 import { rpcCall, waitForTurn, WAIT_SLICE_MS } from "../lib/client.mjs";
 import { sanitizeAdapterFailure } from "../lib/adapters/base.mjs";
 import { PLUGIN_VERSION } from "../lib/version.mjs";
-import { capText, formatToolResult, formatToolError } from "../lib/mcp-format.mjs";
+import {
+  capText,
+  formatTaskListLine,
+  formatTaskSummary,
+  formatToolError,
+  formatToolResult,
+} from "../lib/mcp-format.mjs";
 import { createInflight } from "../lib/inflight.mjs";
 import { normalizeTraceLevel } from "../lib/trace-format.mjs";
 import { DEFAULT_HISTORY_KINDS, formatHistory } from "../lib/history-format.mjs";
@@ -516,6 +522,19 @@ const TASK_TOOLS = [
 const TOOLS = [...BASE_TOOLS, ...TASK_TOOLS];
 const TASK_TOOL_NAMES = new Set(TASK_TOOLS.map((t) => t.name));
 
+// 客户端自己产生的传输层失败码。0.9.3 复核第三轮：这里必须是显式白名单，不能写成
+// 「任何 E 开头的码」——适配器的 spawn 失败也长这样（ENOENT），那类消息里带着绝对路径
+// 和命令行参数，必须继续走 sanitizeAdapterFailure，不许跟着这里一起裸奔出去。
+const CLIENT_TRANSPORT_CODES = new Set([
+  "EBADPORT",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EPIPE",
+  "ETIMEDOUT",
+  "UND_ERR_SOCKET",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
+
 // --------------------------------------------------------------- transport --
 
 let buffer = "";
@@ -773,46 +792,6 @@ async function isTasksEnabled(callFn = (method, params, options) => rpcCall(meth
 async function listTools() {
   const enabled = await isTasksEnabled();
   return enabled ? [...BASE_TOOLS, ...TASK_TOOLS] : [...BASE_TOOLS];
-}
-
-function formatTaskSummary(task, maxResultChars = DEFAULT_MAX_RESULT_CHARS) {
-  // 0.9.2 复核：只读文本的调用方（LLM、CLI 输出）看不到 structuredContent 里的 resultValid。
-  // 未过校验的结果必须在这行文字里就带上标记，否则「看得见」会被读成「已经验过」。
-  const unvalidated = task.resultValid === false;
-  const header = `task ${task.taskId ?? "?"} · ${task.status ?? "unknown"} · ${task.phase ?? "unknown"}`;
-  const bodyLines = [];
-  if (task.agentId) bodyLines.push(`agent: ${task.agentId}`);
-  if (task.workspaceId) bodyLines.push(`workspace: ${task.workspaceId}`);
-  if (task.notice) bodyLines.push(`notice: ${task.notice}`);
-  if (task.result !== undefined && task.result !== null) {
-    bodyLines.push(
-      `result: ${JSON.stringify(task.result)}${unvalidated ? " (unvalidated: failed schema validation)" : ""}`,
-    );
-  } else if (unvalidated) {
-    bodyLines.push("result: (none) (unvalidated: the executor reported ready without a validated result)");
-  }
-  if (task.error) bodyLines.push(`error: ${JSON.stringify(task.error)}`);
-  const meta = [
-    `v${task.stateVersion ?? "?"}`,
-    unvalidated ? "unvalidated" : null,
-    task.deduplicated ? "deduplicated" : null,
-    task.requestAccepted ? "requestAccepted" : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-  const content = capText(
-    [
-      { type: "text", text: header },
-      { type: "text", text: bodyLines.length > 0 ? bodyLines.join("\n") : "(no details)" },
-      { type: "text", text: `— ${meta}` },
-    ],
-    maxResultChars,
-  );
-  return {
-    content,
-    isError: false,
-    structuredContent: task,
-  };
 }
 
 // Keys that would reach Object.prototype if any later code copies arguments
@@ -1431,9 +1410,7 @@ async function callTool(name, args, signal = undefined) {
         }
         const result = await call("dsh.tasks.list", params);
         const items = Array.isArray(result?.items) ? result.items : [];
-        const lines = items.map(
-          (item) => `task ${item.taskId ?? "?"} · ${item.status ?? "unknown"} · ${item.phase ?? "unknown"}`,
-        );
+        const lines = items.map((item) => formatTaskListLine(item));
         const content = capText(
           [
             { type: "text", text: `tasks (${items.length})` },
@@ -1537,13 +1514,21 @@ async function callTool(name, args, signal = undefined) {
   } catch (error) {
     // `code` is the JSON-RPC code the bridge answered with; toolError turns it
     // into the concrete next step instead of leaving the caller to guess.
-    // Never surface raw adapter/transport/internal exception text to MCP callers.
+    // Client-side transport failures (`EBADPORT`, `ECONNREFUSED`, `ECONNRESET`,
+    // etc.) are passed through verbatim so diagnostics survive; only adapter and
+    // server/internal failures are sanitized.
+    const isTransport =
+      error?.transport === true ||
+      (CLIENT_TRANSPORT_CODES.has(String(error?.code ?? "")) &&
+        error?.taskCode !== "ADAPTER_UNAVAILABLE" &&
+        error?.data?.kind !== "ADAPTER_UNAVAILABLE");
     const isAdapterOrInternal =
-      error?.data?.kind === "ADAPTER_UNAVAILABLE" ||
-      error?.taskCode === "ADAPTER_UNAVAILABLE" ||
-      !Number.isInteger(error?.code) ||
-      error.code === -32000 ||
-      error.code === -32603;
+      !isTransport &&
+      (error?.data?.kind === "ADAPTER_UNAVAILABLE" ||
+        error?.taskCode === "ADAPTER_UNAVAILABLE" ||
+        !Number.isInteger(error?.code) ||
+        error.code === -32000 ||
+        error.code === -32603);
     if (TASK_TOOL_NAMES.has(name) && isAdapterOrInternal) {
       const safe = sanitizeAdapterFailure(error);
       return formatToolError(
@@ -1554,7 +1539,11 @@ async function callTool(name, args, signal = undefined) {
         error?.code,
       );
     }
-    return formatToolError(error instanceof Error ? error.message : String(error), error?.data, error?.code);
+    const errorData =
+      isTransport && typeof error?.code === "string" && error.code.length > 0
+        ? { ...(error?.data && typeof error.data === "object" ? error.data : {}), code: error.code }
+        : error?.data;
+    return formatToolError(error instanceof Error ? error.message : String(error), errorData, error?.code);
   }
 }
 

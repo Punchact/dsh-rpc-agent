@@ -14,6 +14,8 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { rpcCall, rpcStream, waitForTurn, WAIT_SLICE_MS } from "../lib/client.mjs";
+import { formatTaskDetailLines, formatTaskListLine } from "../lib/mcp-format.mjs";
+import { transportCode } from "../lib/transport.mjs";
 import { ADAPTER_FAILURE_MESSAGES, sanitizeAdapterFailure } from "../lib/adapters/base.mjs";
 import { endpointPath, readEndpoint, stateDir, tokenPath } from "../lib/auth.mjs";
 import { describeTrace, isTraceLevel, normalizeTraceLevel } from "../lib/trace-format.mjs";
@@ -358,13 +360,32 @@ function flushStdio() {
   return Promise.all([drain(process.stdout), drain(process.stderr)]);
 }
 
-const CONNECTION_FAILURES = new Set(["ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "EHOSTUNREACH", "ETIMEDOUT"]);
+const CONNECTION_FAILURES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "EHOSTUNREACH",
+  "ETIMEDOUT",
+  "EBADPORT",
+]);
 
 function failureExitCode(error) {
   const code = error?.code ?? error?.cause?.code;
   if (CONNECTION_FAILURES.has(code)) return 3;
   if (error?.name === "TimeoutError") return 3;
   return 1;
+}
+
+function formatCliError(error) {
+  const errCode = error?.code ?? error?.cause?.code;
+  const exitCode = failureExitCode(error);
+  const line =
+    errCode === "EBADPORT"
+      ? `dsh-rpc: ${error?.message ?? error}`
+      : exitCode === 3
+        ? `dsh-rpc: cannot reach the Harness (is it running?) — ${error?.message ?? error}`
+        : `dsh-rpc: ${error?.message ?? error}`;
+  return { exitCode, line };
 }
 
 const HEALTH_POLL_MS = 250;
@@ -403,7 +424,18 @@ async function probeHealth(explicitUrl, budgetMs) {
         }
         failure = { kind: "http", message: `HTTP ${response.status}` };
       } catch (error) {
-        failure = { kind: "transport", message: error.message };
+        const code = transportCode(error);
+        if (code === "EBADPORT") {
+          failure = {
+            kind: "transport",
+            code: "EBADPORT",
+            message:
+              `${error?.message ?? "fetch failed"} (bad port) — the Harness web port is refused by fetch; ` +
+              "start the Harness on another port, or pass --url",
+          };
+          break;
+        }
+        failure = { kind: "transport", code, message: error?.message ?? String(error) };
       }
     }
     if (Date.now() >= deadline) break;
@@ -744,7 +776,9 @@ async function runTasksCommand(flags, rest, options) {
         return 0;
       }
       for (const item of result.items ?? []) {
-        print(`task ${item.taskId} · ${item.status} · ${item.phase ?? "?"}  v${item.stateVersion}`);
+        // 0.9.3 复核第三轮：列表也要说出「未校验 / 降级 / 在等谁」，别让读文字的人
+        // 以为看到状态就等于看到事实。MCP 侧用同一个函数，两侧不再各写一遍。
+        print(`${formatTaskListLine(item)}  v${item.stateVersion ?? "?"}`);
       }
       note(`${(result.items ?? []).length} task(s)${result.hasMore ? ` (next cursor: ${result.nextCursor})` : ""}`);
       return 0;
@@ -822,7 +856,16 @@ async function runTasksCommand(flags, rest, options) {
         return 0;
       }
       print(`task ${result.taskId} · ${result.status} · ${result.phase ?? "?"} · v${result.stateVersion}`);
-      if (result.notice) print(`notice: ${result.notice}`);
+      const detail = formatTaskDetailLines(result);
+      for (const line of detail.lines) {
+        if (line.startsWith("agent: ") || line.startsWith("workspace: ")) continue;
+        print(line);
+      }
+      if (result.resultValid === false) {
+        print("resultValid: false (unvalidated: failed schema validation)");
+      } else if (result.resultValid === true) {
+        print("resultValid: true");
+      }
       return 0;
     }
     case "cancel": {
@@ -1055,12 +1098,8 @@ if (IS_MAIN) {
         await flushStdio();
         process.exit(2);
       }
-      const code = failureExitCode(error);
-      note(
-        code === 3
-          ? `dsh-rpc: cannot reach the Harness (is it running?) — ${error?.message ?? error}`
-          : `dsh-rpc: ${error?.message ?? error}`,
-      );
+      const { exitCode: code, line } = formatCliError(error);
+      note(line);
       if (error?.data) note(`  ${JSON.stringify(error.data)}`);
       const hint = mixedVersionHint(error?.message);
       if (hint) note(hint);
@@ -1069,4 +1108,14 @@ if (IS_MAIN) {
     });
 }
 
-export { UsageError, main, mixedVersionHint, parseArgv, runAgentsCommand, runTasksCommand };
+export {
+  UsageError,
+  failureExitCode,
+  formatCliError,
+  main,
+  mixedVersionHint,
+  parseArgv,
+  probeHealth,
+  runAgentsCommand,
+  runTasksCommand,
+};

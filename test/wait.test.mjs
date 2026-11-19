@@ -4,10 +4,10 @@
 // bridge over real HTTP, because the failure they prevent lived in the transport.
 
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
 import test from "node:test";
 
 import { MAX_WAIT_SLICE_MS, WAIT_SLICE_MS, waitForTurn } from "../lib/client.mjs";
+import { closeServer, listenSafe } from "./helpers/stub-server.mjs";
 
 const TOKEN = "test-token";
 
@@ -17,7 +17,7 @@ const TOKEN = "test-token";
  */
 async function stubBridge(script) {
   const calls = [];
-  const server = createServer((req, res) => {
+  const { server, url } = await listenSafe((req, res) => {
     const chunks = [];
     req.on("data", (chunk) => chunks.push(chunk));
     req.on("end", () => {
@@ -29,12 +29,10 @@ async function stubBridge(script) {
       res.end(JSON.stringify({ jsonrpc: "2.0", id: body.id ?? 1, result }));
     });
   });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address();
   return {
     calls,
-    url: `http://127.0.0.1:${port}/dsh-rpc`,
-    close: () => new Promise((resolve) => server.close(resolve)),
+    url,
+    close: () => closeServer(server),
   };
 }
 
