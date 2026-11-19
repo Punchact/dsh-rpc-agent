@@ -664,3 +664,83 @@ test("needs_reconcile always reports person/reconcile, whatever produced it", ()
     "person/reconcile",
   );
 });
+
+test("an unvalidated result is visible while the operator decides, and acceptance keeps it unvalidated", async () => {
+  // 0.9.2 复核 NOTES：接受一个没过校验的结果之后，任务终态里 result 是 null——签收了却
+  // 看不见签收的是什么。现在结果落库、resultValid 保持 false，事件里如实写 acceptedUnvalidated。
+  const { store, engine } = await setupEngine();
+  try {
+    const t = await engine.submit({
+      idempotencyKey: "invalid-result-visible",
+      capabilityRevisionId: "rev-review-1",
+      workspaceId: "ws-lab",
+      agentId: "ag-cancel-ok",
+    });
+    const att = await engine.recordAttemptStart({ taskId: t.taskId, expectedStateVersion: 1 });
+    await applyReport(store, {
+      taskId: t.taskId,
+      attemptId: att.attemptId,
+      adapterEventId: "ev-invalid-1",
+      report: { state: "ready", result: { draft: "half-written summary" }, resultValid: false },
+    });
+
+    const running = await engine.get({ taskId: t.taskId });
+    assert.equal(running.status, "running");
+    assert.deepEqual(running.result, { draft: "half-written summary" }, "the operator must see what is being judged");
+    assert.equal(running.resultValid, false, "visible is not the same as validated");
+    assert.equal(running.pending.attention.length, 1);
+
+    const resolved = await engine.resolve({
+      taskId: t.taskId,
+      expectedStateVersion: running.stateVersion,
+      idempotencyKey: "invalid-result-accept",
+      disposition: "accept",
+      note: "the draft is what we asked for, schema check was too strict",
+    });
+    assert.equal(resolved.status, "succeeded");
+    assert.deepEqual(resolved.result, { draft: "half-written summary" }, "acceptance must not discard the result");
+    assert.equal(resolved.resultValid, false);
+
+    const events = await engine.events({ taskId: t.taskId, afterSeq: 0 });
+    const last = events.events.at(-1);
+    assert.equal(last.type, "task.resolved");
+    assert.equal(last.payload.resultValid, false);
+    assert.equal(last.payload.acceptedUnvalidated, true);
+  } finally {
+    store.close();
+  }
+});
+
+test("the same question from a different option set is a different question", async () => {
+  // 0.9.2：去重键补了 attempt_id 与 options_json。同一遍里的重复轮询仍只问一次，但可选项变了
+  // 就是另一个问题，不能拿旧的顶替。
+  const { store, engine } = await setupEngine();
+  try {
+    const t = await engine.submit({
+      idempotencyKey: "attention-granularity",
+      capabilityRevisionId: "rev-review-1",
+      workspaceId: "ws-lab",
+      agentId: "ag-cancel-ok",
+    });
+    const att = await engine.recordAttemptStart({ taskId: t.taskId, expectedStateVersion: 1 });
+    const blocked = (options, adapterEventId) =>
+      applyReport(store, {
+        taskId: t.taskId,
+        attemptId: att.attemptId,
+        adapterEventId,
+        report: { state: "blocked", attention: { kind: "input", prompt: "pick a channel", options } },
+      });
+
+    const first = await blocked(["draft", "publish"], "ev-blocked-1");
+    const again = await blocked(["draft", "publish"], "ev-blocked-2");
+    assert.equal(again.questionId, first.questionId, "the same options must reuse the open question");
+
+    const wider = await blocked(["draft", "publish", "schedule"], "ev-blocked-3");
+    assert.notEqual(wider.questionId, first.questionId, "different options are a different question");
+
+    const detail = await engine.get({ taskId: t.taskId });
+    assert.equal(detail.pending.attention.length, 2);
+  } finally {
+    store.close();
+  }
+});

@@ -33,7 +33,7 @@
 - **「有 attempt 但没 locator」是同一个坑的另一种形状**：孤儿守卫最初只判「`dispatching` 且没有 attempt 行」，而 `recordAttemptStart({ markRunning: false, runtimeLocator: null })`（或启动成功却没回 locator 的适配器）会留下「有行、无 locator」——守卫被跳过，`adapter.events(null)` 照样每遍抛错。改为按 locator 判断，事件里补 `attemptRecorded` 与 `attemptId` 便于定位；`startOrphanGraceMs` 也按 `maxConcurrent` 的口径归一化（`NaN`/负数回落默认值，不允许静默变成零宽限）。
 - **推进环与停机共用一把锁**：定时器原来只判 `shuttingDown`，`drainEffects` 慢于间隔时第二遍会覆盖 `inFlightPass` 并先置空闲，第一遍仍在写账本时 `cleanupTasks` 已判定可以关库。现在 `passRunning` 兼作重入守卫（上一遍含排水未完则跳过本遍），`cleanupTasks` 只在真有在途遍时等待，其余情况同步关闭。
 - **核对期被事件名枚举漏掉**：`derivePhase` 原先把 `cancel.unsupported` / `cancel.unconfirmed` / `cancel.failed` / `dispatch.orphaned` 与租约过期当作核对理由，而 `dispatch.failed`、`inspect.unknown` 同样会进 `needs_reconcile` —— 于是阶段跌回 `machine/working`，人看到的是「机器还在干活」，实际在等他对账。改为状态本身即职责：`status === "needs_reconcile"` 一律 `person/reconcile`，不再枚举理由。
-- `scripts.test` 新增并接入 20 个任务中心与 CLI/适配器测试套件（全链 45 个测试文件、388 例，本机 388/388 通过；CI 结果见 PR #30），并更新 `catalog.smoke.mjs` 校验 34 个 RPC 方法。
+- `scripts.test` 新增并接入 20 个任务中心与 CLI/适配器测试套件（全链 45 个测试文件、394 例，本机 394/394 通过；CI 结果见 PR #30），并更新 `catalog.smoke.mjs` 校验 34 个 RPC 方法。
 - `dispatch.mjs` 修复了租约到期回收与原子 `maxConcurrent` 门控竞态，防止同一写事务之外并发超发或将任务卡死在 `dispatching` / `in_flight`。
 - **取消确认后立刻收口**：适配器回报 `confirmedStopped: true`（DSH 会话真停了、Antigravity 回执里含该 cascadeId）时，同一次出箱排水内把任务从 `cancel_requested` 推进到 `cancelled` 并写 `cancel.confirmed`；此前只把 effect 标完成，任务会悬在 `cancel_requested` 等一个已停会话永远不会发出的事件。Codex 的 `turn/interrupt` 只算受理，故不设该标志。
 - **幂等键不再掩盖改过的请求**：`cancel` / `resolve` 的重放分支会比较请求意图（取消原因；处置结论 + 证据引用），同键异载荷抛 `STATE_CONFLICT`（`reason: "idempotency_payload_mismatch"`）。`expectedStateVersion` 属并发护栏、重试时本就会变，不参与比较。
@@ -61,12 +61,25 @@
 - **人工问答与产物读取接上**：新增 `dsh.tasks.input`（执行中回答，走 effects 队列投递，带幂等键、载荷冲突、问题归属与陈旧 attempt 拒收）、`dsh.tasks.readArtifact`（按窗口读取已索引产物，非 UTF-8 回 base64）、`dsh.agents.get`（读回单个执行方的卡片与已发布能力修订）。报告里声明的产物按路径/大小/哈希逐条校验后入索引，校验不过的写 `artifact.refused` 事件而不是静默丢弃。
 - **MCP 工具名对齐方案**：`dsh_tasks_*` 更正为 `dsh_task_*`，并补齐 `dsh_task_preview`、`dsh_task_events`、`dsh_task_read_artifact`、`dsh_task_input`、`dsh_agents_get`（共 22 个工具；`resolve`、`decideApproval` 仍不进 MCP）。
 - **两道对账门禁（0.9.1 开发期补）**：0.9.0 这几轮里，同一批数字（RPC 方法数、MCP 工具数、测试文件数、用例数）在 README / README.en / CHANGELOG 三处被一次性补丁脚本改过七次；方案与实现之间的接口面也没有任何机器核对，`dsh.tasks.resolve` 就是「方案写了、实现漏了」拖到真机才暴露。现在两件事都变成门禁：①`npm run check:docs` 现算能算的——方法数取 `lib/methods.mjs` 的目录、MCP 工具数取 `bin/dsh-rpc-mcp.mjs` 的 `BASE_TOOLS`/`TASK_TOOLS` 两张表、测试文件数取 `package.json` 里 `test` 链上的 `node test/*.test.mjs`；只有用例总数要整跑才知道，记进 `docs/counts.json` 当唯一来源。锚点规则覆盖中英两份 README 与 CHANGELOG 最新一节的数字，锚点消失也判失败（说明那句话被改写了，规则该跟着更新）。`npm run docs:counts` 幂等刷写：演练时把 375 改成 374，`check:docs` 精确报出 `README.md:79`，写回后与改动前的 SHA256 完全一致；把 `counts.json` 抬到 376 能一次刷中 9 处，恢复后同样字节一致。②`npm run check:surface` 拿 `docs/api-surface.json`（方案接口面快照，含方案文档 sha256）对代码，两个方向都查：方案要求的 14 个 RPC / 22 个 MCP 工具 / 5 条 CLI 必须真实存在；任务族与代理族的每个 RPC、MCP 工具、CLI 子命令必须要么在方案里、要么在快照的 `implementationOnly` 里如实记着（`dispatch`/`pump`/`reconcile`、`agents.register` 与方案只写了主干的 CLI 都在那里）。负向演练同时塞「一个方案要求但代码没有的 RPC」与「一个从声明里删掉的既有 RPC」，两条都被抓出。两道门禁都接进 `npm test`、CI 与 `prepublishOnly`；快照进仓库、方案文档不进，CI 只读快照即可对账。
-- **测试与文档口径校正**：`scripts.test` 全链 45 个测试文件、**388 例**；`docs/design.md` 的 §7 历史快照后补了「现行口径（2026-11-19）」注，注明 `methods 41 → 85`、`client 6 → 8`、`edge 24 项但本机 23/24`（第 21 项 `create without a cwd` 因宿主返回 `cwd: null` 失败，属既有行为，非本次引入）。
+- **0.9.2：复核 NOTES 的六项待办收口**（不在阻塞清单里，但都是「该由机器证明的地方还在靠手填/靠自我声明」）：；`docs/design.md` 的 §7 历史快照后补了「现行口径（2026-11-19）」注，注明 `methods 41 → 85`、`client 6 → 8`、`edge 24 项但本机 23/24`（第 21 项 `create without a cwd` 因宿主返回 `cwd: null` 失败，属既有行为，非本次引入）。
+
+### 0.9.2 收口
+
+前两轮合并前复核留下的六条非阻塞待办，本版一次收掉：
+
+- **未校验的结果看得见，签收留痕**：`applyReport` 在 `ready` + 校验失败时把结果写进 `result_json`（`result_valid = 0`），任务详情里能看到它、但不会被当成成功；`resolve` 的 `task.resolved` 事件带 `resultValid`，人工裁决未校验结果时再加 `acceptedUnvalidated: true`。顺手修掉同处的两处真缺陷：`blocked` 分支把 `attentionOnceInTx` 的返回值丢掉、去重命中时对外回报一个不存在的问题号；同一份 blocked 报告重复投递会撞 `waiting_input -> waiting_input` 非法迁移（现在只补一条 `attention.opened`，标 `repeated: true`）。
+- **`attentionOnceInTx` 的粒度**：去重键从 `(task, kind, prompt)` 扩到 `(task, kind, prompt, attempt_id, options_json)`——同一遍仍然只问一次，但换了 attempt 或换了可选项就是另一个问题。
+- **Codex 探针改成真握手**：以前只看二进制在、`--version` 能跑就给六项控制全绿。现在要真的起 `app-server --listen stdio://` 并收到 `initialize` 应答才发布控制表，且 `approval` 一律 `false`（codex 的审批语义没有真机证据）；握手超时、子进程起不来（`EPERM` 之类）、应答不对，都只报原因、不给控制表，能力卡停在未证实。
+- **孤儿派发真的会释放并发槽**：新增集成回归「`maxConcurrent: 1` + 崩溃留下的孤儿 `dispatching` + 排队任务」，证明推进环把孤儿升成 `needs_reconcile` 之后，唯一的槽位会释放、队列在下一遍被服务。
+- **`dispatching` 崩溃窗口的隔离演练**：`audit-tmp/smoke-090/a04b-dispatching-crash.mjs`——worker 子进程在「`dispatching` 已写、attempt 未落库」时被 `exit(9)` 真杀掉，父进程重开账本断言崩溃现场（停在 `dispatching`、无 attempt 行），再让推进环接手：`needs_reconcile` + `person/reconcile` + `dispatch.orphaned`（证据里 `attemptRecorded: false`）、全程不碰适配器事件接口、槽位释放后队列继续走。11/11 PASS。
+- **两道门禁收紧**：①`docs/counts.json` 的用例数不再能手填——`npm run count:cases` 真跑一遍 TAP 才写，并附测试文件摘要与声明条数；`check:docs` 重算后遇到「文件变了数字没重算」或「用例数少于声明条数」直接失败，`docs:surface`/`docs:counts` 也刷不出一个假的数。②`check:surface --write` 新增 `implementationOnly` 条目必须显式 `--accept-new`，否则只列出来并失败，不再能靠重抽快照把新接口自我声明掉。
+
+- 计数：全链 45 个测试文件、394 例，本机 394/394 通过。
 
 ### 行为变化
 
 - **默认完全关闭（与 0.8.1 行为零差异）**：`tasksEnabled` 默认 `false`；未显式开启时不会创建 `tasks.db`，MCP 工具列表保持 11 个，不改变任何既有 `dsh.*` 会话语义。
-- **开启后的变化**：设置 `tasksEnabled: true` 并重启宿主后，首次启动在 `$DSH_HOME/storages/task-center/tasks.db` 初始化账本并播种 `local-operator` 与 `local` 工作区，启动 5 秒定时 `drainEffects` 出箱排水（`.unref()`），MCP 侧多出 6 个任务/代理工具。
+- **开启后的变化**：设置 `tasksEnabled: true` 并重启宿主后，首次启动在 `$DSH_HOME/storages/task-center/tasks.db` 初始化账本并播种 `local-operator` 与 `local` 工作区，启动 5 秒定时 `drainEffects` 出箱排水（`.unref()`），MCP 侧多出 11 个任务/代理工具（8 个 `dsh_task_*` + 3 个 `dsh_agents_*`）。
 
 ### 关闭方式
 

@@ -334,3 +334,64 @@ test("codex adapter enforces strict frame validation, UTF-8 StringDecoder assemb
   });
   assert.equal(live.accepted, true);
 });
+
+test("probe only turns green after the app-server answers initialize", async () => {
+  // 0.9.2（复核 NOTES）：以前只看二进制在、--version 能跑就给六项全绿。现在必须真的握手，
+  // 且 approval 不给绿——codex 的审批语义我们没在真机验过，能力卡要停在未证实。
+  const fake = makeFakeSpawn();
+  const adapter = createCodexAdapter({
+    spawn: fake.spawn,
+    spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
+    binary: "C:\\fake\\codex.exe",
+  });
+
+  const res = await adapter.probe();
+  assert.equal(res.ok, true);
+  assert.equal(res.handshake, "initialize");
+  assert.equal(res.version, "codex-cli 0.166.0");
+  assert.equal(res.controls.start, true);
+  assert.equal(res.controls.events, true);
+  assert.equal(res.controls.approval, false, "no live evidence for codex approvals yet");
+
+  const initialized = fake.sentMessages.filter((msg) => msg.method === "initialize");
+  assert.equal(initialized.length, 1, "a probe costs exactly one handshake");
+  assert.equal(initialized[0].params.clientInfo.name, "dsh-task-hub", "handshake identifies itself");
+  assert.equal(
+    fake.sentMessages.some((msg) => msg.method === "thread/start" || msg.method === "turn/start"),
+    false,
+    "a probe must not start work",
+  );
+});
+
+test("probe stays red when the app-server never answers", async () => {
+  const fake = makeFakeSpawn();
+  fake.setHoldReplies(true);
+  const adapter = createCodexAdapter({
+    spawn: fake.spawn,
+    spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
+    binary: "C:\\fake\\codex.exe",
+    probeTimeoutMs: 80,
+  });
+
+  const res = await adapter.probe();
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, "handshake_timeout");
+  assert.equal(res.controls, undefined, "a failed handshake must not publish a control table");
+});
+
+test("probe reports a spawn failure instead of claiming the executor is ready", async () => {
+  const adapter = createCodexAdapter({
+    spawn: () => {
+      const error = new Error("spawn EPERM");
+      error.code = "EPERM";
+      throw error;
+    },
+    spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
+    binary: "C:\\fake\\codex.exe",
+    probeTimeoutMs: 80,
+  });
+
+  const res = await adapter.probe();
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, "EPERM");
+});
