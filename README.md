@@ -292,10 +292,11 @@ console.log(answer.text, answer.usage);
 | `dsh.tasks.cancel` | `taskId, expectedStateVersion, idempotencyKey, reason?` | `{taskId, status, stateVersion, notice?}` |
 | `dsh.tasks.dispatch` / `pump` | `taskId, …` / `taskId, maxSteps?, deadlineMs?, cursor?` | 派发至适配器或推进有界事件/状态泵 |
 | `dsh.tasks.reconcile` | `taskId, evidence: { observedState, note?, result? }` | 人工核对后收口终态并关闭残留 attempt |
+| `dsh.tasks.resolve` | `taskId, expectedStateVersion, idempotencyKey, disposition: accept\|reject\|cancel\|requeue, evidenceRef?, note?` | 人工签收：`review_pending` / `needs_reconcile` 的终态处置（只在 RPC/CLI，不进 MCP） |
 | `dsh.tasks.decideApproval` | `taskId, attemptId, approvalId, decision: "allow"\|"deny", reason?` | `{approvalId, decision, status, stateVersion, operationId}` |
 | `dsh.agents.register` / `list` / `probe` | `card` / 过滤项 / `agentId, controls?` | 能力卡注册、查询与只读控制项探测 |
 
-（以上共 **29 个** JSON-RPC 方法；完整参数列表请用 `dsh.discover` 或 `dsh-rpc discover`。）
+（以上共 **30 个** JSON-RPC 方法；完整参数列表请用 `dsh.discover` 或 `dsh-rpc discover`。）
 
 几处容易踩的语义：
 

@@ -81,6 +81,12 @@ test("missing or unknown tasks/agents subcommands raise UsageError (exit 2)", as
   await assert.rejects(() => main(["tasks", "get"]), UsageError);
   await assert.rejects(() => main(["tasks", "cancel", "task_1"]), UsageError);
   await assert.rejects(() => main(["tasks", "reconcile", "task_1"]), UsageError);
+  await assert.rejects(() => main(["tasks", "resolve", "task_1"]), UsageError, "resolve needs --expected-version");
+  await assert.rejects(
+    () => main(["tasks", "resolve", "task_1", "--expected-version", "2"]),
+    UsageError,
+    "resolve needs a decision",
+  );
   await assert.rejects(() => main(["agents"]), UsageError);
   await assert.rejects(() => main(["agents", "bogus"]), UsageError);
   await assert.rejects(() => main(["agents", "probe"]), UsageError);

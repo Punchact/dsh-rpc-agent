@@ -186,7 +186,7 @@ Host 抛 `RemoteError(code, message, details)`（`isDSHRemoteError === true`）�
 
 以上数字均为 2026-11-05 在本机实跑，命令见 README §10。
 
-> **现行口径（2026-11-19，0.9.0）**：本表是 2026-11-05 的历史快照，不改写。当前的数量以 README「开发与验证」为准——`npm test` 固定顺序跑 37 个 `*.test.mjs` 共 349 例，外加 `catalog.smoke.mjs`（29 个 RPC 方法）。表中三行随版本长大：`methods` 41 → 85 例，`client` 6 → 8 例；`edge` 仍是 24 项，但**本机 23/24**——第 21 项「create without a cwd reports the directory the Host attached」要求宿主替无 `cwd` 的请求补上工作目录，本机 0.8.1 宿主返回 `null`，属既有环境差异；**CI 不跑 `test:edge`（`.github/workflows/test.yml` 只有 `npm test` / `test:host` / `check:package`），故“CI 下通过”没有证据**，这一项目前只有本机 23/24 的实测。
+> **现行口径（2026-11-19，0.9.0）**：本表是 2026-11-05 的历史快照，不改写。当前的数量以 README「开发与验证」为准——`npm test` 固定顺序跑 37 个 `*.test.mjs` 共 349 例，外加 `catalog.smoke.mjs`（30 个 RPC 方法）。表中三行随版本长大：`methods` 41 → 85 例，`client` 6 → 8 例；`edge` 仍是 24 项，但**本机 23/24**——第 21 项「create without a cwd reports the directory the Host attached」要求宿主替无 `cwd` 的请求补上工作目录，本机 0.8.1 宿主返回 `null`，属既有环境差异；**CI 不跑 `test:edge`（`.github/workflows/test.yml` 只有 `npm test` / `test:host` / `check:package`），故“CI 下通过”没有证据**，这一项目前只有本机 23/24 的实测。
 
 ## 8. 后续可做
 
@@ -624,3 +624,13 @@ compression: gzip
 - **入口校验改用 `Object.hasOwn`**：`"__proto__" in props` 在任何普通对象上都为真，于是 `additionalProperties: false` 把 `__proto__` 当成合法属性放行——一旦下游用 `Object.assign` 复制参数就是原型污染。现在 `__proto__` / `constructor` / `prototype` 直接拒绝，属性存在性一律用 `hasOwn`。
 - **递归上限从 2 提到 8**：原来的 `depth < 2` 让三层以下的 `minimum` / `type` 约束完全不检查——schema 写多深就漏多深。现在按 `MAX_SCHEMA_DEPTH = 8` 递归，超限直接报错而不是静默跳过。
 - **已知残留（如实记）**：①任务结果原样落账（见 README「已知边界」），要脱敏只能在输出侧；②`inputSchema` 只覆盖我们发布的工具，客户端带进来的 `__proto__` 已被拒，其余未知键在 `additionalProperties` 未声明时会透传给 Host——那属于 Host 的校验范围。
+
+## 38. 决策 0.9.0-k：人工签收必须是 RPC/CLI 的入口，不是「能力」
+
+0.9.0 真机冒烟走到「报告 ready → review_pending」这一步才发现没有出口：`engine.resolve` 存在，但 RPC 与 CLI 都没暴露它，任务能跑完却无法签收。取舍记三条：
+
+1. **签收属于人，不属于调用方**。`dsh.tasks.resolve` 只出现在 RPC 与 CLI，MCP 工具面刻意不加——否则驱动方可以自己给自己验收，`review_pending` 就退化成自我盖章。MCP 侧只通过 `dsh_tasks_get` 给出待处理项与可直接执行的命令，让人去执行。
+2. **必须带 `expectedStateVersion`**。签收是对「我看到的那一版结果」的承诺；不带版本就等于替别人签收，因此缺这个参数直接报 `VALIDATION_FAILED`，不做默认推断。
+3. **签收也要幂等**。`(principalId, idempotencyKey)` 去重，重放比较「意图」（处置结论 + 证据引用），同键异载荷抛 `STATE_CONFLICT`——和取消走同一套规则，避免「重试一次就换了个结论」。
+
+**如实记**：这条是冒烟补出来的，不是设计时就想清楚的。方案 §6.1 写了这个方法，实现漏了，五路评审（t1/t2/t3/t4/t5）也没抓到——因为所有验证都停在 engine 层，没有人从外部把完整流程走一遍。

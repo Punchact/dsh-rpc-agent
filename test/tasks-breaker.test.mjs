@@ -19,7 +19,7 @@ function fakeMethods(overrides = {}) {
 
 test("a disabled task centre answers -32601 for the whole family", async () => {
   const dispatch = buildDispatcher(fakeMethods({ tasksEnabled: false }));
-  for (const method of ["dsh.tasks.list", "dsh.tasks.submit", "dsh.agents.list"]) {
+  for (const method of ["dsh.tasks.list", "dsh.tasks.submit", "dsh.tasks.resolve", "dsh.agents.list"]) {
     await assert.rejects(
       () => dispatch(method, {}),
       (error) => {

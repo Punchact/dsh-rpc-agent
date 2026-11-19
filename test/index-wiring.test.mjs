@@ -151,6 +151,17 @@ test("index.mjs opens tasks.db, seeds baseline entities, wires dispatcher, and h
 
     // Verify missing adapter surfaces as ADAPTER_UNAVAILABLE on dispatch (not startup crash)
     // First seed capability revision directly via a second call or verify error shape when dispatching unknown task
+    const resolveMissingVersion = await callJsonRpc(rpcHandler, token, "dsh.tasks.resolve", {
+      taskId: "task_missing",
+      idempotencyKey: "idem-resolve-1",
+      disposition: "accept",
+    });
+    assert.equal(resolveMissingVersion.status, 200);
+    assert.ok(
+      isTaskError({ data: resolveMissingVersion.body.error.data }, TASK_ERROR.VALIDATION_FAILED),
+      "resolve must require expectedStateVersion rather than guess one",
+    );
+
     const badDispatch = await callJsonRpc(rpcHandler, token, "dsh.tasks.dispatch", { taskId: "task_missing" });
     assert.equal(badDispatch.status, 200);
     assert.ok(isTaskError({ data: badDispatch.body.error.data }, TASK_ERROR.NOT_FOUND));

@@ -82,6 +82,7 @@ const expected = [
   "dsh.tasks.preview",
   "dsh.tasks.pump",
   "dsh.tasks.reconcile",
+  "dsh.tasks.resolve",
   "dsh.tasks.submit",
   "dsh.workspaces.create",
   "dsh.workspaces.list",

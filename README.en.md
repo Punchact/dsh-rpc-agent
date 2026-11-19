@@ -292,10 +292,11 @@ Every method lives under the `dsh.` namespace; the CLI aliases `ping` / `discove
 | `dsh.tasks.cancel` | `taskId, expectedStateVersion, idempotencyKey, reason?` | `{taskId, status, stateVersion, notice?}` |
 | `dsh.tasks.dispatch` / `pump` | `taskId, …` / `taskId, maxSteps?, deadlineMs?, cursor?` | Dispatches to an adapter or drives bounded events/inspect pumping |
 | `dsh.tasks.reconcile` | `taskId, evidence: { observedState, note?, result? }` | Settles `needs_reconcile`/`cancel_requested` and closes active attempts |
+| `dsh.tasks.resolve` | `taskId, expectedStateVersion, idempotencyKey, disposition: accept\|reject\|cancel\|requeue, evidenceRef?, note?` | Operator sign-off that settles `review_pending` / `needs_reconcile` (RPC + CLI only, never MCP) |
 | `dsh.tasks.decideApproval` | `taskId, attemptId, approvalId, decision: "allow"\|"deny", reason?` | `{approvalId, decision, status, stateVersion, operationId}` |
 | `dsh.agents.register` / `list` / `probe` | `card` / filters / `agentId, controls?` | Capability-card registration, listing, and read-only control probing |
 
-(**29** JSON-RPC methods total; run `dsh.discover` or `dsh-rpc discover` for full parameter schemas.)
+(**30** JSON-RPC methods total; run `dsh.discover` or `dsh-rpc discover` for full parameter schemas.)
 
 Semantics that are easy to trip over:
 

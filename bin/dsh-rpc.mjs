@@ -38,7 +38,7 @@ COMMANDS
   wait --session ID         wait for the turn already running on a session
   cancel --session ID       cancel the in-flight turn
   history --session ID      show the recent event window
-  tasks <subcommand>        manage task-center tasks (preview|submit|list|get|cancel|dispatch|pump|reconcile|approve)
+  tasks <subcommand>        manage task-center tasks (preview|submit|list|get|cancel|dispatch|pump|reconcile|approve|resolve)
   agents <subcommand>       manage agent capability cards (register|list|probe)
   call <method> [json]      raw JSON-RPC call (json params optional)
   env                       print the endpoint and token as shell exports
@@ -684,7 +684,7 @@ function parseJsonFlag(raw, name) {
 
 async function runTasksCommand(flags, rest, options) {
   const [sub, ...args] = rest;
-  if (!sub) throw new UsageError("tasks needs a subcommand: preview|submit|list|get|cancel|dispatch|pump|reconcile");
+  if (!sub) throw new UsageError("tasks needs a subcommand: preview|submit|list|get|cancel|dispatch|pump|reconcile|approve|resolve");
   const firstId = flags.task ?? args[0];
   if (flags["after-seq"] !== undefined) {
     cursorOf(flags, "after-seq");
@@ -840,6 +840,31 @@ async function runTasksCommand(flags, rest, options) {
         flags.json
           ? JSON.stringify(result, null, 2)
           : `task ${result.taskId} · ${result.from} -> ${result.status} · closed=${result.attemptsClosed}`,
+      );
+      return 0;
+    }
+    case "resolve": {
+      if (!firstId) throw new UsageError("tasks resolve needs <taskId> or --task <id>");
+      const expected = numberOf(flags, "expected-version", { min: 1 });
+      if (!expected) throw new UsageError("tasks resolve needs --expected-version <stateVersion>");
+      const disposition = flags.decision;
+      if (!["accept", "reject", "cancel", "requeue"].includes(disposition)) {
+        throw new UsageError("tasks resolve needs --decision accept|reject|cancel|requeue");
+      }
+      const params = {
+        taskId: firstId,
+        expectedStateVersion: expected,
+        disposition,
+        idempotencyKey: flags["idempotency-key"] ?? `cli_resolve_${randomUUID()}`,
+      };
+      if (flags.note) params.note = flags.note;
+      if (flags.evidence !== undefined) params.evidenceRef = parseJsonFlag(flags.evidence, "evidence");
+      if (flags.principal) params.resolvedBy = flags.principal;
+      const result = await rpcCall("dsh.tasks.resolve", params, options);
+      print(
+        flags.json
+          ? JSON.stringify(result, null, 2)
+          : `task ${result.taskId} · ${result.status} · ${result.disposition} · v${result.stateVersion}`,
       );
       return 0;
     }
