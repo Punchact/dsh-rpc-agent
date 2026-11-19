@@ -726,3 +726,13 @@ compression: gzip
 - **取舍二：宿主自动派发会不会抢人？** 派的都是调用方通过 `submit` 明确交出来的任务，不是替人做决定；真正需要人拍板的两个动作（`resolve` 签收、`decideApproval` 审批）仍然只在 RPC/CLI 面，不进自动环。不想要自动的可以 `tasksAutopilot: false` 退回纯手工。
 - **实现边界**：单遍有 `tasksAutopilotMaxStart` / `tasksAutopilotMaxPump` 与 pump 的 `maxSteps`/`deadlineMs` 三重上限；上一遍没跑完时本遍直接 `skipped`，避免慢适配器把定时器叠成风暴；单个任务失败只记日志并继续其余任务，失败会以 `needs_reconcile` 之类的账本状态落地，而不是被吞掉。
 - **怎么钉住**：`lib/tasks/autopilot.mjs` 不碰数据库、只依赖 `engine.list` 与 `dispatcher.startTask/pump`，因此 `test/tasks-autopilot.test.mjs` 用假引擎/假派发器覆盖了五种情形——覆盖所有活跃状态、失败不中断、慢遍不叠加、空账本不动作、破库只报不抛。
+
+## 49. 决策 0.9.1-c：外部执行方必须被显式选中，缺适配器不许伪装成「排队中」
+
+A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravity` 类代理、能预览、能提交，看起来一切正常；但派发永远不动——任务停在 `queued v1`，事件里只有 `task.accepted`。
+
+- **现象与误判**：推进环每 5 秒跑一遍、也确实拿到了这条 `queued` 任务；`startTask` 抛 `ADAPTER_UNAVAILABLE`（`no adapter registered for kind "antigravity"`）被 `autopilot` 记进 `failed[]`，任务本身没进 `dispatching`，于是它看起来「在排队」，实际上「永远不会被派」。第一版诊断时我先怀疑推进环没跑，直到读 `index.mjs` 的装配逻辑才确认：`tasksExternalAdapter` 默认 `"none"` 时，`adapters` 里只会补上 `dsh` 一个。
+- **为什么默认是 `none`**：外部适配器会去驱动别人家的进程（Antigravity 语言服务器、Codex App Server），装错或断连时不该让任务中心整体起不来。显式选中才装配，是有意的保守默认。
+- **规矩一：缺适配器不许编状态**。没有适配器就不是「派发中」，也不是「等待执行」——任务停在 `queued`，失败留在 `autopilotStats.lastFailed` 里；不给它一个看似正常的中间态。
+- **规矩二：可观测必须给出「为什么没动」**。只记录「本遍 0 启动」等于什么都没说；`autopilotStats` 要带上失败条数与最后一条错误，`ping` 必须把这些字段投影出来（0.9.1 之前的投影把它们滤掉了，见 CHANGELOG 同名条目）。
+- **怎么钉住**：真机侧由 `a07-antigravity-executor.mjs` 断言「能力卡被接受 + probe 有证据 + cascadeId 出现 + cancel 有回执」；配置侧由 profile 的 `tasksExternalAdapter` / `tasksAdapters` 两个键决定，README 的配置表已写明。

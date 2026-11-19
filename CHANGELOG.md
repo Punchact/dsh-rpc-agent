@@ -27,6 +27,8 @@
 ### 修复
 
 - **自动推进环忘了 `await`**：`lib/tasks/autopilot.mjs` 的 `step()` 读的是 `engine.list(...).items`，而 `engine.list` 是异步的——拿到的是 Promise，“没有任务”看起来和一个空账本一模一样，于是宿主每 5 秒跑一遍、什么也不推，MCP 提交的任务原地停在 `queued`（A08 真机实测：45 秒零推进，手工 `dsh.tasks.dispatch` 立刻成功）。修法是把两处列表查询都 `await`，并把每遍结果写进 `ping.taskCentre.autopilotStats`（遍数、上次时间、启动/推进/失败条数与最后一条错误）；回归钉法见 `docs/design.md` §48。
+- **`ping` 其实看不见推进环**：上面那条说“把每遍结果写进 `ping.taskCentre.autopilotStats`”，但 `ping` 是按字段白名单投影的，`autopilot` / `autopilotStats` 两个字段根本没被列进去——“跑了一遍什么也没推”和“根本没跑过”在应答里长得一模一样。投影补齐后，A07 勘察正是靠它才看清外部适配器压根没被装配（见下条）。
+- **外部执行方只在显式选中时才装配**：`tasksExternalAdapter` 默认 `none`，此时 `adapters` 里只有 `dsh`；提交给 `antigravity` / `codex` 类代理的任务会在 `startTask` 里撞 `ADAPTER_UNAVAILABLE`，任务留在 `queued`，推进环把这次失败记进 `autopilotStats.lastFailed` 而不是编造一个状态。要真跑外部执行方，profile 里得写 `tasksExternalAdapter: antigravity` 且 `tasksAdapters.antigravity.enabled: true`（A07 真机勘察结论，决策记在 `docs/design.md` §49）。
 - `scripts.test` 新增并接入 20 个任务中心与 CLI/适配器测试套件（全链 44 个测试文件、382 例，本机 382/382 通过；CI 结果见 PR #30），并更新 `catalog.smoke.mjs` 校验 34 个 RPC 方法。
 - `dispatch.mjs` 修复了租约到期回收与原子 `maxConcurrent` 门控竞态，防止同一写事务之外并发超发或将任务卡死在 `dispatching` / `in_flight`。
 - **取消确认后立刻收口**：适配器回报 `confirmedStopped: true`（DSH 会话真停了、Antigravity 回执里含该 cascadeId）时，同一次出箱排水内把任务从 `cancel_requested` 推进到 `cancelled` 并写 `cancel.confirmed`；此前只把 effect 标完成，任务会悬在 `cancel_requested` 等一个已停会话永远不会发出的事件。Codex 的 `turn/interrupt` 只算受理，故不设该标志。
