@@ -92,7 +92,7 @@ dsh plugin add @punchact/dsh-rpc-agent
 plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent" })
 ```
 
-非默认 profile 加 `--profile <name>`；钉版本写全 `@punchact/dsh-rpc-agent@0.9.0`，不写则取 `latest`。npm 上已发版见 [`0.8.1`](https://www.npmjs.com/package/@punchact/dsh-rpc-agent)，本文件描述的是**仓库当前代码（`0.9.0`）**，两者差异见 [CHANGELOG](./CHANGELOG.md) 顶部。
+非默认 profile 加 `--profile <name>`；钉版本写全 `@punchact/dsh-rpc-agent@0.9.3`，不写则取 `latest`。npm 上已发版见 [`0.9.3`](https://www.npmjs.com/package/@punchact/dsh-rpc-agent)，本文件描述的是**仓库当前代码（`0.9.3`）**，两者差异见 [CHANGELOG](./CHANGELOG.md) 顶部。
 
 三件在 npm 路线上容易踩的事：
 

@@ -1,4 +1,4 @@
-# DSH 任务中心操作手册（0.9.0）
+# DSH 任务中心操作手册（0.9.3）
 
 > 面向本机操作者与维护者。任务中心默认关闭（`tasksEnabled: false`），打开后由本插件托管 DSH 自身、Antigravity 与 Codex App Server 的异步长任务。
 
