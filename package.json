@@ -62,13 +62,15 @@
     "test:host": "node test/host.test.mjs",
     "test:e2e": "node test/e2e.mjs",
     "test:edge": "node test/edge.mjs",
+    "build": "node scripts/build.mjs",
+    "verify": "npm run build && node scripts/check-entry-parity.mjs && npm test && npm run check:package",
     "check:package": "node scripts/check-package.mjs",
     "check:docs": "node scripts/check-docs.mjs",
     "count:cases": "node scripts/count-cases.mjs --record",
     "docs:counts": "node scripts/count-cases.mjs --record && node scripts/check-docs.mjs --write",
     "check:surface": "node scripts/check-surface.mjs",
     "docs:surface": "node scripts/check-surface.mjs --write",
-    "prepublishOnly": "npm run check:version && npm run check:docs && npm run check:surface && npm test && npm run check:package",
+    "prepublishOnly": "npm run check:version && npm run check:docs && npm run check:surface && npm run check:package && npm test",
     "check:version": "node --input-type=module -e \"import {readFileSync} from 'node:fs'; const {PLUGIN_VERSION} = await import('./lib/version.mjs'); const v = JSON.parse(readFileSync('package.json','utf8')).version; if (PLUGIN_VERSION !== v) { console.error('PLUGIN_VERSION ' + PLUGIN_VERSION + ' != package.json ' + v); process.exit(1); } console.log('version ok: ' + v);\""
   },
   "engines": {
@@ -83,6 +85,8 @@
   ],
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.5",
-    "@deepseek-ai/dsh-host-webserver": "0.2.1-rc.5"
+    "@deepseek-ai/dsh-host-webserver": "0.2.1-rc.5",
+    "@types/node": "^22.20.1",
+    "typescript": "5.9.3"
   }
 }

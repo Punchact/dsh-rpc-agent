@@ -21,9 +21,17 @@ const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const SNAPSHOT = "docs/api-surface.json";
 const DEFAULT_PLAN = resolve(REPO, "..", "DSH本机Agent任务中心实施方案-合并版v1.0-20261118.md");
 const read = (rel) => readFileSync(join(REPO, rel), "utf8").replace(/\r\n/g, "\n");
+const readDist = (rel) => {
+  const full = join(REPO, "dist", rel);
+  if (!existsSync(full)) {
+    console.error(`check-surface: 找不到产物文件 dist/${rel} — 请先运行 \`npm run build\``);
+    process.exit(1);
+  }
+  return readFileSync(full, "utf8").replace(/\r\n/g, "\n");
+};
 const sha256 = (text) => createHash("sha256").update(text, "utf8").digest("hex");
 
-// --- 代码侧的三类接口面 ---------------------------------------------------------------
+// --- 代码侧的三类接口面（一律扫 dist/ 产物） ------------------------------------------
 function sliceBlock(source, header, footer) {
   const start = source.indexOf(header);
   if (start < 0) throw new Error(`check-surface: 找不到 ${header}`);
@@ -31,17 +39,17 @@ function sliceBlock(source, header, footer) {
   return source.slice(start, end < 0 ? source.length : end);
 }
 
-const methodsSource = read("lib/methods.mjs");
+const methodsSource = readDist("lib/methods.mjs");
 const catalogBlock = sliceBlock(methodsSource, "const METHOD_CATALOG = [", "\n];");
 const codeRpc = [...catalogBlock.matchAll(/name:\s*"(dsh\.[a-zA-Z.]+)"/g)].map((m) => m[1]);
 
-const mcpSource = read("bin/dsh-rpc-mcp.mjs");
+const mcpSource = readDist("bin/dsh-rpc-mcp.mjs");
 const codeMcp = [
   ...sliceBlock(mcpSource, "const BASE_TOOLS = [", "\n];").matchAll(/name:\s*"(dsh_[a-z_]+)"/g),
   ...sliceBlock(mcpSource, "const TASK_TOOLS = [", "\n];").matchAll(/name:\s*"(dsh_[a-z_]+)"/g),
 ].map((m) => m[1]);
 
-const cliSource = read("bin/dsh-rpc.mjs");
+const cliSource = readDist("bin/dsh-rpc.mjs");
 const tasksCli = sliceBlock(cliSource, "async function runTasksCommand", "async function runAgentsCommand");
 const agentsCli = sliceBlock(cliSource, "async function runAgentsCommand", "\nasync function ");
 const codeCli = [
