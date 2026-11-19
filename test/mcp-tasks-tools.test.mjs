@@ -303,3 +303,62 @@ test("MCP refuses prototype keys and schema constraints deeper than the old cap"
     /a\.b\.c\.d — must be >= 10/,
   );
 });
+
+test("MCP dsh_task_preview and dsh_task_list surface preview headers, degraded, pending, and resultValid", async () => {
+  resetBridgeDefaults();
+  await withMockRpc(
+    (req) => {
+      if (req.method === "dsh.discover") {
+        return { result: { config: { tasksEnabled: true }, methods: [{ name: "dsh.tasks.list" }] } };
+      }
+      if (req.method === "dsh.tasks.preview") {
+        return {
+          result: {
+            previewId: "pv_mcp_1",
+            agentId: "ag-1",
+            workspaceId: "local",
+            capabilityRevisionId: "rev-1",
+            degraded: [{ control: "cancel", effect: "no cancel" }],
+            expiresAt: "2026-11-19T20:00:00.000Z",
+          },
+        };
+      }
+      if (req.method === "dsh.tasks.list") {
+        return {
+          result: {
+            items: [
+              {
+                taskId: "t_bad",
+                status: "succeeded",
+                phase: "done/Finished",
+                resultValid: false,
+                degraded: [{ control: "cancel" }],
+                pending: { attention: [{ questionId: "q_1" }], approvals: [{ approvalId: "ap_1" }] },
+              },
+            ],
+            hasMore: false,
+          },
+        };
+      }
+      return { result: {} };
+    },
+    async () => {
+      const previewRes = await callTool("dsh_task_preview", {
+        workspace_id: "local",
+        agent_id: "ag-1",
+        capability_revision_id: "rev-1",
+      });
+      assert.equal(previewRes.isError, false);
+      assert.match(previewRes.content[0].text, /^preview pv_mcp_1 · ag-1 · expires /);
+      assert.doesNotMatch(previewRes.content[0].text, /task \? · unknown/);
+      assert.match(previewRes.content[1].text, /degraded \(1\): cancel/);
+
+      const listRes = await callTool("dsh_task_list", {});
+      assert.equal(listRes.isError, false);
+      assert.match(
+        listRes.content[1].text,
+        /task t_bad · succeeded · done\/Finished \[unvalidated · degraded\(cancel\) · attention=1 · approvals=1\]/,
+      );
+    },
+  );
+});

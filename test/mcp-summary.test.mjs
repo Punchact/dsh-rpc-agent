@@ -1,11 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { formatTaskSummary } from "../bin/dsh-rpc-mcp.mjs";
+import { formatTaskSummary as formatTaskSummaryFromBin } from "../bin/dsh-rpc-mcp.mjs";
+import { formatTaskListLine, formatTaskSummary } from "../lib/mcp-format.mjs";
 
 function textOf(result) {
   return result.content.map((part) => part.text).join("\n");
 }
+
+assert.equal(formatTaskSummaryFromBin, formatTaskSummary, "bin/dsh-rpc-mcp.mjs re-exports formatTaskSummary");
 
 // 0.9.2 复核（Antigravity，medium）：只读文本的调用方看不到 structuredContent 里的
 // `resultValid`。未过校验的结果必须在文字里就带上标记，否则「看得见」会被读成「已经验过」。
@@ -47,4 +50,94 @@ test("a validated result is not marked unvalidated", () => {
   const text = textOf(result);
   assert.doesNotMatch(text, /unvalidated/);
   assert.match(text, /result: \{"ok":true\}/);
+});
+
+test("degraded, pending attention, and pending approvals appear in plain text and survive capText truncation", () => {
+  const result = formatTaskSummary(
+    {
+      taskId: "task_wait",
+      status: "waiting_input",
+      phase: "person/answer",
+      stateVersion: 3,
+      degraded: [{ control: "cancel", effect: "cancel requests never produce cancelled" }],
+      pending: {
+        attention: [{ questionId: "q_1", kind: "decision", prompt: "pick target", options: ["a", "b"] }],
+        approvals: [{ approvalId: "ap_1", attemptId: "att_1", summary: "run shell" }],
+      },
+      result: { blob: "x".repeat(400) },
+      resultValid: false,
+    },
+    180,
+  );
+
+  const meta = result.content[2].text;
+  assert.match(meta, /unvalidated/);
+  assert.match(meta, /degraded=1/);
+  assert.match(meta, /attention=1/);
+  assert.match(meta, /approvals=1/);
+
+  const full = formatTaskSummary(
+    {
+      taskId: "task_wait",
+      status: "waiting_input",
+      phase: "person/answer",
+      stateVersion: 3,
+      degraded: [{ control: "cancel", effect: "cancel requests never produce cancelled" }],
+      pending: {
+        attention: [{ questionId: "q_1", kind: "decision", prompt: "pick target", options: ["a", "b"] }],
+        approvals: [{ approvalId: "ap_1", attemptId: "att_1", summary: "run shell" }],
+      },
+    },
+    10_000,
+  );
+  const fullText = textOf(full);
+  assert.match(fullText, /degraded \(1\): cancel — cancel requests never produce cancelled/);
+  assert.match(fullText, /pending attention \(1\): \[decision q_1\] pick target \(options: a \| b\)/);
+  assert.match(fullText, /pending approvals \(1\): \[ap_1@att_1\] run shell/);
+});
+
+test("preview summary uses preview header instead of task/unknown placeholders and shows degraded", () => {
+  const result = formatTaskSummary(
+    {
+      previewId: "pv_123",
+      agentId: "ag-1",
+      workspaceId: "local",
+      capabilityRevisionId: "cap-1",
+      selectionReason: "selected",
+      candidates: [
+        { agentId: "ag-off", included: false, reason: "AGENT_DISABLED" },
+        { agentId: "ag-1", included: true, reason: "SELECTED" },
+      ],
+      degraded: [{ control: "steer", effect: "no mid-run input" }],
+      expiresAt: "2026-11-19T20:00:00.000Z",
+    },
+    10_000,
+  );
+
+  const text = textOf(result);
+  assert.match(result.content[0].text, /^preview pv_123 · ag-1 · expires 2026-11-19T20:00:00\.000Z$/);
+  assert.doesNotMatch(text, /task \? · unknown/);
+  assert.doesNotMatch(text, /\bv\?/);
+  assert.match(text, /capability: cap-1/);
+  assert.match(text, /candidates \(2\): ag-off\(excluded:AGENT_DISABLED\), ag-1\(selected\)/);
+  assert.match(text, /degraded \(1\): steer — no mid-run input/);
+  assert.match(result.content[2].text, /preview · degraded=1/);
+});
+
+test("formatTaskListLine exposes unvalidated, resultValid=true, degraded, and pending counts", () => {
+  assert.equal(
+    formatTaskListLine({
+      taskId: "t_1",
+      status: "succeeded",
+      phase: "done/Finished",
+      resultValid: false,
+      degraded: [{ control: "cancel" }],
+      pending: { attention: [{ questionId: "q1" }], approvals: [] },
+    }),
+    "task t_1 · succeeded · done/Finished [unvalidated · degraded(cancel) · attention=1]",
+  );
+  assert.equal(
+    formatTaskListLine({ taskId: "t_2", status: "succeeded", phase: "done/Finished", resultValid: true }),
+    "task t_2 · succeeded · done/Finished [resultValid=true]",
+  );
 });

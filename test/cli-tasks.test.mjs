@@ -178,3 +178,39 @@ test("CLI rejects out-of-range numeric flags, unsafe integers, and malformed JSO
     },
   );
 });
+
+test("CLI tasks get non-JSON output prints resultValid, degraded, and pending attention/approvals", async () => {
+  await withMockCliRpc(
+    (req) => {
+      if (req.method === "dsh.tasks.get") {
+        return {
+          result: {
+            taskId: "t_unval",
+            status: "running",
+            phase: "person/review",
+            stateVersion: 4,
+            degraded: [{ control: "cancel", effect: "cancel moves to needs_reconcile" }],
+            pending: {
+              attention: [{ questionId: "q_rev", kind: "review", prompt: "check schema" }],
+              approvals: [{ approvalId: "ap_1", attemptId: "att_1", summary: "write file" }],
+            },
+            result: { draft: "ok" },
+            resultValid: false,
+          },
+        };
+      }
+      return { result: {} };
+    },
+    async ({ getStdout }) => {
+      const code = await main(["tasks", "get", "t_unval"]);
+      assert.equal(code, 0);
+      const out = getStdout();
+      assert.match(out, /task t_unval · running · person\/review · v4/);
+      assert.match(out, /degraded \(1\): cancel — cancel moves to needs_reconcile/);
+      assert.match(out, /pending attention \(1\): \[review q_rev\] check schema/);
+      assert.match(out, /pending approvals \(1\): \[ap_1@att_1\] write file/);
+      assert.match(out, /resultValid: false \(unvalidated: failed schema validation\)/);
+      assert.match(out, /result: \{"draft":"ok"\} \(unvalidated: failed schema validation\)/);
+    },
+  );
+});

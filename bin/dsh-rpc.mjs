@@ -14,6 +14,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { rpcCall, rpcStream, waitForTurn, WAIT_SLICE_MS } from "../lib/client.mjs";
+import { formatTaskDetailLines } from "../lib/mcp-format.mjs";
 import { ADAPTER_FAILURE_MESSAGES, sanitizeAdapterFailure } from "../lib/adapters/base.mjs";
 import { endpointPath, readEndpoint, stateDir, tokenPath } from "../lib/auth.mjs";
 import { describeTrace, isTraceLevel, normalizeTraceLevel } from "../lib/trace-format.mjs";
@@ -822,7 +823,16 @@ async function runTasksCommand(flags, rest, options) {
         return 0;
       }
       print(`task ${result.taskId} · ${result.status} · ${result.phase ?? "?"} · v${result.stateVersion}`);
-      if (result.notice) print(`notice: ${result.notice}`);
+      const detail = formatTaskDetailLines(result);
+      for (const line of detail.lines) {
+        if (line.startsWith("agent: ") || line.startsWith("workspace: ")) continue;
+        print(line);
+      }
+      if (result.resultValid === false) {
+        print("resultValid: false (unvalidated: failed schema validation)");
+      } else if (result.resultValid === true) {
+        print("resultValid: true");
+      }
       return 0;
     }
     case "cancel": {

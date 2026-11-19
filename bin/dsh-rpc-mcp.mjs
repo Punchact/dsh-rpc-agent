@@ -21,7 +21,13 @@ import { fileURLToPath } from "node:url";
 import { rpcCall, waitForTurn, WAIT_SLICE_MS } from "../lib/client.mjs";
 import { sanitizeAdapterFailure } from "../lib/adapters/base.mjs";
 import { PLUGIN_VERSION } from "../lib/version.mjs";
-import { capText, formatToolResult, formatToolError } from "../lib/mcp-format.mjs";
+import {
+  capText,
+  formatTaskListLine,
+  formatTaskSummary,
+  formatToolError,
+  formatToolResult,
+} from "../lib/mcp-format.mjs";
 import { createInflight } from "../lib/inflight.mjs";
 import { normalizeTraceLevel } from "../lib/trace-format.mjs";
 import { DEFAULT_HISTORY_KINDS, formatHistory } from "../lib/history-format.mjs";
@@ -775,46 +781,6 @@ async function listTools() {
   return enabled ? [...BASE_TOOLS, ...TASK_TOOLS] : [...BASE_TOOLS];
 }
 
-function formatTaskSummary(task, maxResultChars = DEFAULT_MAX_RESULT_CHARS) {
-  // 0.9.2 复核：只读文本的调用方（LLM、CLI 输出）看不到 structuredContent 里的 resultValid。
-  // 未过校验的结果必须在这行文字里就带上标记，否则「看得见」会被读成「已经验过」。
-  const unvalidated = task.resultValid === false;
-  const header = `task ${task.taskId ?? "?"} · ${task.status ?? "unknown"} · ${task.phase ?? "unknown"}`;
-  const bodyLines = [];
-  if (task.agentId) bodyLines.push(`agent: ${task.agentId}`);
-  if (task.workspaceId) bodyLines.push(`workspace: ${task.workspaceId}`);
-  if (task.notice) bodyLines.push(`notice: ${task.notice}`);
-  if (task.result !== undefined && task.result !== null) {
-    bodyLines.push(
-      `result: ${JSON.stringify(task.result)}${unvalidated ? " (unvalidated: failed schema validation)" : ""}`,
-    );
-  } else if (unvalidated) {
-    bodyLines.push("result: (none) (unvalidated: the executor reported ready without a validated result)");
-  }
-  if (task.error) bodyLines.push(`error: ${JSON.stringify(task.error)}`);
-  const meta = [
-    `v${task.stateVersion ?? "?"}`,
-    unvalidated ? "unvalidated" : null,
-    task.deduplicated ? "deduplicated" : null,
-    task.requestAccepted ? "requestAccepted" : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-  const content = capText(
-    [
-      { type: "text", text: header },
-      { type: "text", text: bodyLines.length > 0 ? bodyLines.join("\n") : "(no details)" },
-      { type: "text", text: `— ${meta}` },
-    ],
-    maxResultChars,
-  );
-  return {
-    content,
-    isError: false,
-    structuredContent: task,
-  };
-}
-
 // Keys that would reach Object.prototype if any later code copies arguments
 // with Object.assign or [[Set]]. JSON.parse stores them as own properties, so
 // the danger is downstream, not here — refuse them at the door.
@@ -1431,9 +1397,7 @@ async function callTool(name, args, signal = undefined) {
         }
         const result = await call("dsh.tasks.list", params);
         const items = Array.isArray(result?.items) ? result.items : [];
-        const lines = items.map(
-          (item) => `task ${item.taskId ?? "?"} · ${item.status ?? "unknown"} · ${item.phase ?? "unknown"}`,
-        );
+        const lines = items.map((item) => formatTaskListLine(item));
         const content = capText(
           [
             { type: "text", text: `tasks (${items.length})` },
