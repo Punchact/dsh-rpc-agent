@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import vm from "node:vm";
+import ts from "typescript";
 
 import { apply } from "../dist/index.mjs";
 import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
@@ -304,4 +307,157 @@ test("blocked-port startup warning deduplicates per port rather than silencing a
     else process.env.DSH_HOME = prevHome;
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("index entry exports HostPluginContext, TaskCentreState, TaskCentreWiring, PublishHandle, TaskDispatcher, and Autopilot at tsc compile time", () => {
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const validProbe = resolve(repoRoot, "src/__index_valid_probe__.mts");
+  const badProbe = resolve(repoRoot, "src/__index_bad_probe__.mts");
+
+  const validSource = `
+import {
+  apply,
+  inject,
+  name,
+  type Autopilot,
+  type HostPluginContext,
+  type PublishHandle,
+  type TaskCentreState,
+  type TaskCentreWiring,
+  type TaskDispatcher,
+} from "./index.mjs";
+
+const _pluginName: string = name;
+const _injectDeps: readonly ["webServer", "sessionController"] = inject;
+const _state: TaskCentreState = {
+  enabled: true,
+  mode: "file",
+  dbPath: "/tmp/tasks.db",
+  ready: true,
+  seedError: null,
+  startError: null,
+  autopilot: { enabled: true, intervalMs: 5000, maxStart: 2, maxPump: 4 },
+  autopilotStats: { passes: 1, lastPassAt: null, lastStarted: 0, lastPumped: 0, lastFailed: 0, lastError: null },
+};
+const _publish: PublishHandle = () => true;
+const _checkApply = (ctx: HostPluginContext, wiring: TaskCentreWiring) => {
+  const _d: TaskDispatcher | null = wiring.dispatcher;
+  const _a: Autopilot | null = wiring.autopilot;
+  return { promise: apply(ctx, { enabled: false }), _d, _a, _state, _publish, _pluginName, _injectDeps };
+};
+void _checkApply;
+`;
+
+  const badSource = `
+import { apply, type HostPluginContext, type PublishHandle, type TaskCentreState } from "./index.mjs";
+
+const badCtx = { webServer: { getOrigin: () => "http://127.0.0.1:0", register: () => () => {} } };
+// @ts-expect-error -- missing sessionController and effect
+void apply(badCtx);
+const badCtxTyped: HostPluginContext = badCtx;
+const badPublish: PublishHandle = () => "not-a-boolean";
+const badState: TaskCentreState = { enabled: "yes" };
+void badCtxTyped;
+void badPublish;
+void badState;
+`;
+
+  const configPath = resolve(repoRoot, "tsconfig.json");
+  const parsed = ts.readConfigFile(configPath, ts.sys.readFile);
+  const cmd = ts.parseJsonConfigFileContent(parsed.config, ts.sys, repoRoot);
+  const options = { ...cmd.options, noEmit: true };
+
+  const runProbe = (filePath, content) => {
+    const virtualFiles = new Map([[resolve(filePath), content]]);
+    const host = ts.createCompilerHost(options, true);
+    const origGetSourceFile = host.getSourceFile.bind(host);
+    const origFileExists = host.fileExists.bind(host);
+    host.fileExists = (p) => virtualFiles.has(resolve(p)) || origFileExists(p);
+    host.getSourceFile = (p, lang) => {
+      const hit = virtualFiles.get(resolve(p));
+      if (hit !== undefined) return ts.createSourceFile(p, hit, lang, true);
+      return origGetSourceFile(p, lang);
+    };
+    host.writeFile = () => {
+      throw new Error("unexpected write during in-memory compiler check");
+    };
+    const program = ts.createProgram([filePath], options, host);
+    return ts.getPreEmitDiagnostics(program).filter((d) => d.file && resolve(d.file.fileName) === resolve(filePath));
+  };
+
+  const validDiagnostics = runProbe(validProbe, validSource);
+  assert.deepEqual(
+    validDiagnostics.map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n")),
+    [],
+  );
+
+  const badDiagnostics = runProbe(badProbe, badSource);
+  assert.ok(badDiagnostics.length >= 3, `expected compile-time rejections, got ${badDiagnostics.length}`);
+});
+
+test("client.js passes strict tsc checkJs with 0 diagnostics and registers the Web UI settings section cleanly", () => {
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const clientPath = resolve(repoRoot, "dist/client.js");
+  const clientSource = readFileSync(clientPath, "utf8");
+
+  const options = {
+    target: ts.ScriptTarget.ES2023,
+    module: ts.ModuleKind.None,
+    allowJs: true,
+    checkJs: true,
+    strict: true,
+    noEmit: true,
+    skipLibCheck: true,
+    lib: ["lib.es2023.d.ts", "lib.dom.d.ts"],
+  };
+  const program = ts.createProgram([clientPath], options);
+  const diagnostics = ts.getPreEmitDiagnostics(program);
+  assert.deepEqual(
+    diagnostics.map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n")),
+    [],
+  );
+
+  let loaded = null;
+  const registered = [];
+  const effects = [];
+  const sandbox = {
+    navigator: { language: "zh-CN" },
+    window: {
+      __ModuleLoader__: {
+        load(entry) {
+          loaded = entry;
+        },
+      },
+    },
+  };
+  vm.runInNewContext(clientSource, sandbox, { filename: "dist/client.js" });
+  assert.equal(loaded?.id, "@punchact/dsh-rpc-agent");
+  const plugin = loaded.factory((dep) => {
+    assert.equal(dep, "react");
+    return {
+      createElement: () => null,
+      useState: (init) => [typeof init === "function" ? init() : init, () => {}],
+      useEffect: () => {},
+      useRef: (v) => ({ current: v }),
+    };
+  });
+  assert.equal(plugin.name, "dsh-rpc");
+  assert.deepEqual([...plugin.inject], ["slots"]);
+  plugin.apply({
+    effect(fn, label) {
+      effects.push({ fn, label });
+    },
+    slots: {
+      inject(slot, create) {
+        registered.push({ slot, entry: create() });
+      },
+      register(meta, component) {
+        return { meta, component };
+      },
+    },
+  });
+  assert.equal(effects.length, 1);
+  assert.equal(registered.length, 1);
+  assert.equal(registered[0].slot, "settings.section");
+  assert.equal(registered[0].entry.meta.id, "dsh-rpc-status");
 });

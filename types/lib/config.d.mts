@@ -1,18 +1,31 @@
 export declare const MAX_WAIT_SLICE_MS: number;
 export declare const MIN_WAIT_SLICE_MS: number;
 
+export interface TaskAdapterConfig {
+  enabled?: boolean;
+  adapterConfigRef?: string;
+  binary?: string;
+  projectId?: string;
+  model?: string;
+  [key: string]: unknown;
+}
+
 export interface ResolvedConfig {
   enabled: boolean;
+  token?: string;
+  tokenFile?: string;
   path: string;
   allowRemote: boolean;
   defaultCwd: string;
   defaultAgentPreset: string;
   defaultTimeoutMs: number;
   historyBudgetMs: number;
+  historyBudgetMsRequested?: number;
   maxWaitSliceMs: number;
   maxWaitSliceMsRequested?: number;
   maxBodyBytes: number;
   maxSessions: number;
+  logRequests?: boolean;
   traceDefault: string;
   traceDefaultRequested?: string;
   maxResultChars: number;
@@ -24,7 +37,7 @@ export interface ResolvedConfig {
   tasksDbPath: string | null;
   tasksProbeTimeoutMs: number;
   tasksPreviewTtlMs: number;
-  tasksAdapters: Record<string, unknown>;
+  tasksAdapters: Record<string, TaskAdapterConfig>;
   tasksDispatchMaxSteps: number;
   tasksEnabled: boolean;
   tasksMaxConcurrent: number;
@@ -73,4 +86,5 @@ export interface DescribedConfig {
   tasksAutopilotMaxPump: number;
 }
 
+export declare function resolveConfig(input?: Record<string, unknown>): ResolvedConfig;
 export declare function describeConfig(config: Partial<ResolvedConfig>): DescribedConfig;
