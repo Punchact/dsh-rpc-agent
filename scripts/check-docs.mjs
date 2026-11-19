@@ -119,8 +119,8 @@ const rules = [
   { file: "README.md", onlyLatest: false, re: /(?<files>\d+) 个测试文件各自覆盖什么/g, expect: () => ({ files: expected.testFiles }) },
   { file: "README.en.md", onlyLatest: false, re: /What each of the (?<files>\d+) test files covers/g, expect: () => ({ files: expected.testFiles }) },
 
-  { file: "CHANGELOG.md", onlyLatest: true, re: /方法总数 \*\*17 → (?<n>\d+)\*\*/g, expect: () => ({ n: expected.rpcTotal }) },
-  { file: "CHANGELOG.md", onlyLatest: true, re: /\*\*11（默认）\+ (?<task>\d+)（`tasksEnabled: true` 时共 (?<total>\d+) 个）\*\*/g, expect: () => ({ task: expected.mcpTotal - expected.mcpBase, total: expected.mcpTotal }) },
+  { file: "CHANGELOG.md", onlyLatest: false, re: /方法总数 \*\*17 → (?<n>\d+)\*\*/g, expect: () => ({ n: expected.rpcTotal }) },
+  { file: "CHANGELOG.md", onlyLatest: false, re: /\*\*11（默认）\+ (?<task>\d+)（`tasksEnabled: true` 时共 (?<total>\d+) 个）\*\*/g, expect: () => ({ task: expected.mcpTotal - expected.mcpBase, total: expected.mcpTotal }) },
   { file: "CHANGELOG.md", onlyLatest: true, re: /全链 (?<files>\d+) 个测试文件、\*{0,2}(?<cases>\d+) 例/g, expect: () => ({ files: expected.testFiles, cases: expected.testCases }) },
   // 这一对在本轮复校里被漏掉过：`例` 被刷成新值，「本机 x/y 通过」却留在旧值上。
   { file: "CHANGELOG.md", onlyLatest: true, re: /本机 (?<pass>\d+)\/(?<total>\d+) 通过/g, expect: () => ({ pass: expected.testCases, total: expected.testCases }) },
