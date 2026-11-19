@@ -33,7 +33,8 @@ import { type RpcDispatchContext } from "./http.mjs";
 import { isOwnedSession, ownSession } from "./owned.mjs";
 import { CODE, RpcError, badRequest } from "./protocol.mjs";
 import { ROTATE_AFTER_ASKS, lookupEntry, registryKey, rememberEntry } from "./registry.mjs";
-import { createTaskEngine, type TaskDetail, type TaskEngine } from "./tasks/engine.mjs";
+import type { PendingApprovalPacket } from "./pending.mjs";
+import { createTaskEngine, type TaskDetail, type TaskEngine, type TaskEventsResult } from "./tasks/engine.mjs";
 import { createDispatcher, type Dispatcher, type PumpResult, type StartTaskResult } from "./tasks/dispatch.mjs";
 import { notFoundError, validationFailed } from "./tasks/errors.mjs";
 import { createPreview, type CreatePreviewResult } from "./tasks/preview.mjs";
@@ -251,20 +252,7 @@ export interface ApprovalsPendingParams {
   [key: string]: unknown;
 }
 
-export interface PendingApprovalPacket {
-  approvalId: string;
-  sessionId?: string;
-  toolName?: string;
-  callId?: string;
-  escalation?: unknown;
-  argv?: unknown;
-  cwd?: string;
-  preset?: string;
-  reason?: string;
-  createdAt?: unknown;
-  expiresAt?: unknown;
-  [key: string]: unknown;
-}
+export type { PendingApprovalPacket };
 
 export interface ApprovalsPendingResult {
   pending: PendingApprovalPacket[];
@@ -539,19 +527,7 @@ export interface TasksEventsParams {
   [key: string]: unknown;
 }
 
-export interface TasksEventsResult {
-  taskId: string;
-  events: Array<{
-    seq: number;
-    type: string;
-    at: string;
-    attemptId?: string | null;
-    data: unknown;
-    [key: string]: unknown;
-  }>;
-  nextAfterSeq: number;
-  hasMore: boolean;
-}
+export type TasksEventsResult = TaskEventsResult;
 
 export interface TasksInputParams {
   taskId?: string;

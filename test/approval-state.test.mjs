@@ -1,13 +1,26 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
-import { createApprovalGate } from "../dist/lib/approvals.mjs";
-import { createApprovalState } from "../dist/lib/approval-state.mjs";
-import { createPendingStore } from "../dist/lib/pending.mjs";
+import { APPROVAL_MODES, createApprovalGate, ESCALATION_TARGETS } from "../dist/lib/approvals.mjs";
+import {
+  createApprovalState,
+  RESERVATION_STATES,
+  RESERVATION_TRANSITIONS,
+  SETTLE_OUTCOMES,
+} from "../dist/lib/approval-state.mjs";
+import {
+  APPROVAL_DECISIONS,
+  createPendingStore,
+  PENDING_OUTCOMES,
+  PENDING_STATES,
+  PENDING_TRANSITIONS,
+} from "../dist/lib/pending.mjs";
 
 function scratch() {
   const dir = mkdtempSync(join(tmpdir(), "dsh-approval-state-"));
@@ -444,4 +457,101 @@ test("a failed restore remains journaled for a later recovery", async () => {
   const result = await gate.recover();
   assert.equal(result.failed, 1);
   assert.equal(state.widened.get("session-gone"), "workspace-write");
+});
+
+test("approval-state and pending transition tables are exhaustive at runtime and tsc compile time", () => {
+  assert.deepEqual([...Object.keys(RESERVATION_TRANSITIONS)], [...RESERVATION_STATES]);
+  assert.deepEqual([...RESERVATION_TRANSITIONS.pending], [...SETTLE_OUTCOMES]);
+  assert.deepEqual(RESERVATION_TRANSITIONS.committed, []);
+  assert.deepEqual(RESERVATION_TRANSITIONS.refunded, []);
+
+  assert.deepEqual([...Object.keys(PENDING_TRANSITIONS)], [...PENDING_STATES]);
+  assert.deepEqual([...PENDING_TRANSITIONS.pending], [...PENDING_OUTCOMES]);
+  assert.deepEqual([...APPROVAL_DECISIONS], ["allow-once", "reject"]);
+  assert.deepEqual([...APPROVAL_MODES], ["off", "deny", "delegate"]);
+  assert.deepEqual([...ESCALATION_TARGETS], ["workspace-write", "danger-full-access"]);
+
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const validProbe = resolve(repoRoot, "src/__approval_state_valid_probe__.mts");
+  const badProbe = resolve(repoRoot, "src/__approval_state_bad_probe__.mts");
+
+  const validSource = `
+import {
+  RESERVATION_TRANSITIONS,
+  type ApprovalState,
+  type ReservationState,
+} from "./lib/approval-state.mjs";
+import {
+  createApprovalGate,
+  type ApprovalGate,
+} from "./lib/approvals.mjs";
+import {
+  PENDING_TRANSITIONS,
+  type PendingApprovalState,
+  type PendingOutcome,
+  type PendingStore,
+} from "./lib/pending.mjs";
+
+const _resTable: Readonly<Record<ReservationState, readonly ReservationState[]>> = RESERVATION_TRANSITIONS;
+const _pendTable: Readonly<Record<PendingApprovalState, readonly PendingOutcome[]>> = PENDING_TRANSITIONS;
+const _wire = (state: ApprovalState, store: PendingStore): ApprovalGate | null => {
+  const _ticket: string | null = state.reserveAllowance("s-1");
+  void _ticket;
+  return createApprovalGate({ mode: "delegate", isOwned: () => true, applyPreset: async () => {}, store, state });
+};
+void _resTable;
+void _pendTable;
+void _wire;
+`;
+
+  const badSource = `
+import type { ReservationState } from "./lib/approval-state.mjs";
+import type { PendingApprovalState, PendingOutcome } from "./lib/pending.mjs";
+import { createApprovalGate } from "./lib/approvals.mjs";
+
+const incompleteRes: Record<ReservationState, readonly ReservationState[]> = {
+  pending: ["committed"],
+  committed: [],
+};
+const incompletePending: Record<PendingApprovalState, readonly PendingOutcome[]> = {
+  pending: ["allow-once"],
+  "allow-once": [],
+  reject: [],
+  expired: [],
+};
+const badGate = createApprovalGate({ mode: "off", isOwned: "yes" });
+void incompleteRes;
+void incompletePending;
+void badGate;
+`;
+
+  const configPath = resolve(repoRoot, "tsconfig.json");
+  const parsed = ts.readConfigFile(configPath, ts.sys.readFile);
+  const cmd = ts.parseJsonConfigFileContent(parsed.config, ts.sys, repoRoot);
+  const options = { ...cmd.options, noEmit: true };
+
+  const runProbe = (filePath, content) => {
+    const virtualFiles = new Map([[resolve(filePath), content]]);
+    const host = ts.createCompilerHost(options, true);
+    const origGetSourceFile = host.getSourceFile.bind(host);
+    const origFileExists = host.fileExists.bind(host);
+    host.fileExists = (p) => virtualFiles.has(resolve(p)) || origFileExists(p);
+    host.getSourceFile = (p, lang) => {
+      const hit = virtualFiles.get(resolve(p));
+      if (hit !== undefined) return ts.createSourceFile(p, hit, lang, true);
+      return origGetSourceFile(p, lang);
+    };
+    host.writeFile = () => {
+      throw new Error("unexpected write during in-memory compiler check");
+    };
+    const program = ts.createProgram([filePath], options, host);
+    return ts.getPreEmitDiagnostics(program).filter((d) => d.file && resolve(d.file.fileName) === resolve(filePath));
+  };
+
+  assert.deepEqual(
+    runProbe(validProbe, validSource).map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n")),
+    [],
+  );
+  const badDiagnostics = runProbe(badProbe, badSource);
+  assert.ok(badDiagnostics.length >= 3, `expected >= 3 compile-time rejections, got ${badDiagnostics.length}`);
 });

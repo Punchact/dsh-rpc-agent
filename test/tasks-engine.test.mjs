@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 import { resolveConfig } from "../dist/lib/config.mjs";
 import { buildDispatcher } from "../dist/lib/http.mjs";
@@ -755,4 +757,105 @@ test("the same question from a different option set is a different question", as
   } finally {
     store.close();
   }
+});
+
+test("engine entity projections, derivePhase, attentionOnceInTx params, and engine contracts validate at tsc compile time", () => {
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const validProbe = resolve(repoRoot, "src/__engine_valid_probe__.mts");
+  const badProbe = resolve(repoRoot, "src/__engine_bad_probe__.mts");
+
+  const validSource = `
+import {
+  derivePhase,
+  type AttemptRow,
+  type AttentionOnceInTxParams,
+  type AttentionRow,
+  type DerivedPhase,
+  type EventRow,
+  type ListTasksParams,
+  type SubmitTaskParams,
+  type TaskEngine,
+  type TaskProjection,
+  type TaskRow,
+} from "./lib/tasks/engine.mjs";
+
+const _phase: DerivedPhase = derivePhase({ status: "queued" }, [], null, { nowMs: 1 });
+const _attOnce: AttentionOnceInTxParams = {
+  questionId: "q-1",
+  taskId: "t-1",
+  attemptId: "att-1",
+  kind: "input",
+  prompt: "Need choice",
+  optionsJson: "[]",
+  expiresAt: null,
+  now: "2026-11-19T00:00:00.000Z",
+};
+const _listParams: ListTasksParams = { status: "running", limit: 10 };
+const _submitParams: SubmitTaskParams = { idempotencyKey: "k1", workspaceId: "local", agentId: "dsh" };
+const _rowsCheck = (
+  _row: TaskRow,
+  _proj: TaskProjection,
+  _att: AttentionRow,
+  _evt: EventRow,
+  _attempt: AttemptRow,
+  engine: TaskEngine,
+) => ({
+  submitted: engine.submit(_submitParams),
+  listed: engine.list(_listParams),
+  resolved: engine.resolve({ taskId: _row.task_id, expectedStateVersion: _proj.stateVersion, idempotencyKey: "r1", disposition: "accept" }),
+  phase: _phase,
+  attOnce: _attOnce,
+});
+void _rowsCheck;
+`;
+
+  const badSource = `
+import {
+  derivePhase,
+  type AttentionOnceInTxParams,
+  type DerivedPhase,
+  type TaskEngine,
+} from "./lib/tasks/engine.mjs";
+
+const badPhase: DerivedPhase = { phase: "unknown/phase", label: "bad" };
+const badAttOnce: AttentionOnceInTxParams = { questionId: "q-1", taskId: "t-1", kind: "input" };
+const badEngineCalls = (engine: TaskEngine) => [
+  engine.list({ limit: "ten" }),
+  engine.readArtifact({ taskId: "t-1", artifactId: "a-1", offset: "0" }),
+  derivePhase({ status: "queued" }, [{ kind: "approval" }], null, { nowMs: "now" }),
+];
+void badPhase;
+void badAttOnce;
+void badEngineCalls;
+`;
+
+  const configPath = resolve(repoRoot, "tsconfig.json");
+  const parsed = ts.readConfigFile(configPath, ts.sys.readFile);
+  const cmd = ts.parseJsonConfigFileContent(parsed.config, ts.sys, repoRoot);
+  const options = { ...cmd.options, noEmit: true };
+
+  const runProbe = (filePath, content) => {
+    const virtualFiles = new Map([[resolve(filePath), content]]);
+    const host = ts.createCompilerHost(options, true);
+    const origGetSourceFile = host.getSourceFile.bind(host);
+    const origFileExists = host.fileExists.bind(host);
+    host.fileExists = (p) => virtualFiles.has(resolve(p)) || origFileExists(p);
+    host.getSourceFile = (p, lang) => {
+      const hit = virtualFiles.get(resolve(p));
+      if (hit !== undefined) return ts.createSourceFile(p, hit, lang, true);
+      return origGetSourceFile(p, lang);
+    };
+    host.writeFile = () => {
+      throw new Error("unexpected write during in-memory compiler check");
+    };
+    const program = ts.createProgram([filePath], options, host);
+    return ts.getPreEmitDiagnostics(program).filter((d) => d.file && resolve(d.file.fileName) === resolve(filePath));
+  };
+
+  assert.deepEqual(
+    runProbe(validProbe, validSource).map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n")),
+    [],
+  );
+  const badDiagnostics = runProbe(badProbe, badSource);
+  assert.ok(badDiagnostics.length >= 4, `expected >= 4 compile-time rejections, got ${badDiagnostics.length}`);
 });
