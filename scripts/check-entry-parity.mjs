@@ -29,8 +29,21 @@ function toPosixRel(root, absPath) {
 }
 
 // 1. Named exports of index.mjs (and ./http-client)
-const srcIndexMod = await import(pathToFileURL(join(REPO, "index.mjs")).href);
-const distIndexMod = await import(pathToFileURL(join(DIST, "index.mjs")).href);
+// Importing a half-built dist throws (a missing module, a syntax error). That is a real
+// failure of this check, but it must read like one: report the module and exit 1 instead of
+// dumping a Node stack trace, otherwise CI failure reports look like a broken tool.
+async function importEntry(label, absPath) {
+  try {
+    return await import(pathToFileURL(absPath).href);
+  } catch (error) {
+    console.error(`check-entry-parity: FAIL (1)`);
+    console.error(`  - ${label} 无法导入（${toPosixRel(REPO, absPath)}）: ${error?.code ?? ""} ${error?.message ?? error}`);
+    process.exit(1);
+  }
+}
+
+const srcIndexMod = await importEntry("源码 index.mjs", join(REPO, "index.mjs"));
+const distIndexMod = await importEntry("产物 index.mjs", join(DIST, "index.mjs"));
 const srcIndexExports = Object.keys(srcIndexMod).sort();
 const distIndexExports = Object.keys(distIndexMod).sort();
 checkedItems += 1;
@@ -123,8 +136,8 @@ for (const [subpath, srcTarget] of Object.entries(srcExports)) {
 }
 
 // Extra check: ./http-client named exports parity
-const srcHttpClient = await import(pathToFileURL(join(REPO, "lib/client.mjs")).href);
-const distHttpClient = await import(pathToFileURL(join(DIST, "lib/client.mjs")).href);
+const srcHttpClient = await importEntry("源码 lib/client.mjs", join(REPO, "lib/client.mjs"));
+const distHttpClient = await importEntry("产物 lib/client.mjs", join(DIST, "lib/client.mjs"));
 const srcClientKeys = Object.keys(srcHttpClient).sort();
 const distClientKeys = Object.keys(distHttpClient).sort();
 checkedItems += 1;
