@@ -60,6 +60,48 @@ function collectDeclaredTargets(pkg) {
   return list;
 }
 
+// Comment lines must not satisfy a workflow assertion: a `# - run: npm run build` sitting above
+// `check:version` would otherwise look like a build step that never runs.
+function stripComments(block) {
+  return block
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+}
+
+// Every `npm (stage) publish` line must either run inside `dist/` (subshell or a preceding `cd dist`
+// in the same shell step) or publish an explicit artifact path (a tarball). Anything else is a root
+// publish — the exact mistake this whole check exists to catch. Positions matter: a line that only
+// reaches `cd dist` *after* its first `npm publish` is still a root publish.
+const PUBLISH_CALL = /npm\s+(?:stage\s+)?publish\b/g;
+
+// A message that merely *mentions* `npm publish` inside quotes is not a publish step. Replace quoted
+// spans with spaces of the same length so match positions stay aligned with the real line.
+function maskQuotedSpans(line) {
+  return line.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, (span) => " ".repeat(span.length));
+}
+
+function findRootPublishLines(publishBlock) {
+  const offenders = [];
+  let inDistDir = false;
+  for (const raw of publishBlock.split("\n")) {
+    const line = raw.trim();
+    if (/^cd\s+dist\b/.test(line) || /^push-location\s+dist\b/i.test(line)) inDistDir = true;
+    if (/^(?:cd\s+\.\.|popd|leave-)/i.test(line)) inDistDir = false;
+    const masked = maskQuotedSpans(line);
+    PUBLISH_CALL.lastIndex = 0;
+    let match = PUBLISH_CALL.exec(masked);
+    while (match) {
+      const before = masked.slice(0, match.index);
+      const selfContained = /\(\s*cd\s+dist\b/.test(before) || /\bcd\s+dist\s*(?:&&|;)/.test(before);
+      const publishesArtifact = /^npm\s+(?:stage\s+)?publish\s+["']/.test(line.slice(match.index));
+      if (!selfContained && !inDistDir && !publishesArtifact) offenders.push(line);
+      match = PUBLISH_CALL.exec(masked);
+    }
+  }
+  return offenders;
+}
+
 function checkWildcardInPack(baseDir, shippedSet, pattern) {
   const relPattern = pattern.replace(/^\.\//, "");
   const dirRel = posix.dirname(relPattern);
@@ -143,14 +185,15 @@ if (!existsSync(RELEASE_WORKFLOW)) {
   if (verifyIdx < 0 || publishIdx < 0) {
     problems.push("release.yml 缺少 verify 或 publish job");
   } else {
-    const verifyBlock = yml.slice(verifyIdx, publishIdx);
-    const publishBlock = yml.slice(publishIdx);
+    const verifyBlock = stripComments(yml.slice(verifyIdx, publishIdx));
+    const publishBlock = stripComments(yml.slice(publishIdx));
 
     const buildPos = verifyBlock.indexOf("npm run build");
     const checkVersionPos = verifyBlock.indexOf("npm run check:version");
-    const testPos = verifyBlock.indexOf("npm test");
-    if (checkVersionPos >= 0 && buildPos < 0 && checkVersionPos < testPos) {
-      problems.push("release.yml verify job 在 npm run build / npm test 之前调用 check:version，全新检出将缺少 dist/");
+    if (checkVersionPos >= 0 && (buildPos < 0 || buildPos > checkVersionPos)) {
+      problems.push(
+        "release.yml verify job 没有把 npm run build 放在 check:version 之前，全新检出上 check:version 读不到 dist/lib/version.mjs",
+      );
     }
 
     if (!publishBlock.includes("npm run build")) {
@@ -160,9 +203,11 @@ if (!existsSync(RELEASE_WORKFLOW)) {
     if (!usesDist) {
       problems.push("release.yml publish job 未显式从 dist/ 发布（需 cd dist 或 npm pack dist）");
     }
-    const bareRootPublish = /^\s*(?:if\s+)?npm\s+(?:stage\s+)?publish\b/m.test(publishBlock);
-    if (bareRootPublish) {
-      problems.push("release.yml publish job 存在直接从根目录运行的 npm publish 命令，应改为从 dist/ 执行");
+    const bareRootPublish = findRootPublishLines(publishBlock);
+    if (bareRootPublish.length > 0) {
+      problems.push(
+        `release.yml publish job 有 ${bareRootPublish.length} 处在仓库根执行 npm publish：${bareRootPublish[0].slice(0, 120)}`,
+      );
     }
   }
 }

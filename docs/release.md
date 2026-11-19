@@ -6,11 +6,11 @@
 
 | 项 | 值 |
 | --- | --- |
-| npm 上最新 | `0.8.1`（`npm view @punchact/dsh-rpc-agent version`；注册表刚更新时 `npm view` 可能滞后一两分钟，**以直查 `registry.npmjs.org` 为准**） |
-| 注册表里有的版本 | `0.4.3`、`0.4.4`、`0.5.3`、`0.7.6`、`0.7.7`、`0.7.8`、`0.8.1` |
+| npm 上最新 | `0.9.3`（`npm view @punchact/dsh-rpc-agent version`；注册表刚更新时 `npm view` 可能滞后一两分钟，**以直查 `registry.npmjs.org` 为准**） |
+| 注册表里有的版本 | `0.4.3`、`0.4.4`、`0.5.3`、`0.7.6`、`0.7.7`、`0.7.8`、`0.8.1`、`0.9.3` |
 | 已撤回、取不到 | `0.4.1`、`0.4.2`（早期发布流程的失败版本，24 小时内 `npm unpublish` 掉的） |
-| 未单独发布 | `0.5.4`、`0.6.0`（内容随 `v0.7.6` 一起交付，没有各自的 tag）、`0.8.0`（内容随 `v0.8.1` 一起交付） |
-| tag / Release | `v0.5.3`、`v0.7.6`、`v0.7.7`、`v0.7.8`、`v0.8.1` |
+| 未单独发布 | `0.5.4`、`0.6.0`（内容随 `v0.7.6` 一起交付，没有各自的 tag）、`0.8.0`（内容随 `v0.8.1` 一起交付）、`0.9.0`、`0.9.1`、`0.9.2`（内容随 `v0.9.3` 一起交付） |
+| tag / Release | `v0.5.3`、`v0.7.6`、`v0.7.7`、`v0.7.8`、`v0.8.1`、`v0.9.3` |
 
 > 一版一个 Release、一个 tag。Release 一旦 Publish 就会触发发布，所以**不要把"写正文"当成创建 Release 的理由**（见 §2）。
 
@@ -102,6 +102,8 @@ npm publish ./punchact-dsh-rpc-agent-<版本>.tgz
 
 以上校验不通过就不要进入第二步，也就不会白白占掉一个版本号。用令牌发布的版本**没有 provenance**（见 §6）。
 
+**这条路径没有自动防呆，别指望 npm 帮你拦。** `dist/package.json` 的 `prepublishOnly` 由构建脚本剥掉了（它引用仓库根的 `scripts/`，产物包里没有），而仓库根的 `prepublishOnly` 因为 `"private": true` 永远不会被触发——所以 `(cd dist && npm publish)` 一旦敲下去就直接发。要么按上面第一步手工跑 `verify`，要么用 `npm run release:local`（先 `verify` 再 `npm pack ./dist`，产出的 `*.tgz` 已被 `.gitignore` 忽略）。
+
 ### 2.4 C. 发布认证失败时怎么定位
 
 `npm publish` 把所有认证问题压成同一句 `ENEEDAUTH`，它分不清「没有 Trusted Publisher 条目」和「条目在但
@@ -188,9 +190,12 @@ curl -s "https://registry.npmjs.org/-/npm/v1/attestations/@punchact%2Fdsh-rpc-ag
   ```powershell
   plugin_manager({ action: "remove_bundle", target: "@punchact/dsh-rpc-agent" })
   plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent@<版本>" })
-  node bin/dsh-rpc.mjs ping
-  node bin/dsh-rpc.mjs ask "只回复两个字：收到" --cwd . --json
+  $cli = "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\dist\bin\dsh-rpc.mjs"
+  node $cli ping
+  node $cli ask "只回复两个字：收到" --cwd . --json
   ```
+
+  （迁移后包里唯一真实入口是 `dist/bin/dsh-rpc.mjs`；仓库根的 `bin/` 与 `index.mjs` 已不存在。）
 
   `install_bundle` 若报 `already-installed`，先 `remove_bundle` 再装；装完 `~/.dsh/dsh-rpc/endpoint.json` 的
   `version` 才是新版本。

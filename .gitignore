@@ -15,3 +15,6 @@ Thumbs.db
 _tmp/
 .npm-cache/
 dist/
+
+# tarballs produced by npm pack (the release flow packs ./dist from the repo root)
+*.tgz
