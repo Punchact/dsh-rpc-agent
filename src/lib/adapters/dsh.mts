@@ -11,7 +11,15 @@
 //   decideApproval()  -> ops.resolveApproval({ approvalId, decision, note })
 
 import { TASK_ERROR, taskError, validationFailed } from "../tasks/errors.mjs";
-import { ADAPTER_FAILURE_MESSAGES, reportOf, validateAdapter } from "./base.mjs";
+import {
+  ADAPTER_FAILURE_MESSAGES,
+  type AdapterEventEntry,
+  type AgentReport,
+  type NormalizedAttention,
+  type RuntimeAdapter,
+  reportOf,
+  validateAdapter,
+} from "./base.mjs";
 import { redactDeep, redactSecrets } from "./redact.mjs";
 
 const REQUIRED_OPS = Object.freeze([
@@ -22,7 +30,52 @@ const REQUIRED_OPS = Object.freeze([
   "sessionStatus",
   "sessionHistory",
   "resolveApproval",
-]);
+] as const);
+
+export interface DshOpResult {
+  ok?: boolean;
+  reason?: string;
+  [key: string]: unknown;
+}
+
+export interface DshSessionOps {
+  createSession(params: Record<string, unknown>): Promise<DshOpResult & { sessionId?: string }>;
+  askSession(params: Record<string, unknown>): Promise<DshOpResult>;
+  promptSession(params: Record<string, unknown>): Promise<DshOpResult & { accepted?: boolean; requestId?: string }>;
+  cancelSession(params: Record<string, unknown>): Promise<DshOpResult & { accepted?: boolean; stopped?: boolean }>;
+  sessionStatus(params: Record<string, unknown>): Promise<
+    DshOpResult & {
+      status?: string;
+      running?: boolean;
+      turn?: unknown;
+      pendingApproval?: Record<string, unknown>;
+      error?: unknown;
+      failureClass?: string;
+    }
+  >;
+  sessionHistory(params: Record<string, unknown>): Promise<
+    DshOpResult & {
+      records?: Record<string, unknown>[];
+      cursor?: unknown;
+    }
+  >;
+  resolveApproval(params: Record<string, unknown>): Promise<
+    DshOpResult & {
+      accepted?: boolean;
+      resolved?: boolean;
+      decision?: string;
+    }
+  >;
+}
+
+export interface CreateDshAdapterOptions {
+  ops?: DshSessionOps;
+  now?: () => number;
+}
+
+export interface DshAdapter extends RuntimeAdapter {
+  kind: "dsh";
+}
 
 // Only a *request* can block on a human. DSH also writes `approval/policy` (the session's
 // approval policy at start, e.g. `{ policy: "ask" }`) and resolution rows such as
@@ -32,7 +85,7 @@ const REQUIRED_OPS = Object.freeze([
 // the session-status path, so an unclassified approval row is reported as progress.
 const BLOCKING_APPROVAL_KINDS = Object.freeze(new Set(["requested", "request"]));
 
-function extractLocatorAndArg(arg1, arg2) {
+function extractLocatorAndArg(arg1: any, arg2: any): Record<string, any> {
   if (arg2 && typeof arg2 === "object" && (arg2.sessionId || arg2.locator || arg2.kind === "dsh")) {
     return arg2.locator ?? arg2;
   }
@@ -42,12 +95,12 @@ function extractLocatorAndArg(arg1, arg2) {
   return {};
 }
 
-function extractSessionId(locator, fallback) {
+function extractSessionId(locator: any, fallback: any): string {
   const id = locator?.sessionId ?? fallback?.sessionId;
   return typeof id === "string" && id.trim().length > 0 ? id.trim() : "";
 }
 
-function assertOpOk(res, fallbackMessage, details = {}) {
+function assertOpOk<T extends DshOpResult>(res: T | null | undefined, fallbackMessage: string, details: Record<string, unknown> = {}): T {
   if (!res || res.ok === false) {
     const err = taskError(TASK_ERROR.ADAPTER_UNAVAILABLE, ADAPTER_FAILURE_MESSAGES.unavailable, details);
     Object.defineProperty(err, "internalDetail", {
@@ -59,7 +112,7 @@ function assertOpOk(res, fallbackMessage, details = {}) {
   return res;
 }
 
-function normalizeApprovalAttention(pending, fallbackPrompt = "approval required") {
+function normalizeApprovalAttention(pending: any, fallbackPrompt = "approval required"): NormalizedAttention {
   const approvalId =
     typeof pending?.approvalId === "string" && pending.approvalId.trim()
       ? pending.approvalId.trim()
@@ -80,7 +133,7 @@ function normalizeApprovalAttention(pending, fallbackPrompt = "approval required
   };
 }
 
-function statusToReport(sessionId, st) {
+function statusToReport(sessionId: string, st: any): AgentReport {
   if (st.pendingApproval || st.status === "waiting_approval") {
     return reportOf("blocked", {
       observedStatus: st.status ?? "waiting_approval",
@@ -152,7 +205,7 @@ function statusToReport(sessionId, st) {
   });
 }
 
-function recordToReport(sessionId, record) {
+function recordToReport(sessionId: string, record: any): AdapterEventEntry {
   const type = typeof record?.type === "string" ? record.type : "unknown";
   const seq = record?.seq ?? record?.cursor ?? 0;
   const data = record?.data && typeof record.data === "object" ? record.data : {};
@@ -273,19 +326,20 @@ function recordToReport(sessionId, record) {
 /**
  * Create the DSH baseline adapter over injected session ops.
  */
-export function createDshAdapter({ ops, now = Date.now } = {}) {
+export function createDshAdapter({ ops, now = Date.now }: CreateDshAdapterOptions = {}): DshAdapter {
   if (!ops || typeof ops !== "object" || Array.isArray(ops)) {
     throw taskError(TASK_ERROR.INVALID_ADAPTER, "createDshAdapter requires an `ops` object");
   }
+  const opsRecord = ops as unknown as Record<string, unknown>;
   for (const name of REQUIRED_OPS) {
-    if (typeof ops[name] !== "function") {
+    if (typeof opsRecord[name] !== "function") {
       throw taskError(TASK_ERROR.INVALID_ADAPTER, `createDshAdapter missing required op "${name}"`, {
         missingOp: name,
       });
     }
   }
 
-  const adapter = {
+  const adapter: DshAdapter = {
     kind: "dsh",
 
     async probe() {
@@ -442,8 +496,8 @@ export function createDshAdapter({ ops, now = Date.now } = {}) {
     },
 
     async events(arg1, arg2, arg3) {
-      let locator;
-      let cursor;
+      let locator: any;
+      let cursor: unknown;
       if (arg3 !== undefined) {
         locator = arg2?.locator ?? arg2;
         cursor = arg3;

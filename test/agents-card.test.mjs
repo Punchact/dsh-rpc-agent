@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 import test from "node:test";
+import ts from "typescript";
 
-import { CARD_VERSION, CONTROL_NAMES, hashCard, normalizeCard, withVerified } from "../dist/lib/agents/card.mjs";
+import {
+  CARD_VERSION,
+  CONTROL_NAMES,
+  controlVerifyState,
+  hashCard,
+  isControlName,
+  normalizeCard,
+  withVerified,
+} from "../dist/lib/agents/card.mjs";
 import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
 
 function validCard(overrides = {}) {
@@ -179,4 +189,47 @@ test("withVerified marks the card verified only when every probe-able control an
   assert.deepEqual(full.unknown, []);
   assert.equal(full.controls.approval.verified, false);
   assert.equal(full.controls.start.verified, true);
+});
+
+test("controlVerifyState maps verified/unsupported/unknown and tsc rejects missing controls", () => {
+  assert.equal(controlVerifyState({ support: "required", verified: true }), "verified");
+  assert.equal(controlVerifyState({ support: "unsupported", verified: false }), "unsupported");
+  assert.equal(controlVerifyState({ support: "optional", verified: false }), "unknown");
+  assert.equal(isControlName("start"), true);
+  assert.equal(isControlName("bogus"), false);
+
+  const repoRoot = resolve(import.meta.dirname, "..");
+  const configPath = resolve(repoRoot, "tsconfig.json");
+  const parsed = ts.parseJsonConfigFileContent(
+    ts.readConfigFile(configPath, ts.sys.readFile).config,
+    ts.sys,
+    repoRoot,
+  );
+  const virtualFile = resolve(repoRoot, "src/lib/agents/__typecheck_probe__.mts");
+  const badSource = `
+import type { ControlDeclaration, ControlName } from "./card.mjs";
+const incomplete: Record<ControlName, ControlDeclaration> = {
+  start: { support: "required", evidence: "ok" },
+  steer: { support: "optional", evidence: "ok" },
+  cancel: { support: "required", evidence: "ok" },
+  inspect: { support: "optional", evidence: "ok" },
+  approval: { support: "unsupported", evidence: "none" },
+};
+void incomplete;
+`;
+  const host = ts.createCompilerHost(parsed.options);
+  const origGetSourceFile = host.getSourceFile.bind(host);
+  host.getSourceFile = (fileName, languageVersion, ...rest) => {
+    if (resolve(fileName) === virtualFile) {
+      return ts.createSourceFile(fileName, badSource, languageVersion);
+    }
+    return origGetSourceFile(fileName, languageVersion, ...rest);
+  };
+  const program = ts.createProgram([virtualFile], parsed.options, host);
+  const diagnostics = ts.getPreEmitDiagnostics(program, program.getSourceFile(virtualFile));
+  assert.ok(diagnostics.length > 0, "tsc must reject incomplete ControlName record");
+  assert.ok(
+    diagnostics.some((d) => d.code === 2741 && String(d.messageText).includes("events")),
+    `expected TS2741 mentioning missing events, got: ${diagnostics.map((d) => `${d.code}:${d.messageText}`).join("; ")}`,
+  );
 });

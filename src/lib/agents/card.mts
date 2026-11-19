@@ -4,9 +4,9 @@
 
 import { createHash } from "node:crypto";
 
-import { TASK_ERROR, taskError } from "../tasks/errors.mjs";
+import { TASK_ERROR, taskError, type TaskError } from "../tasks/errors.mjs";
 
-export const CARD_VERSION = "capability-card@1";
+export const CARD_VERSION = "capability-card@1" as const;
 
 export const CONTROL_NAMES = Object.freeze([
   "start",
@@ -15,36 +15,110 @@ export const CONTROL_NAMES = Object.freeze([
   "inspect",
   "approval",
   "events",
-]);
+] as const);
 
-export const CONTROL_SUPPORTS = Object.freeze(["required", "optional", "unsupported"]);
+export type ControlName = (typeof CONTROL_NAMES)[number];
 
-const CONTROL_NAME_SET = new Set(CONTROL_NAMES);
-const CONTROL_SUPPORT_SET = new Set(CONTROL_SUPPORTS);
-const LIMIT_KEYS = new Set(["maxConcurrent", "maxRuntimeMs", "maxInputChars"]);
+export const CONTROL_SUPPORTS = Object.freeze(["required", "optional", "unsupported"] as const);
 
-function stableStringify(value) {
+export type ControlSupport = (typeof CONTROL_SUPPORTS)[number];
+
+export type ControlVerifyState = "verified" | "unsupported" | "unknown";
+
+export interface ControlDeclaration {
+  support: ControlSupport;
+  evidence: string;
+}
+
+export interface VerifiedControlEntry extends ControlDeclaration {
+  verified: boolean;
+}
+
+export interface CardIdentity {
+  agentId: string;
+  name: string;
+  kind: string;
+  version: string;
+}
+
+export interface CardLimits {
+  maxConcurrent?: number;
+  maxRuntimeMs?: number;
+  maxInputChars?: number;
+}
+
+export interface CapabilityDeclaration {
+  capabilityId: string;
+  version: number;
+  sideEffectKind: "read" | "write";
+  cancelPolicy: "required" | "optional";
+  schema: Record<string, unknown>;
+  limitations?: string[];
+}
+
+export interface NormalizedCard {
+  cardVersion: typeof CARD_VERSION;
+  identity: CardIdentity;
+  controls: Record<ControlName, ControlDeclaration>;
+  limits: CardLimits;
+  limitations: string[];
+  capabilities: CapabilityDeclaration[];
+  declared: true;
+  verified: false;
+  evidence?: string[];
+}
+
+export interface VerifiedCard extends Omit<NormalizedCard, "controls" | "verified"> {
+  controls: Record<ControlName, VerifiedControlEntry>;
+  declared: true;
+  verified: boolean;
+  partial: boolean;
+  verifiedControls: ControlName[];
+  evidence: string[];
+  unknown: ControlName[];
+}
+
+export type VerifiedControlInput =
+  | Partial<Record<ControlName, boolean | { verified?: boolean }>>
+  | { verified?: Partial<Record<ControlName, boolean | { verified?: boolean }>> };
+
+const CONTROL_NAME_SET: ReadonlySet<string> = new Set(CONTROL_NAMES);
+const CONTROL_SUPPORT_SET: ReadonlySet<string> = new Set(CONTROL_SUPPORTS);
+const LIMIT_KEYS: ReadonlySet<string> = new Set(["maxConcurrent", "maxRuntimeMs", "maxInputChars"]);
+
+export function isControlName(name: unknown): name is ControlName {
+  return typeof name === "string" && CONTROL_NAME_SET.has(name);
+}
+
+export function controlVerifyState(entry: Pick<VerifiedControlEntry, "support" | "verified">): ControlVerifyState {
+  if (entry.support === "unsupported") return "unsupported";
+  if (entry.verified === true) return "verified";
+  return "unknown";
+}
+
+function stableStringify(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
-  const keys = Object.keys(value).sort();
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
   return `{${keys
-    .filter((k) => value[k] !== undefined)
-    .map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`)
+    .filter((k) => obj[k] !== undefined)
+    .map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`)
     .join(",")}}`;
 }
 
-function invalidCard(message, data = {}) {
+function invalidCard(message: string, data: Record<string, unknown> = {}): TaskError {
   return taskError(TASK_ERROR.INVALID_CARD, message, data);
 }
 
-function requireNonEmptyString(value, path) {
+function requireNonEmptyString(value: unknown, path: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw invalidCard(`card.${path} must be a non-empty string`, { path });
   }
   return value.trim();
 }
 
-function isPlainObject(value) {
+function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
@@ -52,7 +126,7 @@ function isPlainObject(value) {
  * Validate and normalize an agent capability card.
  * Enforces declared != verified: `normalizeCard` always yields `declared: true, verified: false`.
  */
-export function normalizeCard(input) {
+export function normalizeCard(input: unknown): NormalizedCard {
   if (!isPlainObject(input)) {
     throw invalidCard("card must be a JSON object");
   }
@@ -66,7 +140,7 @@ export function normalizeCard(input) {
   if (!isPlainObject(input.identity)) {
     throw invalidCard("card.identity is required and must be an object", { path: "identity" });
   }
-  const identity = {
+  const identity: CardIdentity = {
     agentId: requireNonEmptyString(input.identity.agentId, "identity.agentId"),
     name: requireNonEmptyString(input.identity.name, "identity.name"),
     kind: requireNonEmptyString(input.identity.kind, "identity.kind"),
@@ -81,7 +155,7 @@ export function normalizeCard(input) {
       throw invalidCard(`unknown control name "${key}" in card.controls`, { path: `controls.${key}` });
     }
   }
-  const controls = {};
+  const controls = {} as Record<ControlName, ControlDeclaration>;
   for (const name of CONTROL_NAMES) {
     const entry = input.controls[name];
     if (!isPlainObject(entry)) {
@@ -101,12 +175,12 @@ export function normalizeCard(input) {
       });
     }
     controls[name] = {
-      support: entry.support,
+      support: entry.support as ControlSupport,
       evidence: entry.evidence.trim(),
     };
   }
 
-  const limits = {};
+  const limits: CardLimits = {};
   if (input.limits !== undefined) {
     if (!isPlainObject(input.limits)) {
       throw invalidCard("card.limits must be an object when provided", { path: "limits" });
@@ -116,10 +190,10 @@ export function normalizeCard(input) {
         throw invalidCard(`unknown limit key "${key}" in card.limits`, { path: `limits.${key}` });
       }
       if (val !== undefined) {
-        if (!Number.isInteger(val) || val <= 0) {
+        if (typeof val !== "number" || !Number.isInteger(val) || val <= 0) {
           throw invalidCard(`card.limits.${key} must be a positive integer`, { path: `limits.${key}` });
         }
-        limits[key] = val;
+        limits[key as keyof CardLimits] = val;
       }
     }
   }
@@ -148,7 +222,7 @@ export function normalizeCard(input) {
 
   // Declared capabilities (optional). A capability without an immutable revision
   // cannot be previewed or submitted, so registration publishes one per entry.
-  const capabilities = [];
+  const capabilities: CapabilityDeclaration[] = [];
   const rawCapabilities = input.capabilities === undefined ? [] : input.capabilities;
   if (!Array.isArray(rawCapabilities)) {
     throw invalidCard("card.capabilities must be an array when provided", { path: "capabilities" });
@@ -160,7 +234,7 @@ export function normalizeCard(input) {
     }
     const capabilityId = requireNonEmptyString(entry.capabilityId, `capabilities[${idx}].capabilityId`);
     const version = entry.version === undefined ? 1 : entry.version;
-    if (!Number.isInteger(version) || version <= 0) {
+    if (typeof version !== "number" || !Number.isInteger(version) || version <= 0) {
       throw invalidCard(`card.capabilities[${idx}].version must be a positive integer`, {
         path: `capabilities[${idx}].version`,
       });
@@ -176,7 +250,7 @@ export function normalizeCard(input) {
         path: `capabilities[${idx}].schema`,
       });
     }
-    let capabilityLimitations = null;
+    let capabilityLimitations: string[] | null = null;
     if (entry.limitations !== undefined && entry.limitations !== null) {
       if (!Array.isArray(entry.limitations)) {
         throw invalidCard(`card.capabilities[${idx}].limitations must be an array of strings`, {
@@ -218,7 +292,7 @@ export function normalizeCard(input) {
       version,
       sideEffectKind,
       cancelPolicy,
-      schema: entry.schema ?? {},
+      schema: (entry.schema as Record<string, unknown> | undefined) ?? {},
       // Omit the key when nothing was declared: a normalised card must survive a
       // second normalisation pass (withVerified re-normalises).
       ...(capabilityLimitations ? { limitations: capabilityLimitations } : {}),
@@ -242,7 +316,7 @@ export function normalizeCard(input) {
  * The same card + capability always yields the same id, so re-registering an
  * unchanged card cannot churn history; any card change yields a new revision.
  */
-export function capabilityRevisionId(cardHash, capabilityId, version) {
+export function capabilityRevisionId(cardHash: string, capabilityId: string, version: number | string): string {
   const digest = createHash("sha256")
     .update(`${cardHash}|capability|${capabilityId}|${version}`)
     .digest("hex");
@@ -252,28 +326,34 @@ export function capabilityRevisionId(cardHash, capabilityId, version) {
 /**
  * Compute a deterministic sha256 digest of a card regardless of object key ordering.
  */
-export function hashCard(card) {
+export function hashCard(card: unknown): string {
   return createHash("sha256").update(stableStringify(card)).digest("hex");
 }
 
 /**
  * Return a verified copy of `card` after a probe run without mutating the
  * declared `controls[*].support` postures. Unsettled controls land in `unknown[]`.
- *
- * @param {object} card Normalized card
- * @param {object} verifiedControls Map like `{ start: true, cancel: true }` (or `{ verified, unknown }`)
- * @param {string[]} [evidence=[]] Probe evidence strings to merge
  */
-export function withVerified(card, verifiedControls = {}, evidence = []) {
-  const base = card?.cardVersion === CARD_VERSION && card?.declared === true ? card : normalizeCard(card);
-  const settledMap = isPlainObject(verifiedControls?.verified) ? verifiedControls.verified : verifiedControls;
-  const isSettled = (name) =>
-    settledMap?.[name] === true ||
-    (isPlainObject(settledMap?.[name]) && settledMap[name].verified === true);
+export function withVerified(
+  card: unknown,
+  verifiedControls: VerifiedControlInput = {},
+  evidence: unknown[] = [],
+): VerifiedCard {
+  const candidate = card as Partial<NormalizedCard> | null | undefined;
+  const base: NormalizedCard =
+    candidate?.cardVersion === CARD_VERSION && candidate?.declared === true
+      ? (candidate as NormalizedCard)
+      : normalizeCard(card);
+  const vcObj = verifiedControls as { verified?: unknown } & Record<string, unknown>;
+  const settledMap = isPlainObject(vcObj?.verified) ? vcObj.verified : vcObj;
+  const isSettled = (name: ControlName): boolean => {
+    const val = settledMap?.[name];
+    return val === true || (isPlainObject(val) && val.verified === true);
+  };
 
-  const controls = {};
-  const unknown = [];
-  const settled = [];
+  const controls = {} as Record<ControlName, VerifiedControlEntry>;
+  const unknown: ControlName[] = [];
+  const settled: ControlName[] = [];
 
   for (const name of CONTROL_NAMES) {
     const prev = base.controls[name];
@@ -290,9 +370,12 @@ export function withVerified(card, verifiedControls = {}, evidence = []) {
   // that settled some but not all is "partial", never silently upgraded.
   const verified = settleable.length > 0 && settled.length === settleable.length;
 
-  const mergedEvidence = [];
-  const seen = new Set();
-  for (const item of [...(Array.isArray(base.evidence) ? base.evidence : []), ...(Array.isArray(evidence) ? evidence : [])]) {
+  const mergedEvidence: string[] = [];
+  const seen = new Set<string>();
+  for (const item of [
+    ...(Array.isArray(base.evidence) ? base.evidence : []),
+    ...(Array.isArray(evidence) ? evidence : []),
+  ]) {
     if (typeof item !== "string") continue;
     const trimmed = item.trim();
     if (!trimmed || seen.has(trimmed)) continue;
