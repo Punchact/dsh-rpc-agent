@@ -13,6 +13,18 @@ import {
 } from "../lib/adapters/codex.mjs";
 import { TASK_ERROR, isTaskError } from "../lib/tasks/errors.mjs";
 
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+
+// 探针第一步是解析二进制：`resolveCodexBinary` 要求它是普通文件且大小 > 0。CI 跑在 Linux 上，
+// 写死 `C:\\fake\\codex.exe` 在那里 stat 不到，探针会先报 binary_not_found 而根本走不到握手。
+// 这里造一个跨平台都成立的临时文件，spawn 依旧是假件。
+const fakeBinaryPath = (() => {
+  const dir = mkdtempSync(join(tmpdir(), "codex-probe-"));
+  const file = join(dir, process.platform === "win32" ? "codex.exe" : "codex");
+  writeFileSync(file, "#!/bin/sh\nexit 0\n");
+  return file;
+})();
 function makeFakeSpawn() {
   const sentMessages = [];
   let childRef = null;
@@ -342,7 +354,7 @@ test("probe only turns green after the app-server answers initialize", async () 
   const adapter = createCodexAdapter({
     spawn: fake.spawn,
     spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
-    binary: "C:\\fake\\codex.exe",
+    binary: fakeBinaryPath,
   });
 
   const res = await adapter.probe();
@@ -369,7 +381,7 @@ test("probe stays red when the app-server never answers", async () => {
   const adapter = createCodexAdapter({
     spawn: fake.spawn,
     spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
-    binary: "C:\\fake\\codex.exe",
+    binary: fakeBinaryPath,
     probeTimeoutMs: 80,
   });
 
@@ -387,7 +399,7 @@ test("probe reports a spawn failure instead of claiming the executor is ready", 
       throw error;
     },
     spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
-    binary: "C:\\fake\\codex.exe",
+    binary: fakeBinaryPath,
     probeTimeoutMs: 80,
   });
 
