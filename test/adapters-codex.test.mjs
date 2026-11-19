@@ -13,6 +13,18 @@ import {
 } from "../lib/adapters/codex.mjs";
 import { TASK_ERROR, isTaskError } from "../lib/tasks/errors.mjs";
 
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+
+// 探针第一步是解析二进制：`resolveCodexBinary` 要求它是普通文件且大小 > 0。CI 跑在 Linux 上，
+// 写死 `C:\\fake\\codex.exe` 在那里 stat 不到，探针会先报 binary_not_found 而根本走不到握手。
+// 这里造一个跨平台都成立的临时文件，spawn 依旧是假件。
+const fakeBinaryPath = (() => {
+  const dir = mkdtempSync(join(tmpdir(), "codex-probe-"));
+  const file = join(dir, process.platform === "win32" ? "codex.exe" : "codex");
+  writeFileSync(file, "#!/bin/sh\nexit 0\n");
+  return file;
+})();
 function makeFakeSpawn() {
   const sentMessages = [];
   let childRef = null;
@@ -333,4 +345,65 @@ test("codex adapter enforces strict frame validation, UTF-8 StringDecoder assemb
     decision: "allow-once",
   });
   assert.equal(live.accepted, true);
+});
+
+test("probe only turns green after the app-server answers initialize", async () => {
+  // 0.9.2（复核 NOTES）：以前只看二进制在、--version 能跑就给六项全绿。现在必须真的握手，
+  // 且 approval 不给绿——codex 的审批语义我们没在真机验过，能力卡要停在未证实。
+  const fake = makeFakeSpawn();
+  const adapter = createCodexAdapter({
+    spawn: fake.spawn,
+    spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
+    binary: fakeBinaryPath,
+  });
+
+  const res = await adapter.probe();
+  assert.equal(res.ok, true);
+  assert.equal(res.handshake, "initialize");
+  assert.equal(res.version, "codex-cli 0.166.0");
+  assert.equal(res.controls.start, true);
+  assert.equal(res.controls.events, true);
+  assert.equal(res.controls.approval, false, "no live evidence for codex approvals yet");
+
+  const initialized = fake.sentMessages.filter((msg) => msg.method === "initialize");
+  assert.equal(initialized.length, 1, "a probe costs exactly one handshake");
+  assert.equal(initialized[0].params.clientInfo.name, "dsh-task-hub", "handshake identifies itself");
+  assert.equal(
+    fake.sentMessages.some((msg) => msg.method === "thread/start" || msg.method === "turn/start"),
+    false,
+    "a probe must not start work",
+  );
+});
+
+test("probe stays red when the app-server never answers", async () => {
+  const fake = makeFakeSpawn();
+  fake.setHoldReplies(true);
+  const adapter = createCodexAdapter({
+    spawn: fake.spawn,
+    spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
+    binary: fakeBinaryPath,
+    probeTimeoutMs: 80,
+  });
+
+  const res = await adapter.probe();
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, "handshake_timeout");
+  assert.equal(res.controls, undefined, "a failed handshake must not publish a control table");
+});
+
+test("probe reports a spawn failure instead of claiming the executor is ready", async () => {
+  const adapter = createCodexAdapter({
+    spawn: () => {
+      const error = new Error("spawn EPERM");
+      error.code = "EPERM";
+      throw error;
+    },
+    spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
+    binary: fakeBinaryPath,
+    probeTimeoutMs: 80,
+  });
+
+  const res = await adapter.probe();
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, "EPERM");
 });

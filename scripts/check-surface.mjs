@@ -68,6 +68,10 @@ function extractFromPlan(planPath) {
 }
 
 const mode = process.argv.includes("--write") ? "write" : "check";
+// 0.9.2（复核 NOTES）：`--write` 原来会把「代码里多出来的接口」直接写进 implementationOnly，
+// 等于自己给自己开证明——删一条声明、重抽一次，检查就绿了。现在新条目必须显式 `--accept-new`
+// 才落进快照，否则只列出来并失败，让人当场判断「这是故意加的实现面，还是漏了方案」。
+const acceptNew = process.argv.includes("--accept-new");
 
 if (mode === "write") {
   const planPath = process.env.PLAN_DOC ? resolve(process.env.PLAN_DOC) : DEFAULT_PLAN;
@@ -79,6 +83,28 @@ if (mode === "write") {
     cli: codeCli.filter((n) => !plan.cli.includes(n)).sort(),
     note: "方案没写、实现里确实有。多数是 0.9.0 实施时补的内部操作面（dispatch/pump/reconcile 这类派发与核对入口）；CLI 多出来的是方案只写了主干五条命令。新增接口要么补进方案，要么重新抽快照让这里如实记一笔。",
   };
+  // 与上一版快照比：新冒出来的「实现侧多出来」的条目要人当场点一次头。
+  const previous = existsSync(join(REPO, SNAPSHOT))
+    ? JSON.parse(read(SNAPSHOT))
+    : { implementationOnly: { rpc: [], mcpTools: [], cli: [] } };
+  const prev = previous.implementationOnly ?? {};
+  const added = {
+    rpc: implementationOnly.rpc.filter((n) => !(prev.rpc ?? []).includes(n)),
+    mcpTools: implementationOnly.mcpTools.filter((n) => !(prev.mcpTools ?? []).includes(n)),
+    cli: implementationOnly.cli.filter((n) => !(prev.cli ?? []).includes(n)),
+  };
+  const addedCount = added.rpc.length + added.mcpTools.length + added.cli.length;
+  if (addedCount > 0 && !acceptNew) {
+    console.error(`check-surface: 这次抽快照会新增 ${addedCount} 条「实现侧多出来」的声明：`);
+    for (const n of added.rpc) console.error(`  - RPC ${n}`);
+    for (const n of added.mcpTools) console.error(`  - MCP ${n}`);
+    for (const n of added.cli) console.error(`  - CLI ${n}`);
+    console.error(
+      "确认它们确实是故意加的实现面（不是方案该写而漏写的接口），再跑 " +
+        "`node scripts/check-surface.mjs --write --accept-new`。",
+    );
+    process.exit(1);
+  }
   const snapshot = {
     note: "方案接口面的快照。来源是本地方案文档，用 `npm run docs:surface` 重新抽取；`npm run check:surface` 拿它对代码，不需要方案文档在场。不要手改。",
     source: { path: planPath, sha256: plan.sourceSha256 },

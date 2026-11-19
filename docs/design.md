@@ -760,3 +760,28 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 - **规矩三：一遍没排完，就不许起下一遍**。定时器原来只判断 `shuttingDown`，于是当 `drainEffects` 比间隔更慢时，第二遍会覆盖 `inFlightPass` 并先把自己置回空闲——第一遍还在写账本，`cleanupTasks` 却已经认为可以关库了。现在 `passRunning` 同时充当重入守卫：上一遍（含出箱排水）没结束，本遍直接跳过；`cleanupTasks` 只在真有在途遍时等待。等待与跳过用同一个标志位，是因为「能不能起下一遍」和「能不能关库」本来问的就是同一个问题。
 - **规矩四：阶段由状态决定，不由理由决定**。同一轮复核还发现 `derivePhase` 的核对期靠事件名白名单判断，`dispatch.failed` / `inspect.unknown` 不在名单里就会被投影成 `machine/working`。枚举理由这件事本身就是漏项来源——`needs_reconcile` 状态存在，就说明有一笔需要人做的核对。
 - **怎么钉住**：`test/tasks-dispatch.test.mjs` 的 `pump hands an interrupted start to a person instead of retrying forever` 与 `pump also refuses a start that recorded an attempt but no locator`（宽限期内 `awaitingStart` 且 `adapter.calls.events === 0`；超期后 `needs_reconcile` / `orphaned` / `dispatch.orphaned`）；`test/tasks-engine.test.mjs` 的优先序用例把三种租约形态一律钉成 `person/reconcile`，并把 8 种 `lastEvent`（含 `dispatch.failed` / `inspect.unknown` / `null`）全覆盖。
+
+## 52. 决策 0.9.2-a：数字要量出来，声明要人点头
+
+**现象**。0.9.0 那几轮里，同一批数字（RPC 方法数、MCP 工具数、测试文件数、用例数）在 README / README.en / CHANGELOG 三处被补丁脚本改过七次；合并前复核连着两轮都在 NOTES 里写同一句话：`docs/counts.json` 的 `testCases` 是手填的，`--write` 会把写错的值当成正确答案刷进文档；`check:surface --write` 会把代码里多出来的接口直接写进 `implementationOnly`，等于自己给自己开证明。
+
+**为什么不能就这么放着**。门禁的价值全在「它能不能被绕过去」。一个手填的用例数，和一个自己声明的接口清单，肉眼看着都像证据，实际什么都没证明——这和 0.9.0 里 `dsh.tasks.resolve` 那种「方案写了、实现漏了」是同一类问题，只是换了个位置。
+
+**怎么改**。用例数交给 `npm run count:cases`：真跑一遍 `test` 链、从 TAP 里取 `# pass`，同时记下测试文件内容摘要与源码里声明的条数；`check:docs` 重算这两项，对不上就失败（「文件变了数字没重算」或者「有人直接改了数字」）。另外加一道下限：跑出来的用例数不可能少于声明条数，手把数字往小改会被当场拦下。`check:surface --write` 新增条目必须显式 `--accept-new`，否则只列清单并退出非零——让人当场判断「这是故意加的实现面，还是方案该写却漏了」。
+
+**残余边界**（如实记）：`count:cases` 认的是 TAP 的 `# pass`，循环里生成的用例也算数，所以「声明条数」只是下限、不是等式；`--accept-new` 仍然是一次性的人为点头，它证明的是「有人当场确认过」，不是「这个接口一定该存在」。两条都写在这里，是因为门禁的边界也该被记下来，而不是只记它挡住了什么。
+
+**怎么钉住**：`npm run check:docs` 的陈旧校验（摘要/声明条数/文件数三项）、`testCases < declaredCases` 的失败分支、`check:surface --write` 无 `--accept-new` 时的拒绝分支；演练记录在 CHANGELOG 的 0.9.2 小节里（手改 380 被拦下、删掉一条声明后 `--write` 被拦下、`--accept-new` 才写回）。
+
+## 53. 决策 0.9.2-b：只读文本也要说「未校验」，`repeated` 只认去重命中
+
+**现象**。0.9.2 合并前复核（Antigravity）给的是 `VERDICT: PASS`，但提了两条 medium：`blocked` 分支把 `attentionOnceInTx` 的 `deduplicated` 丢掉，只要任务已经在等（`waiting_input`）就写 `repeated: true`；MCP 的 `formatTaskSummary` 只把 `result` 打进正文，`resultValid: false` 只活在 `structuredContent` 里。
+
+**为什么不能放着**。第一条让事件说谎：等待中收到另一个问题，明明是新问题，却被记成「重复」，以后照着事件复查就会被误导。第二条更实际：只读文字的调用方（LLM、CLI 输出、日志）看不到结构化字段，会把未过校验的结果当成已验过——这正好和 0.9.2-a 里那句「看得见不等于认可」撞车。
+
+**怎么改**。`attentionOnceInTx` 的 `deduplicated` 一路带到事件里，`repeated` 只在真命中时为 `true`；`formatTaskSummary` 在 `result` 行追加 `(unvalidated: failed schema validation)`，meta 行再重复一次（正文被截断也遮不住），并导出给单测直接读文本。
+
+**残余边界**：这个标记只说明「没过 schema 校验」，不说明结果对不对；人工签收之后 `resultValid` 仍然是 `false`，那笔账由 `task.resolved` 的 `resultValid`/`acceptedUnvalidated` 记。
+
+**怎么钉住**：`test/tasks-engine.test.mjs` 读 `attention.opened` 事件断言「同一问题重复=repeated、不同问题不 repeated」；`test/mcp-summary.test.mjs` 断言未校验结果在纯文本里带标记、已校验结果不带；`check-docs` 新增「测试表明细行数 = 链上测试文件数」。
+

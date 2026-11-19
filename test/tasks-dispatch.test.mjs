@@ -4,6 +4,7 @@ import test from "node:test";
 import { ConfigError, describeConfig, resolveConfig } from "../lib/config.mjs";
 import { buildDispatcher as buildRpcDispatcher } from "../lib/http.mjs";
 import { createMethods } from "../lib/methods.mjs";
+import { createAutopilot } from "../lib/tasks/autopilot.mjs";
 import { createDispatcher } from "../lib/tasks/dispatch.mjs";
 import { createTaskEngine, seedBaselineEntities } from "../lib/tasks/engine.mjs";
 import { openStore } from "../lib/tasks/store.mjs";
@@ -698,6 +699,58 @@ test("pump also refuses a start that recorded an attempt but no locator", async 
     const orphaned = events.events.find((event) => event.type === "dispatch.orphaned");
     assert.ok(orphaned, "an unlocatable start must leave a dispatch.orphaned event");
     assert.equal(orphaned.evidence?.attemptRecorded, true);
+  } finally {
+    store.close();
+  }
+});
+
+test("the autopilot pass frees the only slot an orphaned start was holding", async () => {
+  // 0.9.2：`dispatching` 计入 maxConcurrent。崩溃留下的一条孤儿任务会占住唯一的槽，后面的
+  // 任务永远起不来。推进环把它升成 needs_reconcile 之后，队列必须能继续走。
+  const adapter = makeFakeAdapter();
+  const { store, engine } = await setupWithAdapter(adapter);
+  try {
+    const dispatcher = createDispatcher({
+      store,
+      engine,
+      adapters: { fake: adapter },
+      maxConcurrent: 1,
+      startOrphanGraceMs: 0,
+    });
+    const orphan = await engine.submit({
+      idempotencyKey: "slot-orphan-a",
+      capabilityRevisionId: "cap-1",
+      workspaceId: "ws-1",
+      agentId: "ag-1",
+    });
+    const queued = await engine.submit({
+      idempotencyKey: "slot-orphan-b",
+      capabilityRevisionId: "cap-1",
+      workspaceId: "ws-1",
+      agentId: "ag-1",
+    });
+    await store.withWriteTx((db) => {
+      db.prepare("UPDATE tasks SET status = 'dispatching' WHERE task_id = ?").run(orphan.taskId);
+    });
+
+    const autopilot = createAutopilot({ engine, dispatcher, maxStart: 2, maxPump: 4 });
+
+    // 第一遍：队列里的任务先撞上被占的槽，同遍的 pump 才把孤儿升成核对期。
+    const first = await autopilot.step();
+    assert.deepEqual(first.pumped.map((item) => item.taskId), [orphan.taskId]);
+    assert.equal(first.failed.length, 1, "the queued task cannot start while the orphan holds the slot");
+    assert.equal(first.failed[0].taskId, queued.taskId);
+    assert.match(first.failed[0].message, /concurrency limit/);
+
+    const orphanDetail = await engine.get({ taskId: orphan.taskId });
+    assert.equal(orphanDetail.status, "needs_reconcile");
+    assert.equal((await engine.get({ taskId: queued.taskId })).status, "queued");
+
+    // 第二遍：槽空了，队列必须被服务。
+    const second = await autopilot.step();
+    assert.deepEqual(second.started.map((item) => item.taskId), [queued.taskId]);
+    assert.equal((await engine.get({ taskId: queued.taskId })).status, "running");
+    assert.equal(adapter.calls.start, 1, "the orphan was never handed to the adapter twice");
   } finally {
     store.close();
   }

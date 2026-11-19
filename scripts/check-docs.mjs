@@ -15,6 +15,8 @@ import { readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { chainDigest } from "./count-cases.mjs";
+
 const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const read = (rel) => readFileSync(join(REPO, rel), "utf8").replace(/\r\n/g, "\n");
 
@@ -47,6 +49,26 @@ const testOnDisk = readdirSync(join(REPO, "test")).filter((f) => f.endsWith(".te
 
 const countsPath = "docs/counts.json";
 const counts = JSON.parse(read(countsPath));
+
+// 0.9.2（复核 NOTES）：这个数以前是手填的，`--write` 会把写错的值当正确答案刷进文档——手填的数字
+// 没有任何东西能证明它是真的。现在它只能由 `scripts/count-cases.mjs` 真跑一遍后写入，并附带测试
+// 文件摘要与声明条数；这里重算一遍，对不上就说明「文件变了、数字没重算」或者「有人直接改了数字」。
+const chainMeta = chainDigest();
+const staleReasons = [];
+if (counts.testChainDigest !== chainMeta.digest) staleReasons.push("测试文件内容与记录不符");
+if (counts.declaredCases !== chainMeta.declared) staleReasons.push(`声明条数 记录=${counts.declaredCases} 现在=${chainMeta.declared}`);
+if (counts.testFiles !== chainMeta.files) staleReasons.push(`测试文件数 记录=${counts.testFiles} 现在=${chainMeta.files}`);
+if (staleReasons.length > 0) {
+  console.error(`docs: ${countsPath} 不是刚量的（${staleReasons.join("；")}）`);
+  console.error("先跑 `npm run count:cases` 真量一遍，再跑 `npm run docs:counts` 把数字刷进文档。");
+  process.exit(1);
+}
+// 反向也挡一道：跑出来的用例数不可能少于源码里声明的条数。手把数字往小改（比如为了少刷几处）会被这里拦下。
+if (!Number.isInteger(counts.testCases) || counts.testCases < chainMeta.declared) {
+  console.error(`docs: ${countsPath} 的用例数 ${counts.testCases} 少于声明条数 ${chainMeta.declared}，不可信`);
+  console.error("跑 `npm run count:cases` 重新测量。");
+  process.exit(1);
+}
 const testCases = counts.testCases;
 
 const expected = {
@@ -63,6 +85,8 @@ const expected = {
 // 每条规则：文件、正则（必须带命名组）、每组对应的期望值。`onlyLatest` 表示只作用于
 // CHANGELOG 最新一节（历史章节的数字是当时的事实，不该被后来的改动覆盖）。
 const rules = [
+  { file: "README.md", onlyLatest: false, re: /跑这 (?<files>\d+) 个测试文件/g, expect: () => ({ files: expected.testFiles }) },
+  { file: "README.en.md", onlyLatest: false, re: /runs these (?<files>\d+) test files/g, expect: () => ({ files: expected.testFiles }) },
   { file: "README.md", onlyLatest: false, re: /(?<files>\d+) 个测试文件共 (?<cases>\d+) 例/g, expect: (m) => ({ files: expected.testFiles, cases: expected.testCases }) },
   { file: "README.md", onlyLatest: false, re: /本机实测 (?<pass>\d+)\/(?<total>\d+) 通过/g, expect: () => ({ pass: expected.testCases, total: expected.testCases }) },
   { file: "README.md", onlyLatest: false, re: /共 \*\*(?<n>\d+) 个\*\* JSON-RPC 方法/g, expect: () => ({ n: expected.rpcTotal }) },
@@ -136,11 +160,39 @@ for (const rule of rules) {
   }
 }
 
+// --- 测试表明细：标题说几个文件，表里就得有几行 -------------------------------------------
+// 0.9.2 复核指出来的半同步：只校验标题里的数字、不校验明细表行数，会出现「标题 46、表里 45 行」。
+const suiteTables = [
+  { file: "README.md", header: /<summary>(\d+) 个测试文件各自覆盖什么<\/summary>/ },
+  { file: "README.en.md", header: /What each of the (\d+) test files covers/ },
+];
+for (const table of suiteTables) {
+  const text = read(table.file);
+  const headerMatch = table.header.exec(text);
+  if (!headerMatch) {
+    problems.push(`${table.file}: 找不到测试表标题（${table.header}）— 标题被改写了，请同步更新 scripts/check-docs.mjs`);
+    continue;
+  }
+  const startIdx = headerMatch.index + headerMatch[0].length;
+  const closeIdx = text.indexOf("</details>", startIdx);
+  if (closeIdx < 0) {
+    // 缺闭合标签时不能"扫到文件尾"了事：下面若还有同构表格，行数会静默失真。
+    problems.push(`${table.file}: 测试表缺少 </details> 闭合标签 — 修好标签再谈行数`);
+    continue;
+  }
+  const body = text.slice(startIdx, closeIdx);
+  const rows = body.split("\n").filter((line) => /^\| `[a-z0-9-]+` \| \d+ \|/.test(line)).length;
+  if (rows !== expected.testFiles) {
+    const line = text.slice(0, startIdx).split("\n").length;
+    problems.push(`${table.file}:${line}: 测试表 ${rows} 行，链上有 ${expected.testFiles} 个测试文件 — 明细表也要跟着补/删`);
+  }
+}
+
 if (mode === "check") {
   if (problems.length) {
     console.error(`check-docs: ${problems.length} 处文档数字与源码/计数不符：`);
     for (const p of problems) console.error(`  - ${p}`);
-    console.error("\n跑 `npm run docs:counts` 可以把这些数字刷成当前值；如果用例数本身变了，先改 docs/counts.json。");
+    console.error("\n跑 `npm run docs:counts` 可以把这些数字刷成当前值；如果用例数本身变了，先跑 `npm run count:cases`（真跑一遍）再刷。");
     process.exit(1);
   }
   console.log(
