@@ -76,7 +76,7 @@ http://127.0.0.1:<port>/dsh-rpc   ->   DSH agent
 - **会自述**：`dsh_capabilities` 给出八节能力快照（运行时、权限档位、可调工具、MCP 前缀、会话、工作区、插件），做计划前不必猜本机有什么。
 - **不假装知道**：外层客户端有更短的超时上限时，本桥只如实说明并建议分段轮询，不让长任务看起来像失败。
 - **可托管外部 agent 任务（任务中心，`tasksEnabled` 默认关闭）**：内置 15 表 SQLite 账本、11 态状态机与能力卡/只读探测，统一调度 DSH 自身、Antigravity 与 Codex App Server，详情见 [任务中心手册](./docs/task-center.md)。
-- **关键行为有回归用例守着**：45 个测试文件共 394 例 + catalog smoke（本机实测 394/394 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
+- **关键行为有回归用例守着**：46 个测试文件共 397 例 + catalog smoke（本机实测 397/397 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
 
 ## 安装与更新
 
@@ -757,7 +757,7 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 45 个测试文件，共 394 例，另有 catalog smoke；无需运行中的 Harness
+npm test                       # 46 个测试文件，共 397 例，另有 catalog smoke；无需运行中的 Harness
 node test/host.test.mjs        # 1 例：真实 WebServer 集成（需先 npm ci）
 node test/e2e.mjs              # 14 例：端到端，打真实 Harness（--cwd 只接受绝对路径）
 node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harness
@@ -780,7 +780,7 @@ npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案
 `check:surface` 查两个方向：方案写了的接口必须真实存在；代码里任务族/代理族的新接口必须要么在方案里、要么在快照的 `implementationOnly` 里如实记着。0.9.0 就是靠这一类对账才发现「方案写了 `dsh.tasks.resolve`、实现漏了」。
 
 <details>
-<summary>45 个测试文件各自覆盖什么</summary>
+<summary>46 个测试文件各自覆盖什么</summary>
 
 | 套件 | 例 | 覆盖 |
 | --- | --- | --- |
@@ -818,6 +818,7 @@ npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案
 | `config-breakers` | 3 | 五项熔断开关默认值、边界校验与 `ConfigError` |
 | `index-wiring` | 3 | 关闭不建库、开启建库播种、外部适配器失败降级 |
 | `mcp-tasks-tools` | 6 | 8 个任务 MCP 工具的开关显隐、禁用报错、`reconcile`/`decideApproval` 排除、参数校验与原型键拒绝 |
+| `mcp-summary` | 3 | 只读文本摘要必须写明「未校验」：`result` 行带标记、meta 行重复一次、已校验的结果不打标 |
 | `cli-tasks` | 5 | `tasks` / `agents` 参数解析、`UsageError`（exit 2）、JSON-RPC 调用与混版提示 |
 | `cli-agents-approve` | 3 | `tasks approve` 标志校验、`dsh.tasks.decideApproval` 与 `agents` 子命令 |
 | `registry` | 10 | 粘性会话表读写、并发更新、键隔离、轮换 |
@@ -844,7 +845,7 @@ npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案
 - **边界**检查协议层：batch、通知、id 形态、鉴权头、超大 body（应得真正的 413 而不是断连）、参数注入防护、超时钳制、并发 ask、`limit` 语义。
 - **端口漂移**（手工）：把 `endpoint.json` 的 url 改成死端口再跑 `dsh-rpc ping`，应得退出码 3 与含 `nothing is listening`、`pid`、`health --wait` 的可读报错。
 
-本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 45 个测试文件 **394/394** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.mjs` 输出 `methods: 34` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
+本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 46 个测试文件 **397/397** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.mjs` 输出 `methods: 34` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
 
 ## 许可证
 

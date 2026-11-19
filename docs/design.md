@@ -772,3 +772,16 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 **残余边界**（如实记）：`count:cases` 认的是 TAP 的 `# pass`，循环里生成的用例也算数，所以「声明条数」只是下限、不是等式；`--accept-new` 仍然是一次性的人为点头，它证明的是「有人当场确认过」，不是「这个接口一定该存在」。两条都写在这里，是因为门禁的边界也该被记下来，而不是只记它挡住了什么。
 
 **怎么钉住**：`npm run check:docs` 的陈旧校验（摘要/声明条数/文件数三项）、`testCases < declaredCases` 的失败分支、`check:surface --write` 无 `--accept-new` 时的拒绝分支；演练记录在 CHANGELOG 的 0.9.2 小节里（手改 380 被拦下、删掉一条声明后 `--write` 被拦下、`--accept-new` 才写回）。
+
+## 53. 决策 0.9.2-b：只读文本也要说「未校验」，`repeated` 只认去重命中
+
+**现象**。0.9.2 合并前复核（Antigravity）给的是 `VERDICT: PASS`，但提了两条 medium：`blocked` 分支把 `attentionOnceInTx` 的 `deduplicated` 丢掉，只要任务已经在等（`waiting_input`）就写 `repeated: true`；MCP 的 `formatTaskSummary` 只把 `result` 打进正文，`resultValid: false` 只活在 `structuredContent` 里。
+
+**为什么不能放着**。第一条让事件说谎：等待中收到另一个问题，明明是新问题，却被记成「重复」，以后照着事件复查就会被误导。第二条更实际：只读文字的调用方（LLM、CLI 输出、日志）看不到结构化字段，会把未过校验的结果当成已验过——这正好和 0.9.2-a 里那句「看得见不等于认可」撞车。
+
+**怎么改**。`attentionOnceInTx` 的 `deduplicated` 一路带到事件里，`repeated` 只在真命中时为 `true`；`formatTaskSummary` 在 `result` 行追加 `(unvalidated: failed schema validation)`，meta 行再重复一次（正文被截断也遮不住），并导出给单测直接读文本。
+
+**残余边界**：这个标记只说明「没过 schema 校验」，不说明结果对不对；人工签收之后 `resultValid` 仍然是 `false`，那笔账由 `task.resolved` 的 `resultValid`/`acceptedUnvalidated` 记。
+
+**怎么钉住**：`test/tasks-engine.test.mjs` 读 `attention.opened` 事件断言「同一问题重复=repeated、不同问题不 repeated」；`test/mcp-summary.test.mjs` 断言未校验结果在纯文本里带标记、已校验结果不带；`check-docs` 新增「测试表明细行数 = 链上测试文件数」。
+

@@ -776,17 +776,25 @@ async function listTools() {
 }
 
 function formatTaskSummary(task, maxResultChars = DEFAULT_MAX_RESULT_CHARS) {
+  // 0.9.2 复核：只读文本的调用方（LLM、CLI 输出）看不到 structuredContent 里的 resultValid。
+  // 未过校验的结果必须在这行文字里就带上标记，否则「看得见」会被读成「已经验过」。
+  const unvalidated = task.resultValid === false;
   const header = `task ${task.taskId ?? "?"} · ${task.status ?? "unknown"} · ${task.phase ?? "unknown"}`;
   const bodyLines = [];
   if (task.agentId) bodyLines.push(`agent: ${task.agentId}`);
   if (task.workspaceId) bodyLines.push(`workspace: ${task.workspaceId}`);
   if (task.notice) bodyLines.push(`notice: ${task.notice}`);
   if (task.result !== undefined && task.result !== null) {
-    bodyLines.push(`result: ${JSON.stringify(task.result)}`);
+    bodyLines.push(
+      `result: ${JSON.stringify(task.result)}${unvalidated ? " (unvalidated: failed schema validation)" : ""}`,
+    );
+  } else if (unvalidated) {
+    bodyLines.push("result: (none) (unvalidated: the executor reported ready without a validated result)");
   }
   if (task.error) bodyLines.push(`error: ${JSON.stringify(task.error)}`);
   const meta = [
     `v${task.stateVersion ?? "?"}`,
+    unvalidated ? "unvalidated" : null,
     task.deduplicated ? "deduplicated" : null,
     task.requestAccepted ? "requestAccepted" : null,
   ]
@@ -1554,4 +1562,15 @@ if (IS_MAIN) {
   log(`ready (${SERVER_INFO.name} ${SERVER_INFO.version})`);
 }
 
-export { BASE_TOOLS, TASK_TOOLS, TOOLS, callTool, handleLine, isTasksEnabled, listTools, resetBridgeDefaults, validateToolArgs };
+export {
+  BASE_TOOLS,
+  TASK_TOOLS,
+  TOOLS,
+  callTool,
+  formatTaskSummary,
+  handleLine,
+  isTasksEnabled,
+  listTools,
+  resetBridgeDefaults,
+  validateToolArgs,
+};

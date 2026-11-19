@@ -158,6 +158,29 @@ for (const rule of rules) {
   }
 }
 
+// --- 测试表明细：标题说几个文件，表里就得有几行 -------------------------------------------
+// 0.9.2 复核指出来的半同步：只校验标题里的数字、不校验明细表行数，会出现「标题 46、表里 45 行」。
+const suiteTables = [
+  { file: "README.md", header: /<summary>(\d+) 个测试文件各自覆盖什么<\/summary>/ },
+  { file: "README.en.md", header: /What each of the (\d+) test files covers/ },
+];
+for (const table of suiteTables) {
+  const text = read(table.file);
+  const headerMatch = table.header.exec(text);
+  if (!headerMatch) {
+    problems.push(`${table.file}: 找不到测试表标题（${table.header}）— 标题被改写了，请同步更新 scripts/check-docs.mjs`);
+    continue;
+  }
+  const startIdx = headerMatch.index + headerMatch[0].length;
+  const closeIdx = text.indexOf("</details>", startIdx);
+  const body = text.slice(startIdx, closeIdx < 0 ? undefined : closeIdx);
+  const rows = body.split("\n").filter((line) => /^\| `[a-z0-9-]+` \| \d+ \|/.test(line)).length;
+  if (rows !== expected.testFiles) {
+    const line = text.slice(0, startIdx).split("\n").length;
+    problems.push(`${table.file}:${line}: 测试表 ${rows} 行，链上有 ${expected.testFiles} 个测试文件 — 明细表也要跟着补/删`);
+  }
+}
+
 if (mode === "check") {
   if (problems.length) {
     console.error(`check-docs: ${problems.length} 处文档数字与源码/计数不符：`);

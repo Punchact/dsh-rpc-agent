@@ -738,6 +738,18 @@ test("the same question from a different option set is a different question", as
     const wider = await blocked(["draft", "publish", "schedule"], "ev-blocked-3");
     assert.notEqual(wider.questionId, first.questionId, "different options are a different question");
 
+    // `repeated` 是事件里的话术，不是返回值上的字段：要么标真的重复，要么别标。
+    const opened = (await engine.events({ taskId: t.taskId })).events.filter((e) => e.type === "attention.opened");
+    const repeatEvent = opened.find((e) => e.payload?.questionId === first.questionId && e.payload?.repeated === true);
+    const freshEvent = opened.find((e) => e.payload?.questionId === wider.questionId);
+    assert.ok(repeatEvent, "the same question again is marked repeated on its follow-up event");
+    assert.ok(freshEvent, "a different question gets its own attention.opened event");
+    assert.notEqual(
+      freshEvent.payload?.repeated,
+      true,
+      "a different question while waiting is not a repeat, even though the task is already waiting",
+    );
+
     const detail = await engine.get({ taskId: t.taskId });
     assert.equal(detail.pending.attention.length, 2);
   } finally {
