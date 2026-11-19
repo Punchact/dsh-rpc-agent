@@ -12,6 +12,7 @@
 import { join } from "node:path";
 
 import { createAntigravityAdapter } from "./lib/adapters/antigravity.mjs";
+import type { RuntimeAdapter } from "./lib/adapters/base.mjs";
 import { createCodexAdapter } from "./lib/adapters/codex.mjs";
 import { createDshAdapter } from "./lib/adapters/dsh.mjs";
 import { dshHome, endpointPath, loadOrCreateToken, tokenPath, writeEndpoint } from "./lib/auth.mjs";
@@ -19,22 +20,142 @@ import { createApprovalState } from "./lib/approval-state.mjs";
 import { createApprovalGate } from "./lib/approvals.mjs";
 import { probesFromAdapter } from "./lib/agents/probe.mjs";
 import { MAX_WAIT_SLICE_MS, MIN_WAIT_SLICE_MS, resolveConfig } from "./lib/config.mjs";
-import { buildDispatcher, registerRoutes } from "./lib/http.mjs";
-import { createDshAdapterOps, createMethods } from "./lib/methods.mjs";
+import { buildDispatcher, registerRoutes, type WebServerLike } from "./lib/http.mjs";
+import {
+  createDshAdapterOps,
+  createMethods,
+  type SessionControllerLike,
+} from "./lib/methods.mjs";
 import { isOwnedSession, useOwnedState } from "./lib/owned.mjs";
 import { createPendingStore } from "./lib/pending.mjs";
 import { createStats } from "./lib/stats.mjs";
 import { isFetchBlockedPort } from "./lib/transport.mjs";
-import { createDispatcher } from "./lib/tasks/dispatch.mjs";
-import { createAutopilot } from "./lib/tasks/autopilot.mjs";
-import { createTaskEngine, seedBaselineEntities } from "./lib/tasks/engine.mjs";
-import { openStore } from "./lib/tasks/store.mjs";
+import {
+  createDispatcher,
+  type DrainEffectsParams,
+  type DrainEffectsResult,
+  type PumpParams,
+  type PumpResult,
+  type StartTaskParams,
+  type StartTaskResult,
+} from "./lib/tasks/dispatch.mjs";
+import { createAutopilot, type AutopilotStepResult } from "./lib/tasks/autopilot.mjs";
+import { createTaskEngine, seedBaselineEntities, type TaskEngine } from "./lib/tasks/engine.mjs";
+import { openStore, type AgentRow, type TaskStore } from "./lib/tasks/store.mjs";
 import { PLUGIN_NAME, PLUGIN_VERSION } from "./lib/version.mjs";
 
-export const name = "dsh-rpc";
-export const inject = ["webServer", "sessionController"];
+export interface PluginLogger {
+  info?: (message: string, ...args: unknown[]) => void;
+  warn?: (message: string, ...args: unknown[]) => void;
+  error?: (message: string, ...args: unknown[]) => void;
+  debug?: (message: string, ...args: unknown[]) => void;
+}
 
-export async function apply(ctx, input = {}) {
+export type AdapterFactory = (config: Record<string, unknown>) => RuntimeAdapter;
+export type AdapterFactoryMap = Record<string, AdapterFactory | undefined>;
+
+export interface TaskDispatcher {
+  startTask(params?: StartTaskParams): Promise<StartTaskResult>;
+  pump(params?: PumpParams): Promise<PumpResult>;
+  drainEffects(params?: DrainEffectsParams): Promise<DrainEffectsResult>;
+}
+
+export interface Autopilot {
+  step(): Promise<AutopilotStepResult>;
+  limits: { maxStart: number; maxPump: number };
+}
+
+export interface AutopilotConfigProjection {
+  enabled: boolean;
+  intervalMs: number | null;
+  maxStart: number | null;
+  maxPump: number | null;
+}
+
+export interface AutopilotStatsProjection {
+  passes: number;
+  lastPassAt: string | null;
+  lastStarted: number;
+  lastPumped: number;
+  lastFailed: number;
+  lastError: string | null;
+}
+
+export interface TaskCentreState {
+  enabled: boolean;
+  mode: "off" | "file" | "failed" | string;
+  dbPath: string | null;
+  ready: boolean;
+  seedError: string | null;
+  startError: string | null;
+  autopilot: AutopilotConfigProjection | null;
+  // A pass that runs and does nothing looks exactly like a pass that never ran, unless
+  // the last pass says so; ping() reports this object verbatim.
+  autopilotStats: AutopilotStatsProjection | null;
+}
+
+export interface TaskCentreWiring {
+  store: TaskStore | null;
+  engine: TaskEngine | null;
+  dispatcher: TaskDispatcher | null;
+  adapters: Record<string, RuntimeAdapter> | null;
+  autopilot: Autopilot | null;
+  status: TaskCentreState;
+  cleanup: () => Promise<void>;
+}
+
+export interface BridgeState {
+  token: string;
+  tokenSource: "config" | "env" | "file" | "generated" | string;
+  tokenPath: string;
+  endpointPath: string;
+  endpointUrl: string | null;
+  startedAt: number;
+}
+
+export interface PublishHandle {
+  (): boolean;
+}
+
+export interface HostWebServer extends WebServerLike {
+  getOrigin(): string;
+}
+
+export interface HostPluginContext {
+  webServer: HostWebServer;
+  sessionController: SessionControllerLike;
+  logger?: PluginLogger | ((scope: string) => PluginLogger);
+  get?: (name: string) => unknown;
+  on?: (
+    event: string,
+    listener: (...args: any[]) => unknown,
+    options?: { prepend?: boolean },
+  ) => unknown;
+  effect: (fn: () => (() => unknown) | void, label?: string) => unknown;
+  taskAdapterFactories?: AdapterFactoryMap | null;
+  [key: string]: unknown;
+}
+
+interface PermissionPresetsServiceLike {
+  set?: (session: unknown, name: string) => unknown;
+  current?: (session: unknown) => string | null | undefined;
+}
+
+interface SessionsServiceLike {
+  get?: (sessionId: string) => unknown;
+}
+
+function errorMessage(error: unknown): string {
+  if (error && typeof error === "object" && "message" in error && error.message !== undefined && error.message !== null) {
+    return String(error.message);
+  }
+  return String(error);
+}
+
+export const name = "dsh-rpc";
+export const inject: readonly ["webServer", "sessionController"] = ["webServer", "sessionController"];
+
+export async function apply(ctx: HostPluginContext, input: Record<string, unknown> = {}): Promise<void> {
   const log = scopedLogger(ctx);
   const config = resolveConfig(input);
 
@@ -54,7 +175,7 @@ export async function apply(ctx, input = {}) {
   }
 
   const token = loadOrCreateToken(config);
-  const state = {
+  const state: BridgeState = {
     token: token.token,
     tokenSource: token.source,
     tokenPath: tokenPath(config),
@@ -79,15 +200,15 @@ export async function apply(ctx, input = {}) {
     approvalState.prune();
   }
 
-  let taskStore = null;
-  let taskEngine = null;
-  let taskDispatcher = null;
-  let adapters = null;
+  let taskStore: TaskStore | null = null;
+  let taskEngine: TaskEngine | null = null;
+  let taskDispatcher: TaskDispatcher | null = null;
+  let adapters: Record<string, RuntimeAdapter> | null = null;
 
   // What the task centre actually did at startup. ping() reports this verbatim:
   // a breaker that is on but whose store never opened has to be visible, not
   // inferred from an empty list.
-  const taskCentre = {
+  const taskCentre: TaskCentreState = {
     enabled: config.tasksEnabled === true,
     mode: "off",
     dbPath: null,
@@ -116,28 +237,29 @@ export async function apply(ctx, input = {}) {
           principal: { principalId: "local-operator", kind: "operator" },
           workspace: { workspaceId: "local", rootPath: config.defaultCwd || process.cwd() },
         });
-      } catch (err) {
-        taskCentre.seedError = err?.message ?? String(err);
-        ctx.logger?.warn?.(`[dsh-rpc] task bootstrap seeding failed: ${taskCentre.seedError}`);
+      } catch (err: unknown) {
+        taskCentre.seedError = errorMessage(err);
+        if (ctx.logger && typeof ctx.logger === "object") {
+          ctx.logger.warn?.(`[dsh-rpc] task bootstrap seeding failed: ${taskCentre.seedError}`);
+        }
       }
 
       // ctx.get() is strict in the Host: asking for a service nobody provides
       // throws, which used to abort the whole task-centre startup and leave the
       // plugin on a silent in-memory store. Treat a missing service as "no
       // injection" instead of a fatal error.
-      let factories = null;
+      let factories: AdapterFactoryMap | null = null;
       try {
-        factories = ctx?.taskAdapterFactories ?? ctx?.get?.("taskAdapterFactories") ?? null;
+        factories = (ctx?.taskAdapterFactories ?? ctx?.get?.("taskAdapterFactories") ?? null) as AdapterFactoryMap | null;
       } catch {
         factories = null;
       }
       if (!factories || typeof factories !== "object") {
         factories = {
-          antigravity: createAntigravityAdapter,
-          codex: createCodexAdapter,
+          antigravity: createAntigravityAdapter as AdapterFactory,
+          codex: createCodexAdapter as AdapterFactory,
         };
       }
-      /** @type {Record<string, import("./lib/adapters/base.mjs").RuntimeAdapter>} */
       adapters = {};
       const extKind = config.tasksExternalAdapter;
       const extCfg = extKind !== "none" ? config.tasksAdapters?.[extKind] : null;
@@ -148,8 +270,8 @@ export async function apply(ctx, input = {}) {
             throw new Error(`no adapter factory for "${extKind}"`);
           }
           adapters[extKind] = makeAdapter(extCfg);
-        } catch (err) {
-          log.warn?.(`[dsh-rpc] failed to initialize ${extKind} adapter: ${err?.message ?? String(err)}`);
+        } catch (err: unknown) {
+          log.warn?.(`[dsh-rpc] failed to initialize ${extKind} adapter: ${errorMessage(err)}`);
           adapters = {};
         }
       }
@@ -166,7 +288,7 @@ export async function apply(ctx, input = {}) {
       }
 
       taskEngine = createTaskEngine(taskStore);
-      taskDispatcher = createDispatcher({
+      const createdDispatcher = createDispatcher({
         store: taskStore,
         engine: taskEngine,
         adapters,
@@ -176,18 +298,19 @@ export async function apply(ctx, input = {}) {
         // ledger and the tool replies always carry the curated reason instead.
         debugRawAdapterErrors: config.tasksAdapterDebugDetail === true,
       });
+      taskDispatcher = createdDispatcher;
 
       taskCentre.ready = true;
 
       // The caller-facing tool surface has no dispatch/pump on purpose, so the machine
       // side has to drive the ledger: without this pass a task submitted through MCP
       // would stay queued until a human ran `tasks dispatch` by hand.
-      const autopilot =
+      const autopilot: Autopilot | null =
         config.tasksAutopilot === false
           ? null
           : createAutopilot({
               engine: taskEngine,
-              dispatcher: taskDispatcher,
+              dispatcher: createdDispatcher,
               logger: log,
               maxStart: config.tasksAutopilotMaxStart,
               maxPump: config.tasksAutopilotMaxPump,
@@ -202,7 +325,7 @@ export async function apply(ctx, input = {}) {
           }
         : { enabled: false, intervalMs: null, maxStart: null, maxPump: null };
 
-      const autopilotStats = {
+      const autopilotStats: AutopilotStatsProjection = {
         passes: 0,
         lastPassAt: null,
         lastStarted: 0,
@@ -214,7 +337,7 @@ export async function apply(ctx, input = {}) {
 
       let shuttingDown = false;
       let passRunning = false;
-      let inFlightPass = Promise.resolve();
+      let inFlightPass: Promise<unknown> = Promise.resolve();
       const drainTimer = setInterval(() => {
         // A pass owns `passRunning` until its `drainEffects` settles. Starting another pass while
         // one is still draining would let the newer (usually faster) chain clear `passRunning`
@@ -233,21 +356,21 @@ export async function apply(ctx, input = {}) {
                 autopilotStats.lastFailed = result?.failed?.length ?? 0;
                 autopilotStats.lastError = result?.failed?.length ? (result.failed[0]?.message ?? null) : null;
               })
-              .catch((err) => {
-                autopilotStats.lastError = err?.message ?? String(err);
+              .catch((err: unknown) => {
+                autopilotStats.lastError = errorMessage(err);
               })
           : Promise.resolve();
         // Effects (adapter stop/kill requests) always drain, even with autopilot off:
         // they are leftovers of decisions already made, not new work.
         inFlightPass = tick
-          .finally(() => taskDispatcher.drainEffects({ limit: 50 }).catch(() => {}))
+          .finally(() => createdDispatcher.drainEffects({ limit: 50 }).catch(() => {}))
           .finally(() => {
             passRunning = false;
           });
       }, config.tasksAutopilotIntervalMs);
       drainTimer.unref?.();
 
-      const cleanupTasks = async () => {
+      const cleanupTasks = async (): Promise<void> => {
         shuttingDown = true;
         try {
           clearInterval(drainTimer);
@@ -279,10 +402,10 @@ export async function apply(ctx, input = {}) {
       } else if (typeof ctx.on === "function") {
         ctx.on("dispose", cleanupTasks);
       }
-    } catch (err) {
+    } catch (err: unknown) {
       taskCentre.mode = "failed";
       taskCentre.ready = false;
-      taskCentre.startError = err?.message ?? String(err);
+      taskCentre.startError = errorMessage(err);
       log.warn?.(`[dsh-rpc] task center disabled due to startup error: ${taskCentre.startError}`);
       try {
         taskStore?.close?.();
@@ -310,7 +433,7 @@ export async function apply(ctx, input = {}) {
       // resolve the adapter the agent is assigned to and hand its read-only control
       // table to the probe runner. Without this the runner sees no probe for any
       // control and reports every card as `unknown`, forever.
-      agentProbes: (row) => probesFromAdapter(adapters?.[row?.adapter_kind]),
+      agentProbes: (row: AgentRow) => probesFromAdapter(adapters?.[row?.adapter_kind]),
     },
     config,
     ctx,
@@ -346,17 +469,19 @@ export async function apply(ctx, input = {}) {
     isOwned: isOwnedSession,
     onDeny: () => stats.recordApproval("denied"),
     onAllow: () => stats.recordApproval("allowed"),
-    applyPreset: async (sessionId, name) => {
-      const service = ctx.get?.("permissionPresets");
+    applyPreset: async (sessionId, presetName) => {
+      const service = ctx.get?.("permissionPresets") as PermissionPresetsServiceLike | undefined;
       if (!service?.set) throw new Error("this deployment exposes no permissionPresets service");
-      const session = ctx.get?.("sessions")?.get?.(sessionId);
+      const sessions = ctx.get?.("sessions") as SessionsServiceLike | undefined;
+      const session = sessions?.get?.(sessionId);
       if (!session) throw new Error(`session ${sessionId} is not live`);
-      service.set(session, name);
-      return name;
+      service.set(session, presetName);
+      return presetName;
     },
     currentPreset: (sessionId) => {
-      const service = ctx.get?.("permissionPresets");
-      const session = ctx.get?.("sessions")?.get?.(sessionId);
+      const service = ctx.get?.("permissionPresets") as PermissionPresetsServiceLike | undefined;
+      const sessions = ctx.get?.("sessions") as SessionsServiceLike | undefined;
+      const session = sessions?.get?.(sessionId);
       if (!service?.current || !session) return null;
       return service.current(session) ?? null;
     },
@@ -375,7 +500,7 @@ export async function apply(ctx, input = {}) {
           log.info?.(`[dsh-rpc] approval journal: restored ${result.restored}, failed ${result.failed}`);
         }
       })
-      ?.catch?.((error) => log.warn?.(`[dsh-rpc] approval recovery failed: ${error?.message ?? error}`));
+      ?.catch?.((error: unknown) => log.warn?.(`[dsh-rpc] approval recovery failed: ${errorMessage(error)}`));
     if (typeof ctx.on === "function") {
       ctx.on("tools/pre-execute", gate.pre, { prepend: true });
       // `allow-once` widens the preset only for the approved call, so the gate
@@ -404,8 +529,8 @@ export async function apply(ctx, input = {}) {
   // Publish the endpoint so out-of-process callers (CLI, MCP bridge, curl) can
   // discover url + token without being told the port. `getOrigin()` throws
   // before the listener binds, hence the `ready` retry.
-  let warnedBlockedPort = null;
-  const publish = () => {
+  let warnedBlockedPort: number | null = null;
+  const publish: PublishHandle = () => {
     try {
       const origin = ctx.webServer.getOrigin();
       if (!origin) return false;
@@ -453,9 +578,9 @@ export async function apply(ctx, input = {}) {
   );
 }
 
-function scopedLogger(ctx) {
+function scopedLogger(ctx: HostPluginContext | null | undefined): PluginLogger {
   const candidate = ctx?.logger;
-  if (candidate && typeof candidate.info === "function") return candidate;
+  if (candidate && typeof candidate === "object" && typeof candidate.info === "function") return candidate;
   if (typeof candidate === "function") {
     try {
       const scoped = candidate("dsh-rpc");

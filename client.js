@@ -1,3 +1,4 @@
+// @ts-check
 // @punchact/dsh-rpc-agent — Settings page.
 //
 // A browser module: the Host loads it into the Web UI and we register one entry
@@ -13,9 +14,95 @@
 //  * the payload we read carries no token and no prompt text, and the route is
 //    loopback-only, so this page cannot become a way to read someone's session.
 
+/**
+ * @typedef {"zh" | "en"} ClientLang
+ * @typedef {string} ClientDictKey
+ * @typedef {(key: ClientDictKey) => string} ClientTranslatorFn
+ * @typedef {{
+ *   run?: string;
+ *   prompt?: boolean;
+ *   ageMs?: number;
+ * }} StatusActiveRun
+ * @typedef {{
+ *   at?: string;
+ *   method?: string;
+ *   ms?: number;
+ *   ok?: boolean;
+ *   code?: number | string | null;
+ * }} StatusRecentCall
+ * @typedef {{
+ *   count?: number;
+ *   errors?: number;
+ * }} StatusMethodUsage
+ * @typedef {{
+ *   enabled?: boolean;
+ *   path?: string;
+ *   allowRemote?: boolean;
+ *   defaultCwd?: string;
+ *   defaultAgentPreset?: string;
+ *   defaultTimeoutMs?: number;
+ *   maxBodyBytes?: number;
+ *   maxSessions?: number;
+ *   logRequests?: boolean;
+ *   tokenFile?: string;
+ * }} BridgePatchConfig
+ * @typedef {{
+ *   ok?: boolean;
+ *   version?: string | number;
+ *   origin?: string | null;
+ *   path?: string | null;
+ *   protocol?: string | number;
+ *   tokenSource?: string;
+ *   servedForMs?: number;
+ *   pid?: number | string;
+ *   node?: string;
+ *   endpointPath?: string;
+ *   config?: BridgePatchConfig;
+ *   activeRuns?: StatusActiveRun[];
+ *   calls?: {
+ *     total?: number;
+ *     errors?: number;
+ *     recent?: StatusRecentCall[];
+ *     byMethod?: Record<string, StatusMethodUsage>;
+ *   };
+ * }} BridgeStatusPayload
+ * @typedef {{
+ *   loading: boolean;
+ *   data: BridgeStatusPayload | null;
+ *   error: string | null;
+ *   at: number;
+ * }} StatusSnapshot
+ * @typedef {{
+ *   createElement: (type: unknown, props: Record<string, unknown> | null, ...children: unknown[]) => unknown;
+ *   useState: {
+ *     (initial: StatusSnapshot): [StatusSnapshot, (next: StatusSnapshot | ((prev: StatusSnapshot) => StatusSnapshot)) => void];
+ *     <T>(initial: T | (() => T)): [T, (next: T | ((prev: T) => T)) => void];
+ *   };
+ *   useEffect: (effect: () => void | (() => void), deps?: unknown[]) => void;
+ *   useRef: (initial: null) => { current: ReturnType<typeof setTimeout> | null };
+ * }} ClientReact
+ * @typedef {{
+ *   get?: (name: string) => {
+ *     register?: (ns: string, dicts: Record<string, unknown>) => (() => void) | undefined;
+ *     bind?: (ns: string) => ((key: string) => unknown) | undefined;
+ *   } | undefined;
+ *   effect: (fn: () => (() => void) | void, label?: string) => void;
+ *   slots: {
+ *     inject: (slot: string, factory: () => unknown) => void;
+ *     register: (
+ *       meta: { name: string; id: string; order: number; label: string },
+ *       component: () => unknown,
+ *     ) => () => void;
+ *   };
+ * }} ClientHostContext
+ */
+
+// @ts-expect-error -- __ModuleLoader__ is provided on window by the Host Web UI shell
 window.__ModuleLoader__.load({
   id: "@punchact/dsh-rpc-agent",
+  /** @param {(id: "react") => ClientReact} require */
   factory(require) {
+    /** @type {ClientReact} */
     const React = require("react");
     const h = React.createElement;
 
@@ -115,14 +202,21 @@ window.__ModuleLoader__.load({
       },
     };
 
+    /** @returns {ClientLang} */
     function pickLang() {
       const raw = typeof navigator === "object" && navigator ? String(navigator.language || "") : "";
       return raw.toLowerCase().startsWith("en") ? "en" : "zh";
     }
 
-    /** Static fallback: a missing or different Client locale service must not blank the page. */
+    /**
+     * Static fallback: a missing or different Client locale service must not blank the page.
+     *
+     * @param {ClientHostContext} ctx
+     * @returns {{ lang: ClientLang; dispose: () => void; t: ClientTranslatorFn }}
+     */
     function makeTranslator(ctx) {
       const lang = pickLang();
+      /** @type {Record<string, any>} */
       const table = DICTS[lang];
       try {
         const locale = typeof ctx.get === "function" ? ctx.get("locale") : undefined;
@@ -133,6 +227,7 @@ window.__ModuleLoader__.load({
             return {
               lang,
               dispose: typeof dispose === "function" ? dispose : () => {},
+              /** @param {ClientDictKey} key */
               t(key) {
                 try {
                   const value = bound(key);
@@ -169,6 +264,7 @@ window.__ModuleLoader__.load({
     const S = {
       root: { display: "flex", flexDirection: "column", gap: 14, color: COLORS.label, fontSize: 13, lineHeight: 1.6 },
       head: { display: "flex", alignItems: "flex-start", gap: 10, flexWrap: "wrap" },
+      /** @param {boolean} on */
       dot: (on) => ({ width: 9, height: 9, borderRadius: "50%", marginTop: 7, flex: "none", background: on ? COLORS.good : COLORS.bad }),
       title: { fontSize: 15, fontWeight: 650, margin: 0 },
       sub: { margin: "2px 0 0", color: COLORS.muted, fontSize: 12 },
@@ -214,10 +310,12 @@ window.__ModuleLoader__.load({
 
     // ---------------------------------------------------------------- helpers --
 
+    /** @param {number | string} value */
     function pad(value) {
       return String(value).padStart(2, "0");
     }
 
+    /** @param {unknown} iso */
     function clock(iso) {
       if (typeof iso !== "string" || iso.length < 19) return "—";
       const date = new Date(iso);
@@ -225,6 +323,7 @@ window.__ModuleLoader__.load({
       return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
     }
 
+    /** @param {unknown} ms */
     function duration(ms) {
       if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return "—";
       if (ms < 1000) return `${Math.round(ms)}ms`;
@@ -242,6 +341,7 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => {
         let alive = true;
+        /** @type {ReturnType<typeof setTimeout> | null} */
         let timer = null;
 
         const tick = () => {
@@ -278,10 +378,12 @@ window.__ModuleLoader__.load({
       return snapshot;
     }
 
+    /** @param {{ k: string; v: unknown }} props */
     function Row({ k, v }) {
       return h("div", { style: S.kv }, h("span", { style: S.k }, k), h("span", { style: S.v }, v));
     }
 
+    /** @param {{ title: string; badge?: string; children?: unknown }} props */
     function Card({ title, badge, children }) {
       return h(
         "section",
@@ -291,6 +393,7 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /** @param {{ label: string; text: string; t: ClientTranslatorFn }} props */
     function CopyLine({ label, text, t }) {
       const [copied, setCopied] = React.useState(false);
       const stamp = React.useRef(null);
@@ -327,6 +430,7 @@ window.__ModuleLoader__.load({
     // (anything omitted falls back to its default), and `token` is never emitted —
     // this page reads state back, it must not become a way to read a secret out of
     // the process.
+    /** @param {BridgePatchConfig | undefined} config */
     function patchSnippet(config) {
       const rows = [
         ["enabled", config?.enabled],
@@ -348,8 +452,14 @@ window.__ModuleLoader__.load({
 
     // -------------------------------------------------------------- component --
 
+    /**
+     * @param {ClientTranslatorFn} t
+     * @param {ClientLang} lang
+     */
     function makePage(t, lang) {
+      /** @type {Record<string, string>} */
       const tokenPaths = (DICTS[lang] ?? DICTS.zh).tokenPaths;
+      /** @param {any} source */
       const sourceLabel = (source) => tokenPaths?.[source] ?? source ?? "—";
 
       return function BridgeStatusPage() {
@@ -501,6 +611,7 @@ window.__ModuleLoader__.load({
     return {
       name: NS,
       inject: ["slots"],
+      /** @param {ClientHostContext} ctx */
       apply(ctx) {
         const translator = makeTranslator(ctx);
         ctx.effect(() => translator.dispose, "dsh-rpc: locale");

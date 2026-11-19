@@ -812,3 +812,13 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 **残余边界**（如实记）：插件仍然不能替宿主选端口（由 `@deepseek-ai/dsh-host-webserver` 决定）；Antigravity 适配器直连本地语言服务器 `fetch` 故意维持 `ADAPTER_UNAVAILABLE` 脱敏收敛。
 
 **怎么钉住**：`test/mcp-summary.test.mjs`（含第三轮的 `next:` 提示断言）、`test/mcp-tasks-tools.test.mjs`（客户端传输失败原样透出、服务端字符串码仍被净化）、`test/cli-tasks.test.mjs`（含列表标签）、`test/client.test.mjs`、`test/index-wiring.test.mjs` 与 `test/helpers/stub-server.mjs` 均已补齐确定性回归（含截断保真、预览标题、端口切换重放、按端口去重告警、`health --wait` 快速失败、MCP 传输透传与 `listenSafe` 跳过坏端口桩测）。
+
+## 56. 决策 0.9.4-a：宿主装配（`src/index.mts`）与浏览器设置页（`client.js`）类型化
+
+**现象**。PR 4 收口宿主入口 `index.mjs` 与浏览器 Web UI 设置页 `client.js` 的 TypeScript 迁移：`index.mjs`（468 行）无复杂构建保真矛盾，可直接迁入 `src/index.mts` 由 `tsc` 编译生成 `dist/index.mjs`；但 `client.js` 是 `window.__ModuleLoader__.load({ id, factory })` 形态的静态浏览器脚本，且 `scripts/check-dist-fidelity.mjs` 将其列在 `ROOT_FILES` 并逐文件比对 `REPO/client.js` 与 `DIST/client.js` 的 SHA-256。实测直接用 `tsc`（`ts.transpileModule`）转译 `client.js` 会重排缩进与空白，`20,833` 字节变为 `21,829` 字节（SHA-256 由 `399f7184...` 变为 `ab3bf7c2...`），无法与原始手写格式字节等价；此外 `tsconfig.json` 当前仅将 `src/**/*.mts` 视作 `build.mjs` 编译入口。
+
+**怎么改**。
+- `index.mjs` → `src/index.mts`（删除根 `index.mjs`）：将 Cordis 入口 `name`、`inject`、`apply(ctx, input?)`、`taskCentre` 装配、自动推进定时器与 `cleanupTasks`、`publish()` 与 `ping` 投影显式类型化，并导出 `HostPluginContext`、`BridgeState`、`TaskCentreState`、`TaskCentreWiring`、`PublishHandle`、`TaskDispatcher`、`Autopilot`、`AutopilotConfigProjection`、`AutopilotStatsProjection` 等装配形状；补齐并扩展 `types/lib/{approval-state,approvals,auth,config,pending,stats,tasks/engine}.d.mts` 声明桥接。
+- `client.js` 按规划兜底策略原地保留：`dist/client.js` 仍由 `build.mjs` 从根目录 `client.js` 逐字节复制到 `dist/client.js`；根目录 `client.js` 仅在顶部加入 `// @ts-check` 与纯注释 `@typedef`/`@param`/`@returns`/`@type`/`@ts-expect-error`（零非注释代码改动，仅注释增量使 `client.js` 为 `24,525` B / SHA-256 `933020cf...`），同时通过严格 `checkJs`（`es2023` + `dom` 零诊断）及 `dist/client.js` SHA-256 保真断言。
+
+**怎么钉住**：`test/index-wiring.test.mjs` 新增两项测试：① 纯内存 `CompilerHost` 编译期探针，验证 `src/index.mts` 导出契约正反两面在 `tsc` 编译期被准确校验；② 对 `dist/client.js` 执行严格 `checkJs` 零诊断校验与模拟 `window.__ModuleLoader__` 装载测试（验证注册 `settings.section` / `dsh-rpc-status`）。

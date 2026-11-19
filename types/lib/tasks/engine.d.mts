@@ -84,6 +84,22 @@ export interface TaskEngine {
   readArtifact(params?: Record<string, unknown>): Promise<Record<string, unknown>>;
 }
 
+export declare function seedBaselineEntities(
+  store: TaskStore,
+  options?: {
+    principal?: { principalId: string; kind?: string; scopes?: string[] } | null;
+    workspace?: {
+      workspaceId: string;
+      rootPath: string;
+      allowedSideEffects?: string[];
+      policy?: Record<string, unknown>;
+    } | null;
+    agent?: Record<string, unknown> | null;
+    capabilityRevision?: Record<string, unknown> | null;
+    preview?: Record<string, unknown> | null;
+  },
+): Promise<unknown>;
+
 export declare function createTaskEngine(
   store: TaskStore,
   options?: { defaultPrincipalId?: string },
