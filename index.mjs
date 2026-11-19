@@ -17,6 +17,7 @@ import { createDshAdapter } from "./lib/adapters/dsh.mjs";
 import { dshHome, endpointPath, loadOrCreateToken, tokenPath, writeEndpoint } from "./lib/auth.mjs";
 import { createApprovalState } from "./lib/approval-state.mjs";
 import { createApprovalGate } from "./lib/approvals.mjs";
+import { probesFromAdapter } from "./lib/agents/probe.mjs";
 import { MAX_WAIT_SLICE_MS, MIN_WAIT_SLICE_MS, resolveConfig } from "./lib/config.mjs";
 import { buildDispatcher, registerRoutes } from "./lib/http.mjs";
 import { createDshAdapterOps, createMethods } from "./lib/methods.mjs";
@@ -24,6 +25,7 @@ import { isOwnedSession, useOwnedState } from "./lib/owned.mjs";
 import { createPendingStore } from "./lib/pending.mjs";
 import { createStats } from "./lib/stats.mjs";
 import { createDispatcher } from "./lib/tasks/dispatch.mjs";
+import { createAutopilot } from "./lib/tasks/autopilot.mjs";
 import { createTaskEngine, seedBaselineEntities } from "./lib/tasks/engine.mjs";
 import { openStore } from "./lib/tasks/store.mjs";
 import { PLUGIN_NAME, PLUGIN_VERSION } from "./lib/version.mjs";
@@ -91,6 +93,10 @@ export async function apply(ctx, input = {}) {
     ready: false,
     seedError: null,
     startError: null,
+    autopilot: null,
+    // A pass that runs and does nothing looks exactly like a pass that never ran, unless
+    // the last pass says so; ping() reports this object verbatim.
+    autopilotStats: null,
   };
 
   if (config.tasksEnabled) {
@@ -171,16 +177,93 @@ export async function apply(ctx, input = {}) {
 
       taskCentre.ready = true;
 
+      // The caller-facing tool surface has no dispatch/pump on purpose, so the machine
+      // side has to drive the ledger: without this pass a task submitted through MCP
+      // would stay queued until a human ran `tasks dispatch` by hand.
+      const autopilot =
+        config.tasksAutopilot === false
+          ? null
+          : createAutopilot({
+              engine: taskEngine,
+              dispatcher: taskDispatcher,
+              logger: log,
+              maxStart: config.tasksAutopilotMaxStart,
+              maxPump: config.tasksAutopilotMaxPump,
+              pumpMaxSteps: config.tasksDispatchMaxSteps,
+            });
+      taskCentre.autopilot = autopilot
+        ? {
+            enabled: true,
+            intervalMs: config.tasksAutopilotIntervalMs,
+            maxStart: config.tasksAutopilotMaxStart,
+            maxPump: config.tasksAutopilotMaxPump,
+          }
+        : { enabled: false, intervalMs: null, maxStart: null, maxPump: null };
+
+      const autopilotStats = {
+        passes: 0,
+        lastPassAt: null,
+        lastStarted: 0,
+        lastPumped: 0,
+        lastFailed: 0,
+        lastError: null,
+      };
+      taskCentre.autopilotStats = autopilotStats;
+
+      let shuttingDown = false;
+      let passRunning = false;
+      let inFlightPass = Promise.resolve();
       const drainTimer = setInterval(() => {
-        taskDispatcher.drainEffects({ limit: 50 }).catch(() => {});
-      }, 5_000);
+        // A pass owns `passRunning` until its `drainEffects` settles. Starting another pass while
+        // one is still draining would let the newer (usually faster) chain clear `passRunning`
+        // first and mark the hub idle while the older chain is still writing — and an idle-looking
+        // shutdown then closes the store underneath it.
+        if (shuttingDown || passRunning) return;
+        passRunning = true;
+        const tick = autopilot
+          ? autopilot
+              .step()
+              .then((result) => {
+                autopilotStats.passes += 1;
+                autopilotStats.lastPassAt = new Date().toISOString();
+                autopilotStats.lastStarted = result?.started?.length ?? 0;
+                autopilotStats.lastPumped = result?.pumped?.length ?? 0;
+                autopilotStats.lastFailed = result?.failed?.length ?? 0;
+                autopilotStats.lastError = result?.failed?.length ? (result.failed[0]?.message ?? null) : null;
+              })
+              .catch((err) => {
+                autopilotStats.lastError = err?.message ?? String(err);
+              })
+          : Promise.resolve();
+        // Effects (adapter stop/kill requests) always drain, even with autopilot off:
+        // they are leftovers of decisions already made, not new work.
+        inFlightPass = tick
+          .finally(() => taskDispatcher.drainEffects({ limit: 50 }).catch(() => {}))
+          .finally(() => {
+            passRunning = false;
+          });
+      }, config.tasksAutopilotIntervalMs);
       drainTimer.unref?.();
 
-      const cleanupTasks = () => {
+      const cleanupTasks = async () => {
+        shuttingDown = true;
         try {
           clearInterval(drainTimer);
         } catch {
           // ignore timer cleanup errors
+        }
+        // Let the pass that is already running finish before the ledger goes away. Closing the
+        // store under an in-flight transition surfaces as a write error in the middle of
+        // shutdown, and a start that is interrupted mid-transition is exactly what leaves a
+        // `dispatching` task with no attempt row. When nothing is running we close right here,
+        // synchronously: a shutdown that is idle has nothing to wait for, and deferring the
+        // close past the caller's next statement would leave the file open behind a `dispose()`.
+        if (passRunning) {
+          try {
+            await inFlightPass;
+          } catch {
+            // ignore in-flight pass errors during shutdown
+          }
         }
         try {
           taskStore?.close?.();
@@ -221,6 +304,11 @@ export async function apply(ctx, input = {}) {
       taskDispatcher,
       adapters,
       taskCentre,
+      // A capability card describes one executor, so only that executor can verify it:
+      // resolve the adapter the agent is assigned to and hand its read-only control
+      // table to the probe runner. Without this the runner sees no probe for any
+      // control and reports every card as `unknown`, forever.
+      agentProbes: (row) => probesFromAdapter(adapters?.[row?.adapter_kind]),
     },
     config,
     ctx,

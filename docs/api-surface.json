@@ -1,0 +1,79 @@
+{
+  "note": "方案接口面的快照。来源是本地方案文档，用 `npm run docs:surface` 重新抽取；`npm run check:surface` 拿它对代码，不需要方案文档在场。不要手改。",
+  "source": {
+    "path": "C:\\Users\\Andy\\Documents\\deepseek-harness\\插件项目\\DSH本机Agent任务中心实施方案-合并版v1.0-20261118.md",
+    "sha256": "b6f6d1bb34baf8c8129c164fc50fb2361469314286636067959b192964f9b382"
+  },
+  "extractedAt": "2026-11-19",
+  "rpc": [
+    "dsh.agents.get",
+    "dsh.agents.list",
+    "dsh.agents.probe",
+    "dsh.permissions.catalog",
+    "dsh.tasks.cancel",
+    "dsh.tasks.decideApproval",
+    "dsh.tasks.events",
+    "dsh.tasks.get",
+    "dsh.tasks.input",
+    "dsh.tasks.list",
+    "dsh.tasks.preview",
+    "dsh.tasks.readArtifact",
+    "dsh.tasks.resolve",
+    "dsh.tasks.submit"
+  ],
+  "mcpTools": [
+    "dsh_agents_get",
+    "dsh_agents_list",
+    "dsh_agents_probe",
+    "dsh_approvals_pending",
+    "dsh_approvals_resolve",
+    "dsh_ask",
+    "dsh_cancel",
+    "dsh_capabilities",
+    "dsh_history",
+    "dsh_permissions",
+    "dsh_sessions",
+    "dsh_status",
+    "dsh_task_cancel",
+    "dsh_task_events",
+    "dsh_task_get",
+    "dsh_task_input",
+    "dsh_task_list",
+    "dsh_task_preview",
+    "dsh_task_read_artifact",
+    "dsh_task_submit",
+    "dsh_wait",
+    "dsh_workspaces"
+  ],
+  "cli": [
+    "agents list",
+    "tasks events",
+    "tasks get",
+    "tasks preview",
+    "tasks submit"
+  ],
+  "implementationOnly": {
+    "rpc": [
+      "dsh.agents.register",
+      "dsh.tasks.dispatch",
+      "dsh.tasks.pump",
+      "dsh.tasks.reconcile"
+    ],
+    "mcpTools": [],
+    "cli": [
+      "agents get",
+      "agents probe",
+      "agents register",
+      "tasks approve",
+      "tasks artifact",
+      "tasks cancel",
+      "tasks dispatch",
+      "tasks input",
+      "tasks list",
+      "tasks pump",
+      "tasks reconcile",
+      "tasks resolve"
+    ],
+    "note": "方案没写、实现里确实有。多数是 0.9.0 实施时补的内部操作面（dispatch/pump/reconcile 这类派发与核对入口）；CLI 多出来的是方案只写了主干五条命令。新增接口要么补进方案，要么重新抽快照让这里如实记一笔。"
+  }
+}

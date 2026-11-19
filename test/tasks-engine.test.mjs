@@ -372,25 +372,16 @@ test("derivePhase covers all §5.4 rules and enforces top-to-bottom precedence",
     "person/answer",
   );
 
-  // 5. person/reconcile only when lease expired (or a cancel/dispatch signal); active lease stays machine/working
-  assert.equal(
-    derivePhase(
-      { status: "needs_reconcile", leaseExpiresAt: "2026-11-18T12:05:00Z" },
-      [],
-      null,
-      { nowMs: now },
-    ).phase,
-    "machine/working",
-  );
-  assert.equal(
-    derivePhase(
-      { status: "needs_reconcile", leaseExpiresAt: "2026-11-18T11:59:00Z" },
-      [],
-      null,
-      { nowMs: now },
-    ).phase,
-    "person/reconcile",
-  );
+  // 5. person/reconcile is the status itself, not a function of the lease or the last event:
+  //    whoever sees `needs_reconcile` owes a decision, so a still-open lease must not read as
+  //    "a machine is working on it" (0.9.0 run 10) and an unlisted reason must not fall through
+  //    to `machine/working` (0.9.1 review: `dispatch.failed` / `inspect.unknown` did).
+  for (const leaseExpiresAt of ["2026-11-18T12:05:00Z", "2026-11-18T11:59:00Z", undefined]) {
+    assert.equal(
+      derivePhase({ status: "needs_reconcile", leaseExpiresAt }, [], null, { nowMs: now }).phase,
+      "person/reconcile",
+    );
+  }
 
   // 6. person/review
   assert.equal(derivePhase({ status: "review_pending" }, [], null, { nowMs: now }).phase, "person/review");
@@ -641,15 +632,35 @@ test("resolve keeps refusing a running task that has no open review attention", 
   }
 });
 
-test("needs_reconcile after an unconfirmed stop reports person/reconcile", () => {
+test("needs_reconcile always reports person/reconcile, whatever produced it", () => {
   const now = Date.parse("2026-11-19T12:00:00Z");
-  for (const type of ["cancel.unconfirmed", "cancel.failed", "dispatch.orphaned"]) {
+  // Every recorded reason, plus the two dispatcher-side ones (`dispatch.failed`,
+  // `inspect.unknown`) that a whitelist of cancel events used to miss.
+  const reasons = [
+    "cancel.unconfirmed",
+    "cancel.failed",
+    "cancel.unsupported",
+    "dispatch.orphaned",
+    "dispatch.failed",
+    "inspect.unknown",
+    "lease.expired",
+    null,
+  ];
+  for (const type of reasons) {
     assert.equal(
-      derivePhase({ status: "needs_reconcile" }, [], { type }, { nowMs: now }).phase,
+      derivePhase({ status: "needs_reconcile" }, [], type ? { type } : null, { nowMs: now }).phase,
       "person/reconcile",
-      `${type} must route to person/reconcile`,
+      `${type ?? "no last event"} must route to person/reconcile`,
     );
   }
-  // A needs_reconcile with no reconcile signal at all keeps waiting on the machine rung.
-  assert.equal(derivePhase({ status: "needs_reconcile" }, [], null, { nowMs: now }).phase, "machine/working");
+  // A lease still in the future must not hide the duty either (0.9.0 acceptance run 10).
+  assert.equal(
+    derivePhase(
+      { status: "needs_reconcile", leaseExpiresAt: "2099-01-01T00:00:00Z" },
+      [],
+      { type: "cancel.unconfirmed" },
+      { nowMs: now },
+    ).phase,
+    "person/reconcile",
+  );
 });

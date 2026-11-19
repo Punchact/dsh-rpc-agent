@@ -76,7 +76,7 @@ http://127.0.0.1:<port>/dsh-rpc   ->   DSH agent
 - **会自述**：`dsh_capabilities` 给出八节能力快照（运行时、权限档位、可调工具、MCP 前缀、会话、工作区、插件），做计划前不必猜本机有什么。
 - **不假装知道**：外层客户端有更短的超时上限时，本桥只如实说明并建议分段轮询，不让长任务看起来像失败。
 - **可托管外部 agent 任务（任务中心，`tasksEnabled` 默认关闭）**：内置 15 表 SQLite 账本、11 态状态机与能力卡/只读探测，统一调度 DSH 自身、Antigravity 与 Codex App Server，详情见 [任务中心手册](./docs/task-center.md)。
-- **关键行为有回归用例守着**：43 个测试文件共 375 例 + catalog smoke（本机实测 375/375 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
+- **关键行为有回归用例守着**：45 个测试文件共 388 例 + catalog smoke（本机实测 388/388 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
 
 ## 安装与更新
 
@@ -446,12 +446,16 @@ trace:
 | `tasksEnabled` | `false` | 布尔总开关；`false` 时不开库、不起定时器、MCP 隐藏任务工具 |
 | `tasksMaxConcurrent` | `1` | 整数 `1..32`；全局活跃任务并发上限，超限在 `dispatch` 报 `STATE_CONFLICT` |
 | `tasksRequireReconcileOnUnknown` | `true` | 布尔；不可识别状态或无 `attention` 的 `blocked` 是否强制转 `needs_reconcile` |
-| `tasksExternalAdapter` | `"none"` | `"none" \| "antigravity" \| "codex"`；除内建 DSH 基准适配器外额外装配的外部执行方 |
+| `tasksExternalAdapter` | `"none"` | `"none" \| "antigravity" \| "codex"`；除内建 DSH 基准适配器外额外装配的外部执行方。留 `"none"` 时，注册成 `antigravity`/`codex` 的代理会在派发时被拒（`ADAPTER_UNAVAILABLE`），任务停在 `queued` |
 | `tasksPreviewTtlMs` | `300000` | 整数 `1000..3600000`；`dsh.tasks.preview` 预览凭证有效时长（毫秒） |
 | `tasksDbPath` | `null` | 字符串或 `null`；自定义 SQLite 路径，留空使用 `$DSH_HOME/storages/task-center/tasks.db` |
 | `tasksProbeTimeoutMs` | `5000` | 整数 `100..60000`；`dsh.agents.probe` 只读探测的单次超时 |
 | `tasksAdapters` | `{}` | 对象；按执行方种类给适配器的构造参数（如 `{ codex: { binary: "…" } }`）；**不允许**在注册 RPC 里指定可执行文件 |
 | `tasksDispatchMaxSteps` | `50` | 整数 `1..1000`；一次 `dsh.tasks.pump`/`dsh.tasks.dispatch` 内推进的最大步数 |
+| `tasksAutopilot` | `true` | 布尔；为 `true` 时宿主按下面的间隔跑有界推进环（启动到期任务 + 推进活跃任务），这是经 MCP 提交的任务能自己往前走的唯一机制；置 `false` 则退回纯手工 `tasks dispatch` / `tasks pump` |
+| `tasksAutopilotIntervalMs` | `5000` | 整数 `1000..600000`；机器侧推进的间隔 |
+| `tasksAutopilotMaxStart` | `2` | 整数 `1..32`；单遍推进最多启动几个 `queued` 任务 |
+| `tasksAutopilotMaxPump` | `4` | 整数 `1..200`；单遍推进对每种活跃状态最多推进几个任务 |
 | `tasksAdapterDebugDetail` | `false` | 布尔；为 `true` 时把适配器失败的原始文本（脱敏后截断到 512 字符）以 `[raw]` 前缀写进宿主 debug 日志；默认只记安全字段 |
 
 **典型 CLI 流程**（可复制执行，前置已设 `tasksEnabled: true` 并重启宿主）：
@@ -753,14 +757,29 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 43 个测试文件，共 375 例，另有 catalog smoke；无需运行中的 Harness
+npm test                       # 45 个测试文件，共 388 例，另有 catalog smoke；无需运行中的 Harness
 node test/host.test.mjs        # 1 例：真实 WebServer 集成（需先 npm ci）
 node test/e2e.mjs              # 14 例：端到端，打真实 Harness（--cwd 只接受绝对路径）
 node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harness
 ```
 
+### 两道对账门禁
+
+文档里的数字与方案里的接口面都已经被做成机器可核对的检查，接在 `npm test`、CI 与 `prepublishOnly` 上：
+
+```powershell
+npm run check:docs      # 文档数字 vs 代码与 docs/counts.json（RPC 方法数、MCP 工具数、测试文件数、用例数）
+npm run docs:counts     # 数字漂了就刷一遍 README / README.en / CHANGELOG 最新一节（幂等）
+npm run check:surface   # 代码接口面 vs docs/api-surface.json（方案快照），两个方向都查
+npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案文档，可用 PLAN_DOC 指路径）
+```
+
+`check:docs` 的计数口径是「能从代码算的现算」：RPC 方法数取 `lib/methods.mjs` 的目录、MCP 工具数取 `bin/dsh-rpc-mcp.mjs` 的两张表、测试文件数取 `package.json` 里 `test` 链上的 `node test/*.test.mjs`；只有用例总数要整跑才知道，记在 `docs/counts.json` 里当唯一来源。
+
+`check:surface` 查两个方向：方案写了的接口必须真实存在；代码里任务族/代理族的新接口必须要么在方案里、要么在快照的 `implementationOnly` 里如实记着。0.9.0 就是靠这一类对账才发现「方案写了 `dsh.tasks.resolve`、实现漏了」。
+
 <details>
-<summary>三十六个测试文件各自覆盖什么</summary>
+<summary>45 个测试文件各自覆盖什么</summary>
 
 | 套件 | 例 | 覆盖 |
 | --- | --- | --- |
@@ -773,12 +792,13 @@ node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harnes
 | `capabilities` | 4 | 分节选择、`max_chars` 裁剪、状态汇总 |
 | `tasks-store` | 4 | SQLite 15 表、WAL、外键约束、并发写事务重试 |
 | `tasks-state` | 5 | 11 态允许迁移表、非法迁移拒斥、乐观锁、终态只追加事件 |
-| `tasks-engine` | 8 | 幂等键、取消与完成竞态、结果校验门、派生阶段优先序、重启不丢失 |
+| `tasks-engine` | 13 | 幂等键、取消与完成竞态、结果校验门、派生阶段优先序、重启不丢失 |
 | `tasks-degraded` | 4 | 降级许可：能力卡里声明为 `unsupported` 的控制项（`start`/`steer`/`cancel`/`inspect`/`events`/`approval` 六项）映射为可读后果，任务详情、列表与预览都带 `degraded[]`（三种读路径各有断言） |
 | `tasks-breaker` | 2 | `tasksEnabled=false` 时 RPC 家族回 `-32601`、`discover` 不再宣发，开关打开后方法可达 |
 | `agents-card` | 5 | `capability-card@1` 规范化、空 `limitations` 拒斥、`verified` 归并 |
 | `agents-capability-revisions` | 5 | 注册即发布能力修订：声明解析、写类必须 `required`、同卡幂等、换卡换版本 |
-| `agents-probe` | 1 | 只读探测超时与抛错隔离、`unknown` 记录 |
+| `agents-probe` | 3 | 只读探测超时与抛错隔离、`unknown` 记录 |
+| `agents-probe-wiring` | 2 | 探针必须接上真适配器：活适配器 `verified` 且 `verifiedControls` 含 `start`；没装配适配器的代理停在 `unknown`（不许借别人的证据） |
 | `tasks-preview` | 3 | 一次性预览绑定、摘要校验、TTL 过期、主体隔离，以及按能力卡形状给出 `degraded[]` |
 | `tasks-flow-regressions` | 3 | 一次真机端到端跑出来的三条回归：同一状态重复轮询只记一次、同一问题不重复开单、未确认的停止升级为 `needs_reconcile` |
 | `tasks-events-and-preview` | 4 | 任务事件游标、修订归属、探测过期、候选排除原因 |
@@ -790,12 +810,13 @@ node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harnes
 | `adapters-redact` | 5 | 凭据形态脱敏（Bearer/Basic/Cookie/userinfo/PAT/AK）、Cookie 逐对且不破坏 JSON、截断、深度上限与预算数字不误伤 |
 | `adapters-antigravity` | 3 | 项目归属、模型占位符、`ForceStopCascadeTree`、响应上限与不可用失败 |
 | `adapters-codex` | 5 | `codex.exe` 发现、`stdio://` 握手、帧形状与上限、事件队列与 `turn/interrupt` |
-| `adapters-dsh` | 7 | DSH 基准适配器七操作映射、诚实停机、`resultValid: false` 与派发联调 |
+| `adapters-dsh` | 8 | DSH 基准适配器七操作映射、诚实停机、`resultValid: false` 与派发联调 |
 | `methods-dsh-ops` | 2 | `createDshAdapterOps` 容错、自动装配、`registerAgent` 与 `decideApproval` |
-| `tasks-dispatch` | 10 | `startTask`/`pump`/`drainEffects`、租约回收、`maxConcurrent` 门控与失败净化 |
+| `tasks-dispatch` | 12 | `startTask`/`pump`/`drainEffects`、租约回收、`maxConcurrent` 门控与失败净化 |
+| `tasks-autopilot` | 7 | 推进环：覆盖所有活跃状态、失败不中断并告警、慢遍不叠加、空账本不动作、异步分页必须 await 才派发、破账本只报不抛 |
 | `config-breakers` | 3 | 五项熔断开关默认值、边界校验与 `ConfigError` |
 | `index-wiring` | 3 | 关闭不建库、开启建库播种、外部适配器失败降级 |
-| `mcp-tasks-tools` | 6 | 6 个任务 MCP 工具的开关显隐、禁用报错、`reconcile`/`decideApproval` 排除、参数校验与原型键拒绝 |
+| `mcp-tasks-tools` | 6 | 8 个任务 MCP 工具的开关显隐、禁用报错、`reconcile`/`decideApproval` 排除、参数校验与原型键拒绝 |
 | `cli-tasks` | 5 | `tasks` / `agents` 参数解析、`UsageError`（exit 2）、JSON-RPC 调用与混版提示 |
 | `cli-agents-approve` | 3 | `tasks approve` 标志校验、`dsh.tasks.decideApproval` 与 `agents` 子命令 |
 | `registry` | 10 | 粘性会话表读写、并发更新、键隔离、轮换 |
@@ -810,7 +831,7 @@ node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harnes
 
 </details>
 
-`npm test` 按固定顺序跑这三十六个测试文件和 catalog smoke；`npm run test:host` 跑真实 WebServer 集成；`npm run test:e2e` / `npm run test:edge` 要活的 Harness。
+`npm test` 按固定顺序跑这 45 个测试文件和 catalog smoke；`npm run test:host` 跑真实 WebServer 集成；`npm run test:e2e` / `npm run test:edge` 要活的 Harness。
 
 > [!TIP]
 > **受限沙箱里 `node --test` 可能触发 `spawn EPERM`**：若默认并发子进程被拦，使用 `node --test --test-isolation=none <file>` 或单文件 `node <file>` 运行。
@@ -822,7 +843,7 @@ node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harnes
 - **边界**检查协议层：batch、通知、id 形态、鉴权头、超大 body（应得真正的 413 而不是断连）、参数注入防护、超时钳制、并发 ask、`limit` 语义。
 - **端口漂移**（手工）：把 `endpoint.json` 的 url 改成死端口再跑 `dsh-rpc ping`，应得退出码 3 与含 `nothing is listening`、`pid`、`health --wait` 的可读报错。
 
-本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 43 个测试文件 **375/375** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.mjs` 输出 `methods: 34` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
+本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 45 个测试文件 **388/388** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.mjs` 输出 `methods: 34` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
 
 ## 许可证
 

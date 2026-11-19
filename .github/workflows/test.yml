@@ -42,6 +42,16 @@ jobs:
       - name: PLUGIN_VERSION matches package.json
         run: npm run check:version
 
+      # 文档里的数字（RPC 方法数、MCP 工具数、测试文件数与用例数）必须与代码/计数文件一致。
+      # 0.9.0 那几轮靠手工补丁改过七次同样的数字，这里把它变成门禁。
+      - name: Documented counts match the code
+        run: npm run check:docs
+
+      # 方案（docs/api-surface.json 里的快照）与代码的接口面必须对得上：方案要求的要存在，
+      # 代码里新增的要么补进方案、要么重新抽快照。0.9.0 就是靠这条抓出「方案写了、实现漏了」。
+      - name: Plan surface matches the code
+        run: npm run check:surface
+
       - name: Unit tests (no Harness required)
         run: npm test
 

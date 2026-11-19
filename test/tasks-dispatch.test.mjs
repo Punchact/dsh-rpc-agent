@@ -593,3 +593,112 @@ test("dispatch logger omits raw exception text by default, logs redacted [raw] o
     sEng.store.close();
   }
 });
+
+test("pump hands an interrupted start to a person instead of retrying forever", async () => {
+  // A start interrupted between the `dispatching` write and the attempt row used to make
+  // `pump` throw on every pass (no locator for `adapter.events`), while the task kept
+  // occupying an active slot. It must never reach the adapter in that shape.
+  const adapter = makeFakeAdapter({
+    onEvents: () => {
+      throw new Error("adapter.events must not be called for a task with no attempt");
+    },
+  });
+  const { store, engine, dispatcher } = await setupWithAdapter(adapter);
+  try {
+    const t = await engine.submit({
+      idempotencyKey: "pump-orphan-1",
+      capabilityRevisionId: "cap-1",
+      workspaceId: "ws-1",
+      agentId: "ag-1",
+    });
+    // Reproduce the ledger shape a crash mid-start leaves behind: dispatching, no attempt row.
+    await store.withWriteTx((db) => {
+      db.prepare("UPDATE tasks SET status = 'dispatching' WHERE task_id = ?").run(t.taskId);
+    });
+
+    // Inside the start window: quiet, no state change, adapter untouched.
+    const fresh = await dispatcher.pump({ taskId: t.taskId, maxSteps: 1 });
+    assert.equal(fresh.status, "dispatching");
+    assert.equal(fresh.awaitingStart, true);
+    assert.equal(adapter.calls.events, 0);
+
+    // Past the grace window it becomes a person's job, with an event that says why.
+    const late = createDispatcher({
+      store,
+      engine,
+      adapters: { fake: adapter },
+      now: () => Date.now() + 10 * 60_000,
+    });
+    const stale = await late.pump({ taskId: t.taskId, maxSteps: 1 });
+    assert.equal(stale.status, "needs_reconcile");
+    assert.equal(stale.orphaned, true);
+    assert.equal(adapter.calls.events, 0);
+
+    const detail = await engine.get({ taskId: t.taskId });
+    assert.equal(detail.status, "needs_reconcile");
+    assert.equal(detail.phase, "person/reconcile");
+    const events = await engine.events({ taskId: t.taskId });
+    assert.ok(
+      events.events.some((event) => event.type === "dispatch.orphaned"),
+      "the interrupted start must leave a dispatch.orphaned event",
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test("pump also refuses a start that recorded an attempt but no locator", async () => {
+  // The attempt row is not evidence that the run is reachable: `recordAttemptStart` can be
+  // called without a locator (and an adapter may start without returning one). Such a task is
+  // exactly as unanswerable as one with no attempt at all, so the orphan guard must ask for the
+  // locator rather than for the row.
+  const adapter = makeFakeAdapter({
+    onEvents: () => {
+      throw new Error("adapter.events must not be called for a task whose locator is empty");
+    },
+  });
+  const { store, engine, dispatcher } = await setupWithAdapter(adapter);
+  try {
+    const t = await engine.submit({
+      idempotencyKey: "pump-orphan-2",
+      capabilityRevisionId: "cap-1",
+      workspaceId: "ws-1",
+      agentId: "ag-1",
+    });
+    const nowIso = new Date().toISOString();
+    await store.withWriteTx((db) => {
+      db.prepare("UPDATE tasks SET status = 'dispatching' WHERE task_id = ?").run(t.taskId);
+      db.prepare(
+        `INSERT INTO attempts (
+           attempt_id, task_id, attempt_no, agent_id, mandate_id, capability_revision_id,
+           runtime_locator_json, status, side_effect_active, started_at, updated_at
+         ) VALUES (?, ?, 1, ?, NULL, ?, NULL, 'starting', 1, ?, ?)`,
+      ).run(`att_${t.taskId}`, t.taskId, "ag-1", "cap-1", nowIso, nowIso);
+    });
+
+    const fresh = await dispatcher.pump({ taskId: t.taskId, maxSteps: 1 });
+    assert.equal(fresh.status, "dispatching");
+    assert.equal(fresh.awaitingStart, true);
+    assert.equal(adapter.calls.events, 0);
+
+    const late = createDispatcher({
+      store,
+      engine,
+      adapters: { fake: adapter },
+      now: () => Date.now() + 10 * 60_000,
+    });
+    const stale = await late.pump({ taskId: t.taskId, maxSteps: 1 });
+    assert.equal(stale.status, "needs_reconcile");
+    assert.equal(stale.orphaned, true);
+    assert.equal(adapter.calls.events, 0);
+
+    const detail = await engine.get({ taskId: t.taskId });
+    assert.equal(detail.phase, "person/reconcile");
+    const events = await engine.events({ taskId: t.taskId });
+    const orphaned = events.events.find((event) => event.type === "dispatch.orphaned");
+    assert.ok(orphaned, "an unlocatable start must leave a dispatch.orphaned event");
+    assert.equal(orphaned.evidence?.attemptRecorded, true);
+  } finally {
+    store.close();
+  }
+});
