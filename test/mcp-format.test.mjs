@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { capText, describeEnd, formatToolError, formatToolResult } from "../lib/mcp-format.mjs";
+import { capText, describeEnd, formatToolError, formatToolResult } from "../dist/lib/mcp-format.mjs";
 
 const textOf = (result) => result.content.map((part) => part.text).join("\n");
 

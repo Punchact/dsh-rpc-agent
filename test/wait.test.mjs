@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { MAX_WAIT_SLICE_MS, WAIT_SLICE_MS, waitForTurn } from "../lib/client.mjs";
+import { MAX_WAIT_SLICE_MS, WAIT_SLICE_MS, waitForTurn } from "../dist/lib/client.mjs";
 import { closeServer, listenSafe } from "./helpers/stub-server.mjs";
 
 const TOKEN = "test-token";

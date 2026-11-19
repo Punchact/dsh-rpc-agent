@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { TASK_TOOLS, callTool, listTools, resetBridgeDefaults, validateToolArgs } from "../bin/dsh-rpc-mcp.mjs";
+import { TASK_TOOLS, callTool, listTools, resetBridgeDefaults, validateToolArgs } from "../dist/bin/dsh-rpc-mcp.mjs";
 
 function withMockRpc(responder, fn) {
   const prevFetch = globalThis.fetch;

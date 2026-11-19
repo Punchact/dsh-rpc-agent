@@ -10,9 +10,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { registerRoutes } from "../lib/http.mjs";
-import { resolveConfig } from "../lib/config.mjs";
-import { createStats } from "../lib/stats.mjs";
+import { registerRoutes } from "../dist/lib/http.mjs";
+import { resolveConfig } from "../dist/lib/config.mjs";
+import { createStats } from "../dist/lib/stats.mjs";
 
 const TOKEN = "a".repeat(48);
 

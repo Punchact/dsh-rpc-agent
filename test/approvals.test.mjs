@@ -19,17 +19,17 @@ process.env.DSH_HOME = mkdtempSync(join(tmpdir(), "dsh-rpc-approvals-"));
 const SUITE_KEEPALIVE = setInterval(() => {}, 60_000);
 after(() => clearInterval(SUITE_KEEPALIVE));
 
-import { APPROVAL_MODES, createApprovalGate, escalationOf } from "../lib/approvals.mjs";
-import { ConfigError, resolveConfig } from "../lib/config.mjs";
-import { createMethods } from "../lib/methods.mjs";
+import { APPROVAL_MODES, createApprovalGate, escalationOf } from "../dist/lib/approvals.mjs";
+import { ConfigError, resolveConfig } from "../dist/lib/config.mjs";
+import { createMethods } from "../dist/lib/methods.mjs";
 import {
   forgetSession,
   isOwnedSession,
   ownSession,
   ownedSessionCount,
   resetOwnedSessions,
-} from "../lib/owned.mjs";
-import { createStats } from "../lib/stats.mjs";
+} from "../dist/lib/owned.mjs";
+import { createStats } from "../dist/lib/stats.mjs";
 
 const exec = (sessionId, args = {}, extra = {}) => ({
   agent: { session: { id: sessionId } },

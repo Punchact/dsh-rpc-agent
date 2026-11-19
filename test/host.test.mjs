@@ -22,7 +22,7 @@ process.env.DSH_HOME = mkdtempSync(join(tmpdir(), "dsh-rpc-host-"));
 
 const { Context } = await import("@deepseek-ai/cordis");
 const { WebServer } = await import("@deepseek-ai/dsh-host-webserver");
-const { apply } = await import("../index.mjs");
+const { apply } = await import("../dist/index.mjs");
 
 /** Poll until the service is registered and the listener reports its bound origin. */
 async function waitForOrigin(ctx, budgetMs = 5000) {

@@ -8,6 +8,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, posix, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import ts from "typescript";
 
 const REPO = resolve(import.meta.dirname, "..");
 const DIST = resolve(REPO, "dist");
@@ -42,9 +43,71 @@ async function importEntry(label, absPath) {
   }
 }
 
-const srcIndexMod = await importEntry("源码 index.mjs", join(REPO, "index.mjs"));
+// Once any transitive dependency moves to `src/**/*.mts` and its old `.mjs` is deleted,
+// unbuilt source entries in REPO can no longer be dynamically `import()`ed at runtime.
+// Parse the source entry's exported runtime names via TypeScript AST and compare against
+// the live `import()` of the built `dist/` entry.
+function resolveSourceEntryPath(relMjsPath) {
+  const direct = join(REPO, relMjsPath);
+  if (existsSync(direct)) return direct;
+  if (relMjsPath.endsWith(".mjs")) {
+    const mts = join(REPO, "src", relMjsPath.replace(/\.mjs$/, ".mts"));
+    if (existsSync(mts)) return mts;
+  }
+  return null;
+}
+
+function collectBindingNames(nameNode, out) {
+  if (ts.isIdentifier(nameNode)) {
+    out.push(nameNode.text);
+  } else if (ts.isObjectBindingPattern(nameNode)) {
+    for (const el of nameNode.elements) collectBindingNames(el.name, out);
+  } else if (ts.isArrayBindingPattern(nameNode)) {
+    for (const el of nameNode.elements) {
+      if (ts.isBindingElement(el)) collectBindingNames(el.name, out);
+    }
+  }
+}
+
+function extractSourceExports(label, relMjsPath) {
+  const absPath = resolveSourceEntryPath(relMjsPath);
+  if (!absPath) {
+    console.error(`check-entry-parity: FAIL (1)`);
+    console.error(`  - ${label} 源文件不存在（${relMjsPath}）`);
+    process.exit(1);
+  }
+  const text = readFileSync(absPath, "utf8");
+  const sf = ts.createSourceFile(absPath, text, ts.ScriptTarget.Latest, true);
+  const names = new Set();
+  for (const stmt of sf.statements) {
+    const hasExport = Boolean(stmt.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword));
+    const hasDefault = Boolean(stmt.modifiers?.some((m) => m.kind === ts.SyntaxKind.DefaultKeyword));
+    if (hasExport) {
+      if (hasDefault) names.add("default");
+      if (ts.isFunctionDeclaration(stmt) || ts.isClassDeclaration(stmt)) {
+        if (stmt.name) names.add(stmt.name.text);
+      } else if (ts.isVariableStatement(stmt)) {
+        const extracted = [];
+        for (const decl of stmt.declarationList.declarations) {
+          collectBindingNames(decl.name, extracted);
+        }
+        for (const n of extracted) names.add(n);
+      }
+    } else if (ts.isExportAssignment(stmt)) {
+      if (!stmt.isExportEquals) names.add("default");
+    } else if (ts.isExportDeclaration(stmt) && !stmt.isTypeOnly) {
+      if (stmt.exportClause && ts.isNamedExports(stmt.exportClause)) {
+        for (const spec of stmt.exportClause.elements) {
+          if (!spec.isTypeOnly) names.add(spec.name.text);
+        }
+      }
+    }
+  }
+  return [...names].sort();
+}
+
+const srcIndexExports = extractSourceExports("源码 index.mjs", "index.mjs");
 const distIndexMod = await importEntry("产物 index.mjs", join(DIST, "index.mjs"));
-const srcIndexExports = Object.keys(srcIndexMod).sort();
 const distIndexExports = Object.keys(distIndexMod).sort();
 checkedItems += 1;
 if (srcIndexExports.length === 0) {
@@ -136,9 +199,8 @@ for (const [subpath, srcTarget] of Object.entries(srcExports)) {
 }
 
 // Extra check: ./http-client named exports parity
-const srcHttpClient = await importEntry("源码 lib/client.mjs", join(REPO, "lib/client.mjs"));
+const srcClientKeys = extractSourceExports("源码 lib/client.mjs", "lib/client.mjs");
 const distHttpClient = await importEntry("产物 lib/client.mjs", join(DIST, "lib/client.mjs"));
-const srcClientKeys = Object.keys(srcHttpClient).sort();
 const distClientKeys = Object.keys(distHttpClient).sort();
 checkedItems += 1;
 if (JSON.stringify(srcClientKeys) !== JSON.stringify(distClientKeys)) {

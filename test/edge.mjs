@@ -8,8 +8,8 @@
 //   node test/edge.mjs
 // Exit code 0 only when every check passes.
 
-import { readEndpoint, readTokenFromFile } from "../lib/auth.mjs";
-import { rpcCall } from "../lib/client.mjs";
+import { readEndpoint, readTokenFromFile } from "../dist/lib/auth.mjs";
+import { rpcCall } from "../dist/lib/client.mjs";
 
 const endpoint = readEndpoint();
 if (!endpoint?.url) {

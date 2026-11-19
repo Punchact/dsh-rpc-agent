@@ -21,7 +21,7 @@ process.env.DSH_HOME = mkdtempSync(join(tmpdir(), "dsh-rpc-pending-"));
 const SUITE_KEEPALIVE = setInterval(() => {}, 60_000);
 after(() => clearInterval(SUITE_KEEPALIVE));
 
-import { createApprovalGate, describeArgs, MAX_ARGV_CHARS } from "../lib/approvals.mjs";
+import { createApprovalGate, describeArgs, MAX_ARGV_CHARS } from "../dist/lib/approvals.mjs";
 
 // Every gate in this file needs a readable current preset: without one the gate
 // refuses up front (it cannot promise to put the preset back), which most of the
@@ -30,9 +30,9 @@ function makeGate(options = {}) {
   return createApprovalGate({ mode: "delegate", isOwned: () => true, currentPreset: () => "workspace-write", ...options });
 }
 
-import { resolveConfig } from "../lib/config.mjs";
-import { createMethods } from "../lib/methods.mjs";
-import { createPendingStore, MAX_PENDING } from "../lib/pending.mjs";
+import { resolveConfig } from "../dist/lib/config.mjs";
+import { createMethods } from "../dist/lib/methods.mjs";
+import { createPendingStore, MAX_PENDING } from "../dist/lib/pending.mjs";
 
 const exec = (sessionId, args = {}) => ({
   agent: { session: { id: sessionId, header: { cwd: "C:/work" } } },

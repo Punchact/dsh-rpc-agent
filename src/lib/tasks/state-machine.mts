@@ -17,18 +17,26 @@ export const TASK_STATES = Object.freeze([
   "succeeded",
   "failed",
   "cancelled",
-]);
+] as const);
 
-export const TERMINAL_STATES = Object.freeze(new Set(["succeeded", "failed", "cancelled"]));
+export type TaskStatus = (typeof TASK_STATES)[number];
 
-const TASK_STATE_SET = new Set(TASK_STATES);
+export type TerminalTaskStatus = "succeeded" | "failed" | "cancelled";
+
+export const TERMINAL_STATES: ReadonlySet<TaskStatus> = Object.freeze(
+  new Set<TaskStatus>(["succeeded", "failed", "cancelled"]),
+);
+
+const TASK_STATE_SET: ReadonlySet<string> = new Set(TASK_STATES);
 
 /**
  * Legal state transitions per §5.2 & §5.3.
  * Terminal states (`succeeded`, `failed`, `cancelled`) have no outgoing edges:
  * late runtime evidence can only be appended to `events`.
  */
-export const ALLOWED_TRANSITIONS = Object.freeze({
+export const ALLOWED_TRANSITIONS: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = Object.freeze<
+  Record<TaskStatus, readonly TaskStatus[]>
+>({
   queued: Object.freeze(["dispatching", "cancel_requested", "needs_reconcile", "cancelled"]),
   dispatching: Object.freeze(["running", "cancel_requested", "needs_reconcile", "failed", "cancelled"]),
   running: Object.freeze([
@@ -74,15 +82,80 @@ export const ALLOWED_TRANSITIONS = Object.freeze({
   cancelled: Object.freeze([]),
 });
 
-export function isValidState(state) {
+export interface SqlStatement {
+  get(...params: unknown[]): Record<string, unknown> | undefined;
+  run(...params: unknown[]): { changes: number | bigint };
+}
+
+export interface SqlDatabase {
+  prepare(sql: string): SqlStatement;
+}
+
+export interface TaskStore {
+  withWriteTx<T>(fn: (db: SqlDatabase) => T): Promise<T>;
+}
+
+export interface AppendEventParams {
+  taskId: string;
+  attemptId?: string | null;
+  type: string;
+  source?: string;
+  adapterEventId?: string | number | null;
+  payload?: Record<string, unknown>;
+  evidence?: unknown;
+  createdAt?: string;
+}
+
+export interface AppendEventResult {
+  eventId: string;
+  seq: number;
+  type: string;
+  createdAt: string;
+  deduplicated: boolean;
+}
+
+export interface TransitionPatch {
+  activeAttemptId?: string | null;
+  cancelRequestedAt?: string | null;
+  cancelReason?: string | null;
+  resultJson?: string | null;
+  resultValid?: boolean | null;
+  errorJson?: string | null;
+}
+
+export interface TransitionParams {
+  taskId: string;
+  expectedStateVersion: number;
+  to: TaskStatus;
+  reason?: string;
+  evidence?: unknown;
+  eventType?: string | null;
+  source?: string;
+  attemptId?: string | null;
+  adapterEventId?: string | number | null;
+  payload?: Record<string, unknown>;
+  patch?: TransitionPatch;
+}
+
+export interface TransitionResult {
+  taskId: string;
+  from: string;
+  to: TaskStatus;
+  stateVersion: number;
+  updatedAt: string;
+  completedAt: string | null;
+  event: AppendEventResult;
+}
+
+export function isValidState(state: unknown): state is TaskStatus {
   return typeof state === "string" && TASK_STATE_SET.has(state);
 }
 
-export function isTerminalState(state) {
-  return TERMINAL_STATES.has(state);
+export function isTerminalState(state: unknown): state is TerminalTaskStatus {
+  return (TERMINAL_STATES as ReadonlySet<string>).has(state as string);
 }
 
-export function canTransition(from, to) {
+export function canTransition(from: unknown, to: unknown): boolean {
   if (!isValidState(from) || !isValidState(to)) return false;
   if (TERMINAL_STATES.has(from)) return false;
   return ALLOWED_TRANSITIONS[from].includes(to);
@@ -93,7 +166,7 @@ export function canTransition(from, to) {
  * Deduplicates when `(taskId, attemptId, adapterEventId)` was already recorded.
  */
 export function appendEventInTx(
-  db,
+  db: SqlDatabase,
   {
     taskId,
     attemptId = null,
@@ -103,8 +176,8 @@ export function appendEventInTx(
     payload = {},
     evidence = null,
     createdAt = new Date().toISOString(),
-  },
-) {
+  }: AppendEventParams,
+): AppendEventResult {
   if (typeof taskId !== "string" || taskId.trim().length === 0) {
     throw validationFailed("`taskId` must be a non-empty string");
   }
@@ -119,7 +192,9 @@ export function appendEventInTx(
          FROM events
          WHERE task_id = ? AND attempt_id = ? AND adapter_event_id = ?`,
       )
-      .get(taskId, attemptId, String(adapterEventId));
+      .get(taskId, attemptId, String(adapterEventId)) as
+      | { event_id: string; seq: number; type: string; created_at: string }
+      | undefined;
     if (existing) {
       return {
         eventId: existing.event_id,
@@ -133,7 +208,7 @@ export function appendEventInTx(
 
   const nextRow = db
     .prepare("SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM events WHERE task_id = ?")
-    .get(taskId);
+    .get(taskId) as { next_seq: number };
   const seq = nextRow.next_seq;
   const eventId = `evt_${randomUUID()}`;
   const payloadJson = JSON.stringify(payload ?? {});
@@ -159,7 +234,7 @@ export function appendEventInTx(
   return { eventId, seq, type, createdAt, deduplicated: false };
 }
 
-export async function appendEvent(store, params) {
+export async function appendEvent(store: TaskStore, params: AppendEventParams): Promise<AppendEventResult> {
   return store.withWriteTx((db) => appendEventInTx(db, params));
 }
 
@@ -167,7 +242,7 @@ export async function appendEvent(store, params) {
  * Perform an optimistic-locked state transition inside an existing write transaction.
  */
 export function transitionInTx(
-  db,
+  db: SqlDatabase,
   {
     taskId,
     expectedStateVersion,
@@ -180,8 +255,8 @@ export function transitionInTx(
     adapterEventId = null,
     payload = {},
     patch = {},
-  },
-) {
+  }: TransitionParams,
+): TransitionResult {
   if (typeof taskId !== "string" || taskId.trim().length === 0) {
     throw validationFailed("`taskId` must be a non-empty string");
   }
@@ -199,12 +274,14 @@ export function transitionInTx(
       `SELECT task_id, status, state_version, active_attempt_id
        FROM tasks WHERE task_id = ?`,
     )
-    .get(taskId);
+    .get(taskId) as
+    | { task_id: string; status: string; state_version: number; active_attempt_id: string | null }
+    | undefined;
   if (!row) {
     throw notFoundError(`task not found: ${taskId}`, { taskId });
   }
 
-  if (TERMINAL_STATES.has(row.status)) {
+  if ((TERMINAL_STATES as ReadonlySet<string>).has(row.status)) {
     throw stateConflict(
       `task ${taskId} is in terminal state "${row.status}" and cannot transition to "${to}"`,
       { taskId, from: row.status, to, stateVersion: row.state_version },
@@ -237,7 +314,7 @@ export function transitionInTx(
   const terminal = TERMINAL_STATES.has(to);
 
   const sets = ["status = ?", "state_version = ?", "updated_at = ?"];
-  const args = [to, nextVersion, now];
+  const args: unknown[] = [to, nextVersion, now];
 
   if (terminal) {
     sets.push("completed_at = COALESCE(completed_at, ?)");
@@ -309,6 +386,6 @@ export function transitionInTx(
 /**
  * Optimistic-locked state transition wrapped in `store.withWriteTx`.
  */
-export async function transition(store, params) {
+export async function transition(store: TaskStore, params: TransitionParams): Promise<TransitionResult> {
   return store.withWriteTx((db) => transitionInTx(db, params));
 }

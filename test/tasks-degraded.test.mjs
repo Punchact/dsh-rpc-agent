@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createTaskEngine, degradedFromCapabilities, seedBaselineEntities } from "../lib/tasks/engine.mjs";
-import { openStore } from "../lib/tasks/store.mjs";
+import { createTaskEngine, degradedFromCapabilities, seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
+import { openStore } from "../dist/lib/tasks/store.mjs";
 
 // Plan §4.2 rule 4 (2026-11-18 "降级许可"): a control the agent declares
 // optional-and-unsupported does not disqualify it, but the task detail must show the

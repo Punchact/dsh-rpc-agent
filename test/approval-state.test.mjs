@@ -5,9 +5,9 @@ import { join } from "node:path";
 import test from "node:test";
 import { spawn } from "node:child_process";
 
-import { createApprovalGate } from "../lib/approvals.mjs";
-import { createApprovalState } from "../lib/approval-state.mjs";
-import { createPendingStore } from "../lib/pending.mjs";
+import { createApprovalGate } from "../dist/lib/approvals.mjs";
+import { createApprovalState } from "../dist/lib/approval-state.mjs";
+import { createPendingStore } from "../dist/lib/pending.mjs";
 
 function scratch() {
   const dir = mkdtempSync(join(tmpdir(), "dsh-approval-state-"));
@@ -334,7 +334,7 @@ test("pending tickets survive TTL and capacity pruning while new commits add to 
 
 test("concurrent processes allocate at most three unique tickets in one journal", async () => {
   const { dir, file } = scratch();
-  const moduleUrl = new URL("../lib/approval-state.mjs", import.meta.url).href;
+  const moduleUrl = new URL("../dist/lib/approval-state.mjs", import.meta.url).href;
   const startAt = Date.now() + 500;
   const source = `
     import { writeFileSync } from "node:fs";

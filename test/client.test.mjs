@@ -19,8 +19,8 @@ process.env.DSH_HOME = home;
 process.env.DSH_RPC_TOKEN = "client-test-token-0123456789";
 delete process.env.DSH_RPC_URL;
 
-const { rpcCall } = await import("../lib/client.mjs");
-const { isFetchBlockedPort, transportCode } = await import("../lib/transport.mjs");
+const { rpcCall } = await import("../dist/lib/client.mjs");
+const { isFetchBlockedPort, transportCode } = await import("../dist/lib/transport.mjs");
 
 // These shapes differ per platform, which is exactly why the extraction is its
 // own module: a socket is not needed to pin the behaviour down.

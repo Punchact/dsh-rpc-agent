@@ -21,9 +21,19 @@ export const TASK_ERROR = Object.freeze({
   INVALID_ADAPTER: "INVALID_ADAPTER",
   ADAPTER_UNAVAILABLE: "ADAPTER_UNAVAILABLE",
   SCHEMA_INVALID: "SCHEMA_INVALID",
-});
+} as const);
 
-const RPC_CODE_FOR_TASK_ERROR = Object.freeze({
+export type TaskErrorCode = (typeof TASK_ERROR)[keyof typeof TASK_ERROR];
+
+export interface TaskError extends RpcError {
+  taskCode: TaskErrorCode;
+  data: Record<string, unknown> & {
+    kind: TaskErrorCode;
+    code: TaskErrorCode;
+  };
+}
+
+const RPC_CODE_FOR_TASK_ERROR: Readonly<Record<TaskErrorCode, number>> = Object.freeze({
   [TASK_ERROR.STATE_CONFLICT]: CODE.busy,
   [TASK_ERROR.IDEMPOTENCY_CONFLICT]: CODE.busy,
   [TASK_ERROR.CONTROL_UNSUPPORTED]: CODE.invalidParams,
@@ -46,48 +56,58 @@ const RPC_CODE_FOR_TASK_ERROR = Object.freeze({
  * carrying the stable string `taskCode` on both `error.taskCode` and
  * `error.data.code` / `error.data.kind`.
  */
-export function taskError(taskCode, message, data = {}) {
+export function taskError(
+  taskCode: TaskErrorCode,
+  message: string,
+  data: Record<string, unknown> = {},
+): TaskError {
   const rpcCode = RPC_CODE_FOR_TASK_ERROR[taskCode] ?? CODE.server;
   const payload = { kind: taskCode, code: taskCode, ...data };
-  const err = new RpcError(rpcCode, message, payload);
+  const err = new RpcError(rpcCode, message, payload) as TaskError;
   err.taskCode = taskCode;
   return err;
 }
 
-export function stateConflict(message, data) {
+export function stateConflict(message: string, data?: Record<string, unknown>): TaskError {
   return taskError(TASK_ERROR.STATE_CONFLICT, message, data);
 }
 
-export function idempotencyConflict(message, data) {
+export function idempotencyConflict(message: string, data?: Record<string, unknown>): TaskError {
   return taskError(TASK_ERROR.IDEMPOTENCY_CONFLICT, message, data);
 }
 
-export function controlUnsupported(message, data) {
+export function controlUnsupported(message: string, data?: Record<string, unknown>): TaskError {
   return taskError(TASK_ERROR.CONTROL_UNSUPPORTED, message, data);
 }
 
-export function cursorExpired(message, data) {
+export function cursorExpired(message: string, data?: Record<string, unknown>): TaskError {
   return taskError(TASK_ERROR.CURSOR_EXPIRED, message, data);
 }
 
-export function reportInvalid(message, data) {
+export function reportInvalid(message: string, data?: Record<string, unknown>): TaskError {
   return taskError(TASK_ERROR.REPORT_INVALID, message, data);
 }
 
-export function validationFailed(message, data) {
+export function validationFailed(message: string, data?: Record<string, unknown>): TaskError {
   return taskError(TASK_ERROR.VALIDATION_FAILED, message, data);
 }
 
-export function notFoundError(message, data) {
+export function notFoundError(message: string, data?: Record<string, unknown>): TaskError {
   return taskError(TASK_ERROR.NOT_FOUND, message, data);
 }
 
-export function accessDeniedError(message, data) {
+export function accessDeniedError(message: string, data?: Record<string, unknown>): TaskError {
   return taskError(TASK_ERROR.ACCESS_DENIED, message, data);
 }
 
-export function isTaskError(error, taskCode) {
+export function isTaskError(error: unknown, taskCode?: TaskErrorCode): boolean {
   if (!error || typeof error !== "object") return false;
-  const code = error.taskCode ?? error.data?.code ?? error.data?.kind;
-  return taskCode ? code === taskCode : Object.values(TASK_ERROR).includes(code);
+  const candidate = error as {
+    taskCode?: unknown;
+    data?: { code?: unknown; kind?: unknown };
+  };
+  const code = candidate.taskCode ?? candidate.data?.code ?? candidate.data?.kind;
+  return taskCode
+    ? code === taskCode
+    : typeof code === "string" && (Object.values(TASK_ERROR) as readonly string[]).includes(code);
 }

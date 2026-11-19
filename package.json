@@ -58,12 +58,16 @@
     }
   },
   "scripts": {
+    "pretest": "node scripts/build.mjs",
     "test": "node test/methods.test.mjs && node test/mcp-format.test.mjs && node test/trace-format.test.mjs && node test/history-format.test.mjs && node test/advice.test.mjs && node test/host-facts.test.mjs && node test/capabilities.test.mjs && node test/tasks-store.test.mjs && node test/tasks-state.test.mjs && node test/tasks-engine.test.mjs && node test/tasks-degraded.test.mjs && node test/tasks-breaker.test.mjs && node test/agents-card.test.mjs && node test/agents-capability-revisions.test.mjs && node test/agents-probe.test.mjs && node test/agents-probe-wiring.test.mjs && node test/tasks-preview.test.mjs && node test/tasks-events-and-preview.test.mjs && node test/tasks-flow-regressions.test.mjs && node test/tasks-input.test.mjs && node test/tasks-artifact.test.mjs && node test/agents-get.test.mjs && node test/tasks-reconcile.test.mjs && node test/adapters-redact.test.mjs && node test/adapters-base.test.mjs && node test/adapters-antigravity.test.mjs && node test/adapters-codex.test.mjs && node test/adapters-dsh.test.mjs && node test/methods-dsh-ops.test.mjs && node test/tasks-dispatch.test.mjs && node test/tasks-autopilot.test.mjs && node test/config-breakers.test.mjs && node test/index-wiring.test.mjs && node test/mcp-tasks-tools.test.mjs && node test/mcp-summary.test.mjs && node test/cli-tasks.test.mjs && node test/cli-agents-approve.test.mjs && node test/registry.test.mjs && node test/pending.test.mjs && node test/approvals.test.mjs && node test/approval-state.test.mjs && node test/wait.test.mjs && node test/abort.test.mjs && node test/client.test.mjs && node test/cli-mcp-regressions.test.mjs && node test/status.test.mjs && node test/catalog.smoke.mjs && node scripts/check-docs.mjs && node scripts/check-surface.mjs",
+    "pretest:host": "node scripts/build.mjs",
     "test:host": "node test/host.test.mjs",
+    "pretest:e2e": "node scripts/build.mjs",
     "test:e2e": "node test/e2e.mjs",
+    "pretest:edge": "node scripts/build.mjs",
     "test:edge": "node test/edge.mjs",
     "build": "node scripts/build.mjs",
-    "verify": "npm run build && node scripts/check-entry-parity.mjs && npm test && npm run check:package",
+    "verify": "npm run build && node scripts/check-entry-parity.mjs && node scripts/check-test-targets.mjs && npm test && npm run check:package",
     "check:package": "node scripts/check-package.mjs",
     "check:docs": "node scripts/check-docs.mjs",
     "count:cases": "node scripts/count-cases.mjs --record",

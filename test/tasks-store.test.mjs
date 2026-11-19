@@ -6,8 +6,8 @@ import test from "node:test";
 
 import { DatabaseSync } from "node:sqlite";
 
-import { SCHEMA_VERSION, openStore } from "../lib/tasks/store.mjs";
-import { isTaskError, TASK_ERROR } from "../lib/tasks/errors.mjs";
+import { SCHEMA_VERSION, openStore } from "../dist/lib/tasks/store.mjs";
+import { isTaskError, TASK_ERROR } from "../dist/lib/tasks/errors.mjs";
 
 const EXPECTED_TABLES = [
   "schema_meta",

@@ -1,12 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { collectFacts } from "../lib/host-facts.mjs";
-import { formatCapabilities, SECTION_IDS } from "../lib/capabilities.mjs";
-import { buildDispatcher } from "../lib/http.mjs";
-import { createMethods } from "../lib/methods.mjs";
-import { resolveConfig } from "../lib/config.mjs";
-import { PLUGIN_VERSION } from "../lib/version.mjs";
+import { collectFacts } from "../dist/lib/host-facts.mjs";
+import { formatCapabilities, SECTION_IDS } from "../dist/lib/capabilities.mjs";
+import { buildDispatcher } from "../dist/lib/http.mjs";
+import { createMethods } from "../dist/lib/methods.mjs";
+import { resolveConfig } from "../dist/lib/config.mjs";
+import { PLUGIN_VERSION } from "../dist/lib/version.mjs";
 
 function fullServices() {
   return {

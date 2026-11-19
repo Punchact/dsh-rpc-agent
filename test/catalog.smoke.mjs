@@ -12,17 +12,17 @@
 //      bundle that registers itself under another, and a copy button that hands
 //      people a row that will not load.
 import { readFileSync } from "node:fs";
-import { createMethods } from "../lib/methods.mjs";
-import { resolveConfig } from "../lib/config.mjs";
+import { createMethods } from "../dist/lib/methods.mjs";
+import { resolveConfig } from "../dist/lib/config.mjs";
 
 const failures = [];
 function check(ok, message) {
   if (!ok) failures.push(message);
 }
 
-const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-const patch = readFileSync(new URL("../cordis.patch.yml", import.meta.url), "utf8");
-const client = readFileSync(new URL("../client.js", import.meta.url), "utf8");
+const pkg = JSON.parse(readFileSync(new URL("../dist/package.json", import.meta.url), "utf8"));
+const patch = readFileSync(new URL("../dist/cordis.patch.yml", import.meta.url), "utf8");
+const client = readFileSync(new URL("../dist/client.js", import.meta.url), "utf8");
 
 const patchName = patch.match(/^\s*name:\s*'?([^'\s]+)'?\s*$/m)?.[1];
 const clientId = client.match(/__ModuleLoader__\.load\(\{\s*id:\s*"([^"]+)"/)?.[1];

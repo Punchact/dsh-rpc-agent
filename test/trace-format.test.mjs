@@ -3,14 +3,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { describeConfig, resolveConfig } from "../lib/config.mjs";
+import { describeConfig, resolveConfig } from "../dist/lib/config.mjs";
 import {
   TRACE_LEVELS,
   describeTrace,
   isTraceLevel,
   normalizeTraceLevel,
   previewOf,
-} from "../lib/trace-format.mjs";
+} from "../dist/lib/trace-format.mjs";
 
 test("level validation and normalization handle case, whitespace and unknown values", () => {
   assert.deepEqual(TRACE_LEVELS, ["none", "errors", "summary", "full"]);

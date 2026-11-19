@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ConfigError, describeConfig, resolveConfig } from "../lib/config.mjs";
+import { ConfigError, describeConfig, resolveConfig } from "../dist/lib/config.mjs";
 
 test("circuit-breaker defaults match §9 and appear in describeConfig", () => {
   const cfg = resolveConfig({});

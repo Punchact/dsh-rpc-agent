@@ -16,7 +16,7 @@ import test from "node:test";
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), "dsh-rpc-registry-"));
 
 const { REGISTRY_VERSION, forgetEntry, lookupEntry, readRegistry, registryKey, registryPath, rememberEntry, writeRegistry, ROTATE_AFTER_ASKS } =
-  await import("../lib/registry.mjs");
+  await import("../dist/lib/registry.mjs");
 
 test("the key separates clients and prefers a project over a directory", () => {
   assert.equal(registryKey({ namespace: "codex", project: "workbuddy" }), "codex::workbuddy");

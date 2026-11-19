@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ConfigError, describeConfig, resolveConfig } from "../lib/config.mjs";
-import { buildDispatcher } from "../lib/http.mjs";
-import { createMethods } from "../lib/methods.mjs";
-import { TASK_ERROR, isTaskError } from "../lib/tasks/errors.mjs";
-import { createTaskEngine, seedBaselineEntities } from "../lib/tasks/engine.mjs";
-import { reconcileTask } from "../lib/tasks/reconcile.mjs";
-import { transition } from "../lib/tasks/state-machine.mjs";
-import { openStore } from "../lib/tasks/store.mjs";
+import { ConfigError, describeConfig, resolveConfig } from "../dist/lib/config.mjs";
+import { buildDispatcher } from "../dist/lib/http.mjs";
+import { createMethods } from "../dist/lib/methods.mjs";
+import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
+import { createTaskEngine, seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
+import { reconcileTask } from "../dist/lib/tasks/reconcile.mjs";
+import { transition } from "../dist/lib/tasks/state-machine.mjs";
+import { openStore } from "../dist/lib/tasks/store.mjs";
 
 async function setup() {
   const store = openStore({ path: ":memory:" });

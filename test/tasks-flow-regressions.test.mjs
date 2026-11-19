@@ -12,9 +12,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createDispatcher } from "../lib/tasks/dispatch.mjs";
-import { createTaskEngine, seedBaselineEntities } from "../lib/tasks/engine.mjs";
-import { openStore } from "../lib/tasks/store.mjs";
+import { createDispatcher } from "../dist/lib/tasks/dispatch.mjs";
+import { createTaskEngine, seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
+import { openStore } from "../dist/lib/tasks/store.mjs";
 
 function makeAdapter(overrides = {}) {
   return {
