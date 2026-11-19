@@ -251,3 +251,25 @@ test("a Host that binds a fetch-blocked port is warned about at startup", async 
     rmSync(home, { recursive: true, force: true });
   }
 });
+test("an unparseable origin still lets the bridge start and publish", async () => {
+  // The blocked-port warning is a side quest: it must never be the reason a
+  // startup gives up on publishing the endpoint it was handed.
+  const prevHome = process.env.DSH_HOME;
+  const home = mkdtempSync(join(tmpdir(), "dsh-wire-origin-"));
+  process.env.DSH_HOME = home;
+  const fake = makeFakeCtx();
+  fake.ctx.webServer.getOrigin = () => "not-a-url";
+  try {
+    await apply(fake.ctx, { token: "d".repeat(32), defaultCwd: home, tasksEnabled: false });
+    assert.equal(
+      fake.warnings.some((w) => /bad port/.test(w)),
+      false,
+      "an origin we cannot parse is not a blocked port, and must not be reported as one",
+    );
+    assert.ok(fake.infos.some((m) => /ready at not-a-url\/dsh-rpc/.test(m)), "startup must finish");
+  } finally {
+    if (prevHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});

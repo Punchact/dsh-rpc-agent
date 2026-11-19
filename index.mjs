@@ -411,14 +411,21 @@ export async function apply(ctx, input = {}) {
       // The bridge does not choose the port; the Host does. A port fetch refuses
       // ("bad port") would leave every out-of-process caller unable to connect
       // while this process looks perfectly healthy, so say it out loud once.
-      const parsed = new URL(origin);
-      const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
-      if (!blockedPortWarned && isFetchBlockedPort(port)) {
-        blockedPortWarned = true;
-        log.warn?.(
-          `[dsh-rpc-agent] the Host's web port ${port} is one fetch refuses to connect to ("bad port"). ` +
-            "Out-of-process callers (CLI, MCP bridge) will fail with EBADPORT until the Harness starts on another port.",
-        );
+      // Keep it in its own guard: a warning must never be able to stop the
+      // endpoint from being published.
+      try {
+        const parsed = new URL(origin);
+        const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+        if (!blockedPortWarned && isFetchBlockedPort(port)) {
+          blockedPortWarned = true;
+          log.warn?.(
+            `[dsh-rpc-agent] the Host's web port ${port} is one fetch refuses to connect to ("bad port"). ` +
+              "Out-of-process callers (CLI, MCP bridge) will fail with EBADPORT until the Harness starts on another port.",
+          );
+        }
+      } catch {
+        // An origin we cannot parse is the caller's problem, not a reason to skip
+        // publishing the url it already gave us.
       }
       state.endpointUrl = `${origin}${config.path}`;
       writeEndpoint({
