@@ -11,8 +11,8 @@
   - 11 态任务状态机、`expectedStateVersion` 乐观锁、基于 `(principalId, idempotencyKey)` 的提交/控制幂等校验、`effects` 持久出箱（带 `lease_expires_at` 租约回收）与一次性 `previews` 绑定。
   - 派生阶段 `derivePhase` 按 8 档优先级现算（`person/delivery` → `person/approval` → `person/answer` → `person/reconcile` → `person/review` → `machine/queued` → `machine/working` → `done`），不写回数据库。
 - **RPC、MCP 与 CLI 扩展**（JSON-RPC 方法总数 **17 → 31**，MCP 工具 **11（默认）+ 6（`tasksEnabled: true` 时共 17 个）**）：
-  - 新增 11 个任务 RPC：`dsh.tasks.{preview,submit,get,list,events,cancel,dispatch,pump,reconcile,decideApproval,resolve}`（`resolve` 是唯一的人工签收入口，只在 RPC/CLI 面，不进 MCP）；新增 3 个代理 RPC：`dsh.agents.{register,list,probe}`。
-  - 新增 6 个受开关门控的 MCP 工具：`dsh_tasks_{submit,list,get,cancel}` 与 `dsh_agents_{list,probe}`（有意排除 `reconcile` 与 `decideApproval`，人工核对与审批留在 RPC/CLI 面）。
+  - 新增 13 个任务 RPC：`dsh.tasks.{preview,submit,get,list,events,cancel,dispatch,pump,reconcile,decideApproval,input,readArtifact,resolve}`（`resolve` 是唯一的人工签收入口，只在 RPC/CLI 面，不进 MCP）；新增 4 个代理 RPC：`dsh.agents.{register,list,probe,get}`。
+  - 新增 11 个受开关门控的 MCP 工具：`dsh_task_{submit,list,get,cancel,preview,events,read_artifact,input}` 与 `dsh_agents_{list,probe,get}`（有意排除 `resolve`、`reconcile` 与 `decideApproval`，人工核对、签收与审批留在 RPC/CLI 面）。
   - 新增 CLI 子命令：`dsh-rpc tasks <preview|submit|list|get|cancel|dispatch|pump|reconcile|approve>` 与 `dsh-rpc agents <register|list|probe>`。
 - **三个执行方适配器**（统一实现七操作契约 `probe`/`start`/`inspect`/`sendInput`/`cancel`/`events`/`decideApproval`）：
   - DSH 自身基准适配器（`lib/adapters/dsh.mjs` + `createDshAdapterOps`）：注入 7 个会话操作包装，`tasksEnabled: true` 时自动装配；`probe` 只读、`cancel.stopped` 严格以底层确认为准、未校验结果保持 `resultValid: false`。
@@ -25,7 +25,7 @@
 
 ### 修复
 
-- `scripts.test` 新增并接入 20 个任务中心与 CLI/适配器测试套件（全链 39 个测试文件、358 例，本机 358/358 通过；CI 结果见 PR #30），并更新 `catalog.smoke.mjs` 校验 31 个 RPC 方法。
+- `scripts.test` 新增并接入 20 个任务中心与 CLI/适配器测试套件（全链 42 个测试文件、366 例，本机 366/366 通过；CI 结果见 PR #30），并更新 `catalog.smoke.mjs` 校验 34 个 RPC 方法。
 - `dispatch.mjs` 修复了租约到期回收与原子 `maxConcurrent` 门控竞态，防止同一写事务之外并发超发或将任务卡死在 `dispatching` / `in_flight`。
 - **取消确认后立刻收口**：适配器回报 `confirmedStopped: true`（DSH 会话真停了、Antigravity 回执里含该 cascadeId）时，同一次出箱排水内把任务从 `cancel_requested` 推进到 `cancelled` 并写 `cancel.confirmed`；此前只把 effect 标完成，任务会悬在 `cancel_requested` 等一个已停会话永远不会发出的事件。Codex 的 `turn/interrupt` 只算受理，故不设该标志。
 - **幂等键不再掩盖改过的请求**：`cancel` / `resolve` 的重放分支会比较请求意图（取消原因；处置结论 + 证据引用），同键异载荷抛 `STATE_CONFLICT`（`reason: "idempotency_payload_mismatch"`）。`expectedStateVersion` 属并发护栏、重试时本就会变，不参与比较。
@@ -45,7 +45,9 @@
 - **预览不再接受「不相干的能力修订」（重启前补齐的第五处缺口）**：`dsh.tasks.preview` 过去只校验修订存在，不校验它属于所选实例、也不校验探测是否过期，还会把候选列表留空。现在：修订必须在该实例声明的 `capabilityRevisions` 里（否则 `CAPABILITY_VERSION_MISSING`）、探测过期即拒（`PROBE_STALE`），并把同类其它实例的排除原因（`AGENT_DISABLED` / `PROBE_STALE`）与选中项一起写进 `candidates[]`。
 - **顺带修掉一个会吃掉声明的 bug**：`dsh.agents.probe` 重写 `capabilities_json` 时会丢掉已发布的能力修订，导致「注册→探测→预览」直接失败；现在探测只更新证据，不动已发布的能力集合与项目绑定。
 - **注册即发布能力修订（首次真机冒烟发现）**：`dsh.agents.register` 过去只写 `agents` 行，`capability_revisions` 永远为空，而 `dsh.tasks.preview` / `dsh.tasks.submit` 都要求修订 id —— 干净主机上任务中心实际不可用。现在卡片的 `capabilities[]` 在注册时发布为不可变修订（id 由卡片哈希 + 能力派生，同卡幂等、换卡换版本），写类能力必须把 `cancelPolicy` 标 `required`，`dsh.agents.list` 会回显每个实例的 `capabilityRevisions`。
-- **测试与文档口径校正**：`scripts.test` 全链 39 个测试文件、**358 例**；`docs/design.md` 的 §7 历史快照后补了「现行口径（2026-11-19）」注，注明 `methods 41 → 85`、`client 6 → 8`、`edge 24 项但本机 23/24`（第 21 项 `create without a cwd` 因宿主返回 `cwd: null` 失败，属既有行为，非本 PR 引入）。
+- **人工问答与产物读取接上**：新增 `dsh.tasks.input`（执行中回答，走 effects 队列投递，带幂等键、载荷冲突、问题归属与陈旧 attempt 拒收）、`dsh.tasks.readArtifact`（按窗口读取已索引产物，非 UTF-8 回 base64）、`dsh.agents.get`（读回单个执行方的卡片与已发布能力修订）。报告里声明的产物按路径/大小/哈希逐条校验后入索引，校验不过的写 `artifact.refused` 事件而不是静默丢弃。
+- **MCP 工具名对齐方案**：`dsh_tasks_*` 更正为 `dsh_task_*`，并补齐 `dsh_task_preview`、`dsh_task_events`、`dsh_task_read_artifact`、`dsh_task_input`、`dsh_agents_get`（共 22 个工具；`resolve`、`decideApproval` 仍不进 MCP）。
+- **测试与文档口径校正**：`scripts.test` 全链 42 个测试文件、**366 例**；`docs/design.md` 的 §7 历史快照后补了「现行口径（2026-11-19）」注，注明 `methods 41 → 85`、`client 6 → 8`、`edge 24 项但本机 23/24`（第 21 项 `create without a cwd` 因宿主返回 `cwd: null` 失败，属既有行为，非本 PR 引入）。
 
 ### 行为变化
 

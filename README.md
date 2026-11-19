@@ -76,7 +76,7 @@ http://127.0.0.1:<port>/dsh-rpc   ->   DSH agent
 - **会自述**：`dsh_capabilities` 给出八节能力快照（运行时、权限档位、可调工具、MCP 前缀、会话、工作区、插件），做计划前不必猜本机有什么。
 - **不假装知道**：外层客户端有更短的超时上限时，本桥只如实说明并建议分段轮询，不让长任务看起来像失败。
 - **可托管外部 agent 任务（任务中心，`tasksEnabled` 默认关闭）**：内置 15 表 SQLite 账本、11 态状态机与能力卡/只读探测，统一调度 DSH 自身、Antigravity 与 Codex App Server，详情见 [任务中心手册](./docs/task-center.md)。
-- **关键行为有回归用例守着**：39 个测试文件共 358 例 + catalog smoke（本机实测 358/358 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
+- **关键行为有回归用例守着**：42 个测试文件共 366 例 + catalog smoke（本机实测 366/366 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
 
 ## 安装与更新
 
@@ -156,7 +156,7 @@ Cursor / Codex 用配置文件等价写法（Windows 下 JSON 里的反斜杠要
 
 走本地克隆那条路线时，把路径换成 `<path-to-your-clone>\bin\dsh-rpc-mcp.mjs`。本文余下示例写 `node bin/...`，等价于"当前目录位于包内时执行"。
 
-默认暴露 **11 个工具**（配置开启 `tasksEnabled: true` 时额外挂载 **6 个**任务中心工具 `dsh_tasks_{submit,list,get,cancel}` 与 `dsh_agents_{list,probe}`，共 **17 个**）：
+默认暴露 **11 个工具**（配置开启 `tasksEnabled: true` 时额外挂载 **8 个**任务工具 `dsh_task_{submit,list,get,cancel,preview,events,read_artifact,input}` 与 **3 个**代理工具 `dsh_agents_{list,probe,get}`，共 **22 个**）：
 
 | 工具 | 用途 |
 | --- | --- |
@@ -297,7 +297,7 @@ console.log(answer.text, answer.usage);
 | `dsh.tasks.decideApproval` | `taskId, attemptId, approvalId, decision: "allow"\|"deny", reason?` | `{approvalId, decision, status, stateVersion, operationId}` |
 | `dsh.agents.register` / `list` / `probe` | `card` / 过滤项 / `agentId, controls?` | 能力卡注册、查询与只读控制项探测 |
 
-（以上共 **31 个** JSON-RPC 方法；完整参数列表请用 `dsh.discover` 或 `dsh-rpc discover`。）
+（以上共 **34 个** JSON-RPC 方法；完整参数列表请用 `dsh.discover` 或 `dsh-rpc discover`。）
 
 几处容易踩的语义：
 
@@ -437,7 +437,7 @@ trace:
 
 ### 任务中心（Task centre）
 
-外部 agent（如 Antigravity、Codex App Server 或 DSH 自身会话）的异步任务不再靠人或聊天上下文转述状态：任务账本独立保存在本机 SQLite（`$DSH_HOME/storages/task-center/tasks.db`），每个执行方通过**能力卡（`capability-card@1`）与只读探测**把能干什么、不能干什么提前摆在台面上，不再是黑箱。默认关闭，打开后同时提供 CLI、JSON-RPC 与 6 个受开关门控的 MCP 工具（操作详见 [docs/task-center.md](./docs/task-center.md)，备份与回滚见 [docs/backup-restore-rollback.md](./docs/backup-restore-rollback.md)）。
+外部 agent（如 Antigravity、Codex App Server 或 DSH 自身会话）的异步任务不再靠人或聊天上下文转述状态：任务账本独立保存在本机 SQLite（`$DSH_HOME/storages/task-center/tasks.db`），每个执行方通过**能力卡（`capability-card@1`）与只读探测**把能干什么、不能干什么提前摆在台面上，不再是黑箱。默认关闭，打开后同时提供 CLI、JSON-RPC 与 11 个受开关门控的 MCP 工具（操作详见 [docs/task-center.md](./docs/task-center.md)，备份与回滚见 [docs/backup-restore-rollback.md](./docs/backup-restore-rollback.md)）。
 
 **熔断与配置开关**（全部写入 `cordis.patch.yml` 的 `config`）：
 
@@ -751,7 +751,7 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 39 个测试文件，共 358 例，另有 catalog smoke；无需运行中的 Harness
+npm test                       # 42 个测试文件，共 366 例，另有 catalog smoke；无需运行中的 Harness
 node test/host.test.mjs        # 1 例：真实 WebServer 集成（需先 npm ci）
 node test/e2e.mjs              # 14 例：端到端，打真实 Harness（--cwd 只接受绝对路径）
 node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harness
@@ -779,6 +779,9 @@ node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harnes
 | `agents-probe` | 1 | 只读探测超时与抛错隔离、`unknown` 记录 |
 | `tasks-preview` | 3 | 一次性预览绑定、摘要校验、TTL 过期、主体隔离，以及按能力卡形状给出 `degraded[]` |
 | `tasks-events-and-preview` | 4 | 任务事件游标、修订归属、探测过期、候选排除原因 |
+| `tasks-input` | 3 | 输入投递：幂等键、载荷冲突、问题归属、终态与陈旧 attempt 拒收 |
+| `tasks-artifact` | 3 | 报告内产物声明：路径/大小/哈希校验、拒绝不吞、窗口读取与 base64 回退 |
+| `agents-get` | 2 | 单个执行方的卡片与已发布能力修订（含空白 id 与不存在） |
 | `tasks-reconcile` | 4 | `needs_reconcile` 收口、未结副作用关闭、requeue 解锁 |
 | `adapters-base` | 4 | 七操作契约校验、六态上报校验、失败净化与白名单 reason |
 | `adapters-redact` | 5 | 凭据形态脱敏（Bearer/Basic/Cookie/userinfo/PAT/AK）、Cookie 逐对且不破坏 JSON、截断、深度上限与预算数字不误伤 |
@@ -788,7 +791,7 @@ node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harnes
 | `methods-dsh-ops` | 2 | `createDshAdapterOps` 容错、自动装配、`registerAgent` 与 `decideApproval` |
 | `tasks-dispatch` | 10 | `startTask`/`pump`/`drainEffects`、租约回收、`maxConcurrent` 门控与失败净化 |
 | `config-breakers` | 3 | 五项熔断开关默认值、边界校验与 `ConfigError` |
-| `index-wiring` | 2 | 关闭不建库、开启建库播种、外部适配器失败降级 |
+| `index-wiring` | 3 | 关闭不建库、开启建库播种、外部适配器失败降级 |
 | `mcp-tasks-tools` | 6 | 6 个任务 MCP 工具的开关显隐、禁用报错、`reconcile`/`decideApproval` 排除、参数校验与原型键拒绝 |
 | `cli-tasks` | 5 | `tasks` / `agents` 参数解析、`UsageError`（exit 2）、JSON-RPC 调用与混版提示 |
 | `cli-agents-approve` | 3 | `tasks approve` 标志校验、`dsh.tasks.decideApproval` 与 `agents` 子命令 |
@@ -816,7 +819,7 @@ node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harnes
 - **边界**检查协议层：batch、通知、id 形态、鉴权头、超大 body（应得真正的 413 而不是断连）、参数注入防护、超时钳制、并发 ask、`limit` 语义。
 - **端口漂移**（手工）：把 `endpoint.json` 的 url 改成死端口再跑 `dsh-rpc ping`，应得退出码 3 与含 `nothing is listening`、`pid`、`health --wait` 的可读报错。
 
-本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 39 个测试文件 **358/358** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.mjs` 输出 `methods: 31` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
+本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 42 个测试文件 **366/366** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.mjs` 输出 `methods: 34` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
 
 ## 许可证
 

@@ -337,7 +337,7 @@ const BASE_TOOLS = [
 
 const TASK_TOOLS = [
   {
-    name: "dsh_tasks_submit",
+    name: "dsh_task_submit",
     title: "Submit a task to the DSH task center",
     description:
       "Idempotently submit a task to the DSH task ledger. Pass preview_id (recommended) or workspace_id + agent_id + capability_revision_id.",
@@ -357,7 +357,7 @@ const TASK_TOOLS = [
     },
   },
   {
-    name: "dsh_tasks_list",
+    name: "dsh_task_list",
     title: "List DSH tasks",
     description: "List tasks in the DSH task center with optional status, workspace, or cursor filters.",
     inputSchema: {
@@ -373,7 +373,7 @@ const TASK_TOOLS = [
     },
   },
   {
-    name: "dsh_tasks_get",
+    name: "dsh_task_get",
     title: "Get DSH task detail",
     description: "Inspect a task's authoritative state, derived phase, active attempt, pending items, and artifacts.",
     inputSchema: {
@@ -387,7 +387,7 @@ const TASK_TOOLS = [
     },
   },
   {
-    name: "dsh_tasks_cancel",
+    name: "dsh_task_cancel",
     title: "Request cancellation of a DSH task",
     description:
       "Durably register a cancellation request on a task (transitions to cancel_requested, or needs_reconcile if executor lacks cancel support).",
@@ -428,6 +428,85 @@ const TASK_TOOLS = [
         agent_id: { type: "string", description: "Registered agent id." },
         controls: { type: "array", items: { type: "string" }, description: "Subset of controls to probe." },
       },
+      required: ["agent_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "dsh_task_preview",
+    title: "Preview a task before submitting it",
+    description:
+      "Resolve which agent would take a task, what capabilities it would use, and why others were excluded. Previews are one-shot and expire.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspace_id: { type: "string", description: "Workspace id the task would run in." },
+        agent_id: { type: "string", description: "Explicit agent id (skips selection)." },
+        capability_revision_id: { type: "string", description: "Capability revision id (required when agent_id is given)." },
+        principal_id: { type: "string", description: "Caller principal id (required)." },
+        input: { type: "object", description: "Structured task input payload." },
+        prompt: { type: "string", description: "Task prompt text (packaged into input if input is omitted)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "dsh_task_events",
+    title: "Read a DSH task's event log",
+    description: "Read a task's own timeline after a cursor. Task id plus seq is the dedupe key.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "Task id." },
+        after_seq: { type: "integer", minimum: 0, description: "Return events with seq greater than this (default 0)." },
+        limit: { type: "integer", minimum: 1, maximum: 500, description: "Max events (default 100)." },
+      },
+      required: ["task_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "dsh_task_read_artifact",
+    title: "Read an artifact of a DSH task",
+    description: "Read a recorded artifact by id, with an optional byte window. Text is returned as utf8, anything else as base64.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "Task id." },
+        artifact_id: { type: "string", description: "Artifact id from the task detail." },
+        offset: { type: "integer", minimum: 0, description: "Byte offset (default 0)." },
+        length: { type: "integer", minimum: 1, maximum: 1000000, description: "Bytes to return (default 20000)." },
+      },
+      required: ["task_id", "artifact_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "dsh_task_input",
+    title: "Answer a waiting DSH task",
+    description:
+      "Record a human answer for a task that is waiting for input. Delivery is asynchronous; poll dsh_task_get to see the task working again.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "Task id." },
+        text: { type: "string", description: "Answer text delivered to the runtime." },
+        idempotency_key: { type: "string", description: "Idempotency key (auto-generated if omitted)." },
+        attempt_id: { type: "string", description: "Active attempt id (optional guard)." },
+        question_id: { type: "string", description: "Open question id this answers (optional guard)." },
+        principal_id: { type: "string", description: "Caller principal id." },
+      },
+      required: ["task_id", "text"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "dsh_agents_get",
+    title: "Read one registered agent",
+    description: "Read a registered agent's card, published capability revisions and probe status.",
+    inputSchema: {
+      type: "object",
+      properties: { agent_id: { type: "string", description: "Registered agent id." } },
       required: ["agent_id"],
       additionalProperties: false,
     },
@@ -1180,7 +1259,129 @@ async function callTool(name, args, signal = undefined) {
         };
       }
 
-      case "dsh_tasks_submit": {
+      case "dsh_task_preview": {
+        const params = {};
+        if (typeof args.workspace_id === "string" && args.workspace_id.trim()) params.workspaceId = args.workspace_id.trim();
+        if (typeof args.agent_id === "string" && args.agent_id.trim()) params.agentId = args.agent_id.trim();
+        if (typeof args.capability_revision_id === "string" && args.capability_revision_id.trim()) {
+          params.capabilityRevisionId = args.capability_revision_id.trim();
+        }
+        if (typeof args.principal_id === "string" && args.principal_id.trim()) params.principalId = args.principal_id.trim();
+        if (args.input !== undefined) {
+          if (args.input === null || typeof args.input !== "object" || Array.isArray(args.input)) {
+            return formatToolError("`input` must be a plain JSON object", undefined, -32602);
+          }
+          params.input = args.input;
+        } else if (typeof args.prompt === "string" && args.prompt.trim()) {
+          params.input = { prompt: args.prompt.trim() };
+        }
+        const result = await call("dsh.tasks.preview", params);
+        return formatTaskSummary(result, maxResultChars);
+      }
+
+      case "dsh_task_events": {
+        const taskId = typeof args.task_id === "string" ? args.task_id.trim() : "";
+        if (!taskId) return formatToolError("`task_id` is required", undefined, -32602);
+        const params = { taskId };
+        if (args.after_seq !== undefined) {
+          if (!Number.isInteger(args.after_seq) || args.after_seq < 0) {
+            return formatToolError("`after_seq` must be a non-negative integer", undefined, -32602);
+          }
+          params.afterSeq = args.after_seq;
+        }
+        if (args.limit !== undefined) {
+          if (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 500) {
+            return formatToolError("`limit` must be an integer between 1 and 500", undefined, -32602);
+          }
+          params.limit = args.limit;
+        }
+        const result = await call("dsh.tasks.events", params);
+        const events = Array.isArray(result?.events) ? result.events : [];
+        const lines = events.map((e) => `#${e.seq} ${e.type}${e.attemptId ? " · " + e.attemptId : ""}`);
+        const content = capText(
+          [
+            { type: "text", text: `events (${events.length})` },
+            { type: "text", text: lines.length > 0 ? lines.join("\n") : "(no events)" },
+            { type: "text", text: `— hasMore=${Boolean(result?.hasMore)} nextAfterSeq=${result?.nextAfterSeq ?? 0}` },
+          ],
+          maxResultChars,
+        );
+        return { content, isError: false, structuredContent: result };
+      }
+
+      case "dsh_task_read_artifact": {
+        const taskId = typeof args.task_id === "string" ? args.task_id.trim() : "";
+        const artifactId = typeof args.artifact_id === "string" ? args.artifact_id.trim() : "";
+        if (!taskId) return formatToolError("`task_id` is required", undefined, -32602);
+        if (!artifactId) return formatToolError("`artifact_id` is required", undefined, -32602);
+        const params = { taskId, artifactId };
+        if (args.offset !== undefined) {
+          if (!Number.isInteger(args.offset) || args.offset < 0) {
+            return formatToolError("`offset` must be a non-negative integer", undefined, -32602);
+          }
+          params.offset = args.offset;
+        }
+        if (args.length !== undefined) {
+          if (!Number.isInteger(args.length) || args.length < 1 || args.length > 1_000_000) {
+            return formatToolError("`length` must be an integer between 1 and 1000000", undefined, -32602);
+          }
+          params.length = args.length;
+        }
+        const result = await call("dsh.tasks.readArtifact", params);
+        const body = result?.encoding === "base64" ? `(base64, ${result?.bytesRead ?? 0} bytes)` : String(result?.content ?? "");
+        const content = capText(
+          [
+            { type: "text", text: `artifact ${result?.artifactId} · ${result?.kind} · ${result?.sizeBytes} bytes` },
+            { type: "text", text: body },
+            {
+              type: "text",
+              text: `— offset=${result?.offset ?? 0} bytesRead=${result?.bytesRead ?? 0} truncated=${Boolean(result?.truncated)}`,
+            },
+          ],
+          maxResultChars,
+        );
+        return { content, isError: false, structuredContent: result };
+      }
+
+      case "dsh_task_input": {
+        const taskId = typeof args.task_id === "string" ? args.task_id.trim() : "";
+        const text = typeof args.text === "string" ? args.text.trim() : "";
+        if (!taskId) return formatToolError("`task_id` is required", undefined, -32602);
+        if (!text) return formatToolError("`text` is required", undefined, -32602);
+        const params = {
+          taskId,
+          text,
+          idempotencyKey:
+            typeof args.idempotency_key === "string" && args.idempotency_key.trim()
+              ? args.idempotency_key.trim()
+              : `mcp_input_${randomUUID()}`,
+        };
+        if (typeof args.attempt_id === "string" && args.attempt_id.trim()) params.attemptId = args.attempt_id.trim();
+        if (typeof args.question_id === "string" && args.question_id.trim()) params.questionId = args.question_id.trim();
+        if (typeof args.principal_id === "string" && args.principal_id.trim()) params.principalId = args.principal_id.trim();
+        const result = await call("dsh.tasks.input", params);
+        return formatTaskSummary(
+          { taskId: result?.taskId, status: "input queued", phase: "person/delivery", ...result },
+          maxResultChars,
+        );
+      }
+
+      case "dsh_agents_get": {
+        const agentId = typeof args.agent_id === "string" ? args.agent_id.trim() : "";
+        if (!agentId) return formatToolError("`agent_id` is required", undefined, -32602);
+        const result = await call("dsh.agents.get", { agentId });
+        const caps = Array.isArray(result?.capabilityRevisions) ? result.capabilityRevisions.length : 0;
+        const content = capText(
+          [
+            { type: "text", text: `agent ${result?.agentId} · ${result?.adapterKind} · probeStatus=${result?.probeStatus ?? "unknown"}` },
+            { type: "text", text: `— capability revisions: ${caps}` },
+          ],
+          maxResultChars,
+        );
+        return { content, isError: false, structuredContent: result };
+      }
+
+      case "dsh_task_submit": {
         if (args.input !== undefined) {
           if (args.input === null || typeof args.input !== "object" || Array.isArray(args.input)) {
             return formatToolError("`input` must be a plain JSON object", undefined, -32602);
@@ -1208,7 +1409,7 @@ async function callTool(name, args, signal = undefined) {
         return formatTaskSummary(result, maxResultChars);
       }
 
-      case "dsh_tasks_list": {
+      case "dsh_task_list": {
         const params = {};
         if (typeof args.status === "string" && args.status.trim()) params.status = args.status.trim();
         if (typeof args.workspace_id === "string" && args.workspace_id.trim()) params.workspaceId = args.workspace_id.trim();
@@ -1240,7 +1441,7 @@ async function callTool(name, args, signal = undefined) {
         };
       }
 
-      case "dsh_tasks_get": {
+      case "dsh_task_get": {
         const taskId = typeof args.task_id === "string" ? args.task_id.trim() : "";
         if (!taskId) return formatToolError("`task_id` is required", undefined, -32602);
         const params = { taskId };
@@ -1249,7 +1450,7 @@ async function callTool(name, args, signal = undefined) {
         return formatTaskSummary(result, maxResultChars);
       }
 
-      case "dsh_tasks_cancel": {
+      case "dsh_task_cancel": {
         const taskId = typeof args.task_id === "string" ? args.task_id.trim() : "";
         if (!taskId) return formatToolError("`task_id` is required", undefined, -32602);
         if (!Number.isInteger(args.expected_state_version) || args.expected_state_version < 1) {
