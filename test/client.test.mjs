@@ -19,7 +19,7 @@ process.env.DSH_RPC_TOKEN = "client-test-token-0123456789";
 delete process.env.DSH_RPC_URL;
 
 const { rpcCall } = await import("../lib/client.mjs");
-const { transportCode } = await import("../lib/transport.mjs");
+const { isFetchBlockedPort, transportCode } = await import("../lib/transport.mjs");
 
 // These shapes differ per platform, which is exactly why the extraction is its
 // own module: a socket is not needed to pin the behaviour down.
@@ -60,6 +60,44 @@ test("the transport code is recovered from the undici cause chain", () => {
   assert.equal(transportCode(new Error("plain failure")), undefined);
 });
 
+test("a blocked port is named instead of left as an undefined code", async () => {
+  // fetch refuses the ports the standard calls "bad" (5060, 6667, ...) before it
+  // opens a socket, so no errno survives anywhere in the chain — only a cause
+  // whose message is `bad port`. That is not hypothetical here: the bridge does
+  // not choose its port, the Host's Web server does, and a Host that lands on
+  // one of these would leave every out-of-process caller with "fetch failed".
+  assert.equal(transportCode(new TypeError("fetch failed", { cause: new Error("bad port") })), "EBADPORT");
+  assert.equal(isFetchBlockedPort(5060), true);
+  assert.equal(isFetchBlockedPort("6667"), true);
+  assert.equal(isFetchBlockedPort(12345), false);
+  assert.equal(isFetchBlockedPort(null), false);
+
+  let hits = 0;
+  const live = await listen((_request, response) => {
+    hits += 1;
+    response.end("{}");
+  });
+  publishEndpoint("http://127.0.0.1:5060/dsh-rpc");
+
+  try {
+    const pending = rpcCall("dsh.ping", {}, { timeoutMs: 8000 });
+    // A refused handshake would be retried against this live endpoint. A blocked
+    // port must not be: nothing was ever sent, and reporting it as "nothing is
+    // listening" would send the reader looking for a restart that will not help.
+    publishEndpoint(live.url);
+    await assert.rejects(pending, (error) => {
+      assert.equal(error.code, "EBADPORT");
+      assert.match(error.message, /bad port/);
+      assert.match(error.message, /--url/);
+      assert.doesNotMatch(error.message, /nothing is listening/);
+      return true;
+    });
+    assert.equal(hits, 0, "a blocked port is not the stale-endpoint race, so nothing is retried");
+  } finally {
+    await close(live.server);
+  }
+});
+
 const endpointFile = join(home, "dsh-rpc", "endpoint.json");
 
 function publishEndpoint(url, extra = {}) {
@@ -85,11 +123,18 @@ function publishEndpoint(url, extra = {}) {
 }
 
 async function listen(handler, { onConnection } = {}) {
-  const server = createServer(handler);
-  if (onConnection) server.on("connection", onConnection);
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address();
-  return { server, url: `http://127.0.0.1:${port}/dsh-rpc` };
+  // fetch refuses the standard's "bad ports" (5060, 6667, ...) before it opens a
+  // socket. The OS can hand one out on port 0, and then a test about the
+  // transport would be measuring undici's blocklist instead. Re-roll.
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const server = createServer(handler);
+    if (onConnection) server.on("connection", onConnection);
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address();
+    if (!isFetchBlockedPort(port)) return { server, url: `http://127.0.0.1:${port}/dsh-rpc` };
+    await close(server);
+  }
+  throw new Error("could not get a port outside the fetch blocked-port list");
 }
 
 async function close(server) {
