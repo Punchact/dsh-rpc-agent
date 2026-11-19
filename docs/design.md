@@ -863,7 +863,7 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 
 **为什么危险**：三者都不会红。①让“装好了但跑不起来”看起来像“跑完了”；②③让非法输入看起来像合法输入，把校验层的存在意义抹掉——而这两层正是任务账本与 MCP 面上唯一的入口闸门。
 
-**决定**：①入口判定两侧都过 `realpathSync`，把 argv 与模块 URL 放到同一坐标系；②参数只做**形状**判断，不做“合法值收窄”——值交给下游校验器原样拒绝；③MCP 的 `arguments` 不是对象就直接 `-32602`，不再猜调用方想传什么。
+**决定**：①入口判定两侧都过 `realpathSync`，把 argv 与模块 URL 放到同一坐标系；②参数只做**形状**判断，不做“合法值收窄”——值交给下游校验器原样拒绝；③MCP 的 `arguments` 不是对象就直接 `-32602`，不再猜调用方想传什么。；④复查时又抓到同类的第四处：`dsh.tasks.preview` 收到非字符串 `requestDigest`（例如数字）会静默改用计算值，等于把调用方“我预览的就是这个请求”的承诺丢掉，一并改成拒绝（回归在 `test/tasks-events-and-preview.test.mjs`）。
 
 **怎么钉住**：`test/bin-entry.test.mjs` 用目录 junction/symlink 跑真实的两个 bin（`--help` 要有输出、`initialize` 要有应答）；`test/tasks-preview.test.mjs` 断言数字摘要被 `VALIDATION_FAILED` 拒绝且不留下任务；`test/cli-mcp-regressions.test.mjs` 断言 `arguments: []` 返回 `-32602`。三条都做过负向控制：把 dist 里的修复改回旧写法，三条全转红——否则“测试通过”只证明测试会跑。
 
