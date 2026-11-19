@@ -186,7 +186,7 @@ Host 抛 `RemoteError(code, message, details)`（`isDSHRemoteError === true`）�
 
 以上数字均为 2026-11-05 在本机实跑，命令见 README §10。
 
-> **现行口径（2026-11-19，0.9.0）**：本表是 2026-11-05 的历史快照，不改写。当前的数量以 README「开发与验证」为准——`npm test` 固定顺序跑 37 个 `*.test.mjs` 共 349 例，外加 `catalog.smoke.mjs`（30 个 RPC 方法）。表中三行随版本长大：`methods` 41 → 85 例，`client` 6 → 8 例；`edge` 仍是 24 项，但**本机 23/24**——第 21 项「create without a cwd reports the directory the Host attached」要求宿主替无 `cwd` 的请求补上工作目录，本机 0.8.1 宿主返回 `null`，属既有环境差异；**CI 不跑 `test:edge`（`.github/workflows/test.yml` 只有 `npm test` / `test:host` / `check:package`），故“CI 下通过”没有证据**，这一项目前只有本机 23/24 的实测。
+> **现行口径（2026-11-19，0.9.0）**：本表是 2026-11-05 的历史快照，不改写。当前的数量以 README「开发与验证」为准——`npm test` 固定顺序跑 38 个 `*.test.mjs` 共 354 例，外加 `catalog.smoke.mjs`（30 个 RPC 方法）。表中三行随版本长大：`methods` 41 → 85 例，`client` 6 → 8 例；`edge` 仍是 24 项，但**本机 23/24**——第 21 项「create without a cwd reports the directory the Host attached」要求宿主替无 `cwd` 的请求补上工作目录，本机 0.8.1 宿主返回 `null`，属既有环境差异；**CI 不跑 `test:edge`（`.github/workflows/test.yml` 只有 `npm test` / `test:host` / `check:package`），故“CI 下通过”没有证据**，这一项目前只有本机 23/24 的实测。
 
 ## 8. 后续可做
 
@@ -634,3 +634,11 @@ compression: gzip
 3. **签收也要幂等**。`(principalId, idempotencyKey)` 去重，重放比较「意图」（处置结论 + 证据引用），同键异载荷抛 `STATE_CONFLICT`——和取消走同一套规则，避免「重试一次就换了个结论」。
 
 **如实记**：这条是冒烟补出来的，不是设计时就想清楚的。方案 §6.1 写了这个方法，实现漏了，五路评审（t1/t2/t3/t4/t5）也没抓到——因为所有验证都停在 engine 层，没有人从外部把完整流程走一遍。
+
+## 39. 决策 0.9.0-l：能力修订由注册发布，且不可变
+
+1. **发布的唯一入口是注册**：`dsh.agents.register` 不只是登记实例，它把卡片里声明的每个能力发布成一条 `capability_revisions` 行。理由：预览与提交都必须引用修订 id，若没有发布入口，干净主机上的任务中心连一个任务都发不出来——这正是 0.9.0 首次真机冒烟发现的第一个「能启动但走不通」的洞。
+2. **修订 id 由卡片哈希派生**：`cap_<sha256(cardHash|capability|version)[:24]>`。同一张卡重复注册得到同一个 id（`INSERT OR IGNORE` 幂等），卡片任何变化都产生新 id 并保留旧行——作业引用历史版本，不因注册而漂移。
+3. **写类能力必须 `required`**：`sideEffectKind: "write"` 且显式写 `cancelPolicy: "optional"` 直接拒斥（不是静默改写），与 §4.2 规则 4 一致；只读能力的缺省是 `optional`，允许无取消能力的执行方入池并走 `degraded[]`。
+4. **可发现性**：`dsh.agents.list` 回显每个实例的 `capabilityRevisions`（能力 id、版本、修订 id），调用方无需读库就能知道能提交什么。
+5. **如实记录**：这条是冒烟补出来的——五路评审与 349 例单测都没抓到，因为它们的断言起点总是「已经有一个修订 id」。验证流程缺的从来不是覆盖度，而是「从零开始」。
