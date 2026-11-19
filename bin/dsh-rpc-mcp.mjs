@@ -1501,13 +1501,21 @@ async function callTool(name, args, signal = undefined) {
   } catch (error) {
     // `code` is the JSON-RPC code the bridge answered with; toolError turns it
     // into the concrete next step instead of leaving the caller to guess.
-    // Never surface raw adapter/transport/internal exception text to MCP callers.
+    // Client-side transport failures (`EBADPORT`, `ECONNREFUSED`, `ECONNRESET`,
+    // etc.) are passed through verbatim so diagnostics survive; only adapter and
+    // server/internal failures are sanitized.
+    const isTransport =
+      error?.transport === true ||
+      (/^(?:E[A-Z0-9]+|UND_ERR_[A-Z0-9_]+)$/.test(String(error?.code ?? "")) &&
+        error?.taskCode !== "ADAPTER_UNAVAILABLE" &&
+        error?.data?.kind !== "ADAPTER_UNAVAILABLE");
     const isAdapterOrInternal =
-      error?.data?.kind === "ADAPTER_UNAVAILABLE" ||
-      error?.taskCode === "ADAPTER_UNAVAILABLE" ||
-      !Number.isInteger(error?.code) ||
-      error.code === -32000 ||
-      error.code === -32603;
+      !isTransport &&
+      (error?.data?.kind === "ADAPTER_UNAVAILABLE" ||
+        error?.taskCode === "ADAPTER_UNAVAILABLE" ||
+        !Number.isInteger(error?.code) ||
+        error.code === -32000 ||
+        error.code === -32603);
     if (TASK_TOOL_NAMES.has(name) && isAdapterOrInternal) {
       const safe = sanitizeAdapterFailure(error);
       return formatToolError(
@@ -1518,7 +1526,11 @@ async function callTool(name, args, signal = undefined) {
         error?.code,
       );
     }
-    return formatToolError(error instanceof Error ? error.message : String(error), error?.data, error?.code);
+    const errorData =
+      isTransport && typeof error?.code === "string" && error.code.length > 0
+        ? { ...(error?.data && typeof error.data === "object" ? error.data : {}), code: error.code }
+        : error?.data;
+    return formatToolError(error instanceof Error ? error.message : String(error), errorData, error?.code);
   }
 }
 

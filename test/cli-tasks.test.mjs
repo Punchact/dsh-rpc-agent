@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { UsageError, main, mixedVersionHint, parseArgv } from "../bin/dsh-rpc.mjs";
+import {
+  UsageError,
+  failureExitCode,
+  formatCliError,
+  main,
+  mixedVersionHint,
+  parseArgv,
+  probeHealth,
+} from "../bin/dsh-rpc.mjs";
 const NEXT_HINT =
   "  next: this Harness plugin predates the task centre (0.9.0). Upgrade the plugin inside the DSH profile — the bridge and the plugin ship together.";
 
@@ -213,4 +221,37 @@ test("CLI tasks get non-JSON output prints resultValid, degraded, and pending at
       assert.match(out, /result: \{"draft":"ok"\} \(unvalidated: failed schema validation\)/);
     },
   );
+});
+
+test("CLI probeHealth and failureExitCode distinguish EBADPORT without waiting out --wait or blaming a stopped Harness", async () => {
+  assert.equal(failureExitCode({ code: "EBADPORT" }), 3);
+  const badPortFmt = formatCliError({
+    code: "EBADPORT",
+    message: "dsh-rpc dsh.ping: fetch failed (bad port) — fetch refuses this port",
+  });
+  assert.equal(badPortFmt.exitCode, 3);
+  assert.doesNotMatch(badPortFmt.line, /is it running\?/);
+  assert.match(badPortFmt.line, /bad port/);
+
+  const refusedFmt = formatCliError({ code: "ECONNREFUSED", message: "refused" });
+  assert.equal(refusedFmt.exitCode, 3);
+  assert.match(refusedFmt.line, /is it running\?/);
+
+  const prevErrWrite = process.stderr.write;
+  let stderr = "";
+  process.stderr.write = (chunk) => {
+    stderr += String(chunk);
+    return true;
+  };
+  const startedAt = Date.now();
+  try {
+    const exitCode = await probeHealth("http://127.0.0.1:5060/dsh-rpc", 5_000);
+    const elapsed = Date.now() - startedAt;
+    assert.equal(exitCode, 3);
+    assert.ok(elapsed < 1_000, `EBADPORT must fail fast instead of polling --wait, took ${elapsed}ms`);
+    assert.match(stderr, /bad port/);
+    assert.match(stderr, /--url/);
+  } finally {
+    process.stderr.write = prevErrWrite;
+  }
 });

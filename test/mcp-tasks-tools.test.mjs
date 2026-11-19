@@ -362,3 +362,50 @@ test("MCP dsh_task_preview and dsh_task_list surface preview headers, degraded, 
     },
   );
 });
+
+test("MCP task tools pass client transport errors (EBADPORT, ECONNREFUSED) through verbatim instead of adapter-sanitizing them", async () => {
+  for (const [cause, expectPattern] of [
+    [new Error("bad port"), /EBADPORT/],
+    [Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:9"), { code: "ECONNREFUSED" }), /ECONNREFUSED/],
+  ]) {
+    resetBridgeDefaults();
+    const prevFetch = globalThis.fetch;
+    const prevUrl = process.env.DSH_RPC_URL;
+    const prevToken = process.env.DSH_RPC_TOKEN;
+    process.env.DSH_RPC_URL = "http://127.0.0.1:1/dsh-rpc";
+    process.env.DSH_RPC_TOKEN = "mcp-test-token-0123456789abcdef";
+
+    globalThis.fetch = async (_url, init) => {
+      const req = JSON.parse(init.body);
+      if (req.method === "dsh.discover") {
+        return {
+          ok: true,
+          status: 200,
+          async text() {
+            return JSON.stringify({
+              jsonrpc: "2.0",
+              id: req.id,
+              result: { config: { tasksEnabled: true }, methods: [{ name: "dsh.tasks.list" }] },
+            });
+          },
+        };
+      }
+      throw new TypeError("fetch failed", { cause });
+    };
+
+    try {
+      const res = await callTool("dsh_task_list", {});
+      assert.equal(res.isError, true);
+      const text = res.content.map((p) => p.text).join("\n");
+      assert.match(text, expectPattern);
+      assert.doesNotMatch(text, /request rejected by adapter|executor is currently unavailable/);
+    } finally {
+      globalThis.fetch = prevFetch;
+      if (prevUrl === undefined) delete process.env.DSH_RPC_URL;
+      else process.env.DSH_RPC_URL = prevUrl;
+      if (prevToken === undefined) delete process.env.DSH_RPC_TOKEN;
+      else process.env.DSH_RPC_TOKEN = prevToken;
+      resetBridgeDefaults();
+    }
+  }
+});

@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 
 import { rpcCall, rpcStream, waitForTurn, WAIT_SLICE_MS } from "../lib/client.mjs";
 import { formatTaskDetailLines } from "../lib/mcp-format.mjs";
+import { transportCode } from "../lib/transport.mjs";
 import { ADAPTER_FAILURE_MESSAGES, sanitizeAdapterFailure } from "../lib/adapters/base.mjs";
 import { endpointPath, readEndpoint, stateDir, tokenPath } from "../lib/auth.mjs";
 import { describeTrace, isTraceLevel, normalizeTraceLevel } from "../lib/trace-format.mjs";
@@ -359,13 +360,32 @@ function flushStdio() {
   return Promise.all([drain(process.stdout), drain(process.stderr)]);
 }
 
-const CONNECTION_FAILURES = new Set(["ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "EHOSTUNREACH", "ETIMEDOUT"]);
+const CONNECTION_FAILURES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "EHOSTUNREACH",
+  "ETIMEDOUT",
+  "EBADPORT",
+]);
 
 function failureExitCode(error) {
   const code = error?.code ?? error?.cause?.code;
   if (CONNECTION_FAILURES.has(code)) return 3;
   if (error?.name === "TimeoutError") return 3;
   return 1;
+}
+
+function formatCliError(error) {
+  const errCode = error?.code ?? error?.cause?.code;
+  const exitCode = failureExitCode(error);
+  const line =
+    errCode === "EBADPORT"
+      ? `dsh-rpc: ${error?.message ?? error}`
+      : exitCode === 3
+        ? `dsh-rpc: cannot reach the Harness (is it running?) — ${error?.message ?? error}`
+        : `dsh-rpc: ${error?.message ?? error}`;
+  return { exitCode, line };
 }
 
 const HEALTH_POLL_MS = 250;
@@ -404,7 +424,18 @@ async function probeHealth(explicitUrl, budgetMs) {
         }
         failure = { kind: "http", message: `HTTP ${response.status}` };
       } catch (error) {
-        failure = { kind: "transport", message: error.message };
+        const code = transportCode(error);
+        if (code === "EBADPORT") {
+          failure = {
+            kind: "transport",
+            code: "EBADPORT",
+            message:
+              `${error?.message ?? "fetch failed"} (bad port) — the Harness web port is refused by fetch; ` +
+              "start the Harness on another port, or pass --url",
+          };
+          break;
+        }
+        failure = { kind: "transport", code, message: error?.message ?? String(error) };
       }
     }
     if (Date.now() >= deadline) break;
@@ -1065,12 +1096,8 @@ if (IS_MAIN) {
         await flushStdio();
         process.exit(2);
       }
-      const code = failureExitCode(error);
-      note(
-        code === 3
-          ? `dsh-rpc: cannot reach the Harness (is it running?) — ${error?.message ?? error}`
-          : `dsh-rpc: ${error?.message ?? error}`,
-      );
+      const { exitCode: code, line } = formatCliError(error);
+      note(line);
       if (error?.data) note(`  ${JSON.stringify(error.data)}`);
       const hint = mixedVersionHint(error?.message);
       if (hint) note(hint);
@@ -1079,4 +1106,14 @@ if (IS_MAIN) {
     });
 }
 
-export { UsageError, main, mixedVersionHint, parseArgv, runAgentsCommand, runTasksCommand };
+export {
+  UsageError,
+  failureExitCode,
+  formatCliError,
+  main,
+  mixedVersionHint,
+  parseArgv,
+  probeHealth,
+  runAgentsCommand,
+  runTasksCommand,
+};
