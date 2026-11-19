@@ -714,3 +714,11 @@ compression: gzip
 - **为什么现在就写成这样**：这套任务中心的第一批使用方是本机同一个人的若干 agent（Codex 出规划、DSH 执行、Antigravity 兜底）。它们同属一个 OS 用户、共用同一个 loopback token，进程边界之上没有可信的身份来源；在这一层做「伪隔离」只会增加参数与分支，不增加任何实际抵抗力。
 - **真正的边界在哪**：token 文件（`$DSH_HOME/dsh-rpc/token` 或 `DSH_RPC_TOKEN`）加本机文件系统权限。谁能读到 token，谁就能调全部方法——这一点在 README 的「已知边界」里已经对等披露，包括子会话能读到 token 的实测结论。
 - **将来要真隔离，得先有身份来源**：把 `principalId` 变成每个方法都强制、且由传输层注入（不能由调用方自选）的参数，再配一个主体→token 的映射；在那之前，A06 只能算「未实现」，不能算「已通过」。这条已写进 README 的「已知边界」，避免使用者以为它不是同一个人的 agent 就天然被隔离。
+
+## 47. 决策 0.9.1-a：没有人按按钮的时候，任务也要往前走
+
+- **现象**：A08 真机探针（外部 agent 只经 MCP 提交）跑出来的结果是：握手通过、工具面 11 个齐全、预览与提交都成功，然后任务在 `queued v1` 上停满 45 秒一动不动，最后只能 `dsh_task_cancel`。原因不是权限，也不是适配器：MCP 面按方案只给 8 个 `dsh_task_*` + 3 个 `dsh_agents_*`，`dispatch` 与 `pump` 都在机器侧；而宿主原来只有 5 秒一次的 `drainEffects`（出箱清理），并不派发、也不推进。
+- **取舍一：给 MCP 加 `dsh_task_pump`？** 不做。推进是「机器该干的活」，把它变成调用方的义务，等于要求每个外部 agent 自己写轮询循环才能让任务跑起来；而且读接口带副作用会让 `get` 的语义变脏。工具面维持方案里的 8 + 3。
+- **取舍二：宿主自动派发会不会抢人？** 派的都是调用方通过 `submit` 明确交出来的任务，不是替人做决定；真正需要人拍板的两个动作（`resolve` 签收、`decideApproval` 审批）仍然只在 RPC/CLI 面，不进自动环。不想要自动的可以 `tasksAutopilot: false` 退回纯手工。
+- **实现边界**：单遍有 `tasksAutopilotMaxStart` / `tasksAutopilotMaxPump` 与 pump 的 `maxSteps`/`deadlineMs` 三重上限；上一遍没跑完时本遍直接 `skipped`，避免慢适配器把定时器叠成风暴；单个任务失败只记日志并继续其余任务，失败会以 `needs_reconcile` 之类的账本状态落地，而不是被吞掉。
+- **怎么钉住**：`lib/tasks/autopilot.mjs` 不碰数据库、只依赖 `engine.list` 与 `dispatcher.startTask/pump`，因此 `test/tasks-autopilot.test.mjs` 用假引擎/假派发器覆盖了五种情形——覆盖所有活跃状态、失败不中断、慢遍不叠加、空账本不动作、破库只报不抛。

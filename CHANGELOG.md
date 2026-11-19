@@ -14,6 +14,7 @@
   - 新增 13 个任务 RPC 与 4 个代理 RPC（合计 17 个，方法总数 17 → 34）：`dsh.tasks.{preview,submit,get,list,events,cancel,dispatch,pump,reconcile,decideApproval,input,readArtifact,resolve}`（`resolve` 是唯一的人工签收入口，只在 RPC/CLI 面，不进 MCP）；新增 4 个代理 RPC：`dsh.agents.{register,list,probe,get}`。
   - 新增 11 个受开关门控的 MCP 工具：`dsh_task_{submit,list,get,cancel,preview,events,read_artifact,input}` 与 `dsh_agents_{list,probe,get}`（有意排除 `resolve`、`reconcile` 与 `decideApproval`，人工核对、签收与审批留在 RPC/CLI 面）。
   - 新增 CLI 子命令：`dsh-rpc tasks <preview|submit|list|get|cancel|dispatch|pump|reconcile|approve>` 与 `dsh-rpc agents <register|list|probe>`。
+- **机器侧自动推进（`tasksAutopilot`，默认 `true`）**：宿主每隔 `tasksAutopilotIntervalMs`（默认 5s）跑一遍有界推进环——先启动到期 `queued` 任务（`tasksAutopilotMaxStart`，默认 2），再推进活跃任务（`tasksAutopilotMaxPump`，默认 4），单遍有步数与截止时间上限，上一遍未完成时跳过。这是外部 agent 经 MCP 提交后任务能自己往前走的唯一机制：MCP 面刻意不暴露 `dispatch`/`pump`，没有这一环时任务会永远停在 `queued`（A08 真机实测）。
 - **三个执行方适配器**（统一实现七操作契约 `probe`/`start`/`inspect`/`sendInput`/`cancel`/`events`/`decideApproval`）：
   - DSH 自身基准适配器（`lib/adapters/dsh.mjs` + `createDshAdapterOps`）：注入 7 个会话操作包装，`tasksEnabled: true` 时自动装配；`probe` 只读、`cancel.stopped` 严格以底层确认为准、未校验结果保持 `resultValid: false`。
   - Antigravity 适配器（`lib/adapters/antigravity.mjs`）：通过 `ForceStopCascadeTree` 执行会话树级取消，传入 `projectEnvConfig.projectId` 入项目与 `MODEL_PLACEHOLDER_*` 选模型，不把持久化 locator 写入密钥/CSRF。
@@ -25,7 +26,7 @@
 
 ### 修复
 
-- `scripts.test` 新增并接入 20 个任务中心与 CLI/适配器测试套件（全链 43 个测试文件、375 例，本机 375/375 通过；CI 结果见 PR #30），并更新 `catalog.smoke.mjs` 校验 34 个 RPC 方法。
+- `scripts.test` 新增并接入 20 个任务中心与 CLI/适配器测试套件（全链 44 个测试文件、381 例，本机 375/375 通过；CI 结果见 PR #30），并更新 `catalog.smoke.mjs` 校验 34 个 RPC 方法。
 - `dispatch.mjs` 修复了租约到期回收与原子 `maxConcurrent` 门控竞态，防止同一写事务之外并发超发或将任务卡死在 `dispatching` / `in_flight`。
 - **取消确认后立刻收口**：适配器回报 `confirmedStopped: true`（DSH 会话真停了、Antigravity 回执里含该 cascadeId）时，同一次出箱排水内把任务从 `cancel_requested` 推进到 `cancelled` 并写 `cancel.confirmed`；此前只把 effect 标完成，任务会悬在 `cancel_requested` 等一个已停会话永远不会发出的事件。Codex 的 `turn/interrupt` 只算受理，故不设该标志。
 - **幂等键不再掩盖改过的请求**：`cancel` / `resolve` 的重放分支会比较请求意图（取消原因；处置结论 + 证据引用），同键异载荷抛 `STATE_CONFLICT`（`reason: "idempotency_payload_mismatch"`）。`expectedStateVersion` 属并发护栏、重试时本就会变，不参与比较。
@@ -52,7 +53,7 @@
 - **人工问答与产物读取接上**：新增 `dsh.tasks.input`（执行中回答，走 effects 队列投递，带幂等键、载荷冲突、问题归属与陈旧 attempt 拒收）、`dsh.tasks.readArtifact`（按窗口读取已索引产物，非 UTF-8 回 base64）、`dsh.agents.get`（读回单个执行方的卡片与已发布能力修订）。报告里声明的产物按路径/大小/哈希逐条校验后入索引，校验不过的写 `artifact.refused` 事件而不是静默丢弃。
 - **MCP 工具名对齐方案**：`dsh_tasks_*` 更正为 `dsh_task_*`，并补齐 `dsh_task_preview`、`dsh_task_events`、`dsh_task_read_artifact`、`dsh_task_input`、`dsh_agents_get`（共 22 个工具；`resolve`、`decideApproval` 仍不进 MCP）。
 - **两道对账门禁（0.9.1 开发期补）**：0.9.0 这几轮里，同一批数字（RPC 方法数、MCP 工具数、测试文件数、用例数）在 README / README.en / CHANGELOG 三处被一次性补丁脚本改过七次；方案与实现之间的接口面也没有任何机器核对，`dsh.tasks.resolve` 就是「方案写了、实现漏了」拖到真机才暴露。现在两件事都变成门禁：①`npm run check:docs` 现算能算的——方法数取 `lib/methods.mjs` 的目录、MCP 工具数取 `bin/dsh-rpc-mcp.mjs` 的 `BASE_TOOLS`/`TASK_TOOLS` 两张表、测试文件数取 `package.json` 里 `test` 链上的 `node test/*.test.mjs`；只有用例总数要整跑才知道，记进 `docs/counts.json` 当唯一来源。锚点规则覆盖中英两份 README 与 CHANGELOG 最新一节的数字，锚点消失也判失败（说明那句话被改写了，规则该跟着更新）。`npm run docs:counts` 幂等刷写：演练时把 375 改成 374，`check:docs` 精确报出 `README.md:79`，写回后与改动前的 SHA256 完全一致；把 `counts.json` 抬到 376 能一次刷中 9 处，恢复后同样字节一致。②`npm run check:surface` 拿 `docs/api-surface.json`（方案接口面快照，含方案文档 sha256）对代码，两个方向都查：方案要求的 14 个 RPC / 22 个 MCP 工具 / 5 条 CLI 必须真实存在；任务族与代理族的每个 RPC、MCP 工具、CLI 子命令必须要么在方案里、要么在快照的 `implementationOnly` 里如实记着（`dispatch`/`pump`/`reconcile`、`agents.register` 与方案只写了主干的 CLI 都在那里）。负向演练同时塞「一个方案要求但代码没有的 RPC」与「一个从声明里删掉的既有 RPC」，两条都被抓出。两道门禁都接进 `npm test`、CI 与 `prepublishOnly`；快照进仓库、方案文档不进，CI 只读快照即可对账。
-- **测试与文档口径校正**：`scripts.test` 全链 43 个测试文件、**375 例**；`docs/design.md` 的 §7 历史快照后补了「现行口径（2026-11-19）」注，注明 `methods 41 → 85`、`client 6 → 8`、`edge 24 项但本机 23/24`（第 21 项 `create without a cwd` 因宿主返回 `cwd: null` 失败，属既有行为，非本次引入）。
+- **测试与文档口径校正**：`scripts.test` 全链 44 个测试文件、**381 例**；`docs/design.md` 的 §7 历史快照后补了「现行口径（2026-11-19）」注，注明 `methods 41 → 85`、`client 6 → 8`、`edge 24 项但本机 23/24`（第 21 项 `create without a cwd` 因宿主返回 `cwd: null` 失败，属既有行为，非本次引入）。
 
 ### 行为变化
 

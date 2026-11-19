@@ -67,12 +67,12 @@ node bin/dsh-rpc.mjs agents list --verified-only --json
 
 ---
 
-## 3. 跑一个任务（`preview` → `submit` → `dispatch`）
+## 3. 跑一个任务（`preview` → `submit` → `dispatch`，派发通常由机器侧代劳）
 
 1. **生成一次性预览（`preview`）**：预览把请求摘要、工作区、目标执行方与能力修订（`capabilityRevisionId`，如基准 `review.diff@1`）绑定，默认 TTL 为 `tasksPreviewTtlMs`（`300000` ms）。
    - 查看 `degraded[]`：`dsh.tasks.preview` 与 `dsh.tasks.get` 会把该执行方声明为不支持（`"unsupported"`）的控制项列成 `{control, effect}`，`effect` 写明语义后果（例如 `cancel` 缺失时取消请求只会转 `needs_reconcile`）。要换执行方就趁现在。
 2. **提交（`submit`）**：携带 `previewId` 与唯一 `idempotencyKey` 落盘，生成 `queued` 任务与 `stateVersion = 1`。
-3. **派发（`dispatch`）**：先受 `tasksMaxConcurrent` 原子并发门控检查，再将状态推至 `dispatching` 并调用 `adapter.start`；启动成功写入 `running` 与无密钥 `locator`，若启动抛错则立即转入 `needs_reconcile`（不会卡在 `dispatching`）。
+3. **派发（`dispatch`）**：开启 `tasksAutopilot`（默认 `true`）时这一步由宿主自己完成，下面的命令是手工兜底（自查、复现、或把自动环关掉之后用）。派发先受 `tasksMaxConcurrent` 原子并发门控检查，再将状态推至 `dispatching` 并调用 `adapter.start`；启动成功写入 `running` 与无密钥 `locator`，若启动抛错则立即转入 `needs_reconcile`（不会卡在 `dispatching`）。
 
 ```powershell
 node bin/dsh-rpc.mjs tasks preview --principal local-operator --workspace local --agent ag-dsh --capability cap_review_1 --input '{"prompt":"检查最近改动"}' --json
@@ -91,6 +91,8 @@ node bin/dsh-rpc.mjs tasks dispatch <taskId> --json
   ```
 
   每次 `pump` 有步数（`maxSteps`）和截止时间（`deadlineMs`）双上限：先拉取 `adapter.events(locator, cursor)` 并按 `adapterEventId` 去重写入账本，若无增量事件则调用一次 `adapter.inspect`；遇到未知状态或无 `attention` 的 `blocked` 报告时转入 `needs_reconcile`。
+
+   > **谁在按按钮**：`dispatch` 与 `pump` 是机器侧动词，MCP 面刻意不暴露（外部调用方只有 8 个 `dsh_task_*` + 3 个 `dsh_agents_*`）。为了让经 MCP 提交的任务也能往前走，宿主自己跑一个有界推进环：每隔 `tasksAutopilotIntervalMs`（默认 `5000`ms）先按 `tasksAutopilotMaxStart`（默认 `2`）启动 `queued` 任务，再按 `tasksAutopilotMaxPump`（默认 `4`）逐个活跃状态（`dispatching`、`running`、`cancel_requested`、`waiting_input`、`waiting_approval`）推进一遍；单遍有步数与截止时间上限，上一遍没跑完时本遍直接跳过，失败只记录不中断。把 `tasksAutopilot` 置 `false` 就退回纯手工模式——此时经 MCP 提交的任务会一直停在 `queued`，直到有人执行 `tasks dispatch`。
 
 - **查看当前状态、`phase` 与事件（`get` / `events`）**：
   - CLI 执行 `node bin/dsh-rpc.mjs tasks get <taskId> --json` 查看最新 `status`、`phase`、`stateVersion`、开放的 `attention` / `pendingApproval` 与最新事件摘要。

@@ -24,6 +24,7 @@ import { isOwnedSession, useOwnedState } from "./lib/owned.mjs";
 import { createPendingStore } from "./lib/pending.mjs";
 import { createStats } from "./lib/stats.mjs";
 import { createDispatcher } from "./lib/tasks/dispatch.mjs";
+import { createAutopilot } from "./lib/tasks/autopilot.mjs";
 import { createTaskEngine, seedBaselineEntities } from "./lib/tasks/engine.mjs";
 import { openStore } from "./lib/tasks/store.mjs";
 import { PLUGIN_NAME, PLUGIN_VERSION } from "./lib/version.mjs";
@@ -91,6 +92,7 @@ export async function apply(ctx, input = {}) {
     ready: false,
     seedError: null,
     startError: null,
+    autopilot: null,
   };
 
   if (config.tasksEnabled) {
@@ -171,9 +173,35 @@ export async function apply(ctx, input = {}) {
 
       taskCentre.ready = true;
 
+      // The caller-facing tool surface has no dispatch/pump on purpose, so the machine
+      // side has to drive the ledger: without this pass a task submitted through MCP
+      // would stay queued until a human ran `tasks dispatch` by hand.
+      const autopilot =
+        config.tasksAutopilot === false
+          ? null
+          : createAutopilot({
+              engine: taskEngine,
+              dispatcher: taskDispatcher,
+              logger: log,
+              maxStart: config.tasksAutopilotMaxStart,
+              maxPump: config.tasksAutopilotMaxPump,
+              pumpMaxSteps: config.tasksDispatchMaxSteps,
+            });
+      taskCentre.autopilot = autopilot
+        ? {
+            enabled: true,
+            intervalMs: config.tasksAutopilotIntervalMs,
+            maxStart: config.tasksAutopilotMaxStart,
+            maxPump: config.tasksAutopilotMaxPump,
+          }
+        : { enabled: false, intervalMs: null, maxStart: null, maxPump: null };
+
       const drainTimer = setInterval(() => {
-        taskDispatcher.drainEffects({ limit: 50 }).catch(() => {});
-      }, 5_000);
+        const tick = autopilot ? autopilot.step().catch(() => {}) : Promise.resolve();
+        // Effects (adapter stop/kill requests) always drain, even with autopilot off:
+        // they are leftovers of decisions already made, not new work.
+        tick.finally(() => taskDispatcher.drainEffects({ limit: 50 }).catch(() => {}));
+      }, config.tasksAutopilotIntervalMs);
       drainTimer.unref?.();
 
       const cleanupTasks = () => {

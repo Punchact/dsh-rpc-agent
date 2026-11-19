@@ -76,7 +76,7 @@ http://127.0.0.1:<port>/dsh-rpc   ->   DSH agent
 - **会自述**：`dsh_capabilities` 给出八节能力快照（运行时、权限档位、可调工具、MCP 前缀、会话、工作区、插件），做计划前不必猜本机有什么。
 - **不假装知道**：外层客户端有更短的超时上限时，本桥只如实说明并建议分段轮询，不让长任务看起来像失败。
 - **可托管外部 agent 任务（任务中心，`tasksEnabled` 默认关闭）**：内置 15 表 SQLite 账本、11 态状态机与能力卡/只读探测，统一调度 DSH 自身、Antigravity 与 Codex App Server，详情见 [任务中心手册](./docs/task-center.md)。
-- **关键行为有回归用例守着**：43 个测试文件共 375 例 + catalog smoke（本机实测 375/375 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
+- **关键行为有回归用例守着**：44 个测试文件共 381 例 + catalog smoke（本机实测 381/381 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
 
 ## 安装与更新
 
@@ -452,6 +452,10 @@ trace:
 | `tasksProbeTimeoutMs` | `5000` | 整数 `100..60000`；`dsh.agents.probe` 只读探测的单次超时 |
 | `tasksAdapters` | `{}` | 对象；按执行方种类给适配器的构造参数（如 `{ codex: { binary: "…" } }`）；**不允许**在注册 RPC 里指定可执行文件 |
 | `tasksDispatchMaxSteps` | `50` | 整数 `1..1000`；一次 `dsh.tasks.pump`/`dsh.tasks.dispatch` 内推进的最大步数 |
+| `tasksAutopilot` | `true` | 布尔；为 `true` 时宿主按下面的间隔跑有界推进环（启动到期任务 + 推进活跃任务），这是经 MCP 提交的任务能自己往前走的唯一机制；置 `false` 则退回纯手工 `tasks dispatch` / `tasks pump` |
+| `tasksAutopilotIntervalMs` | `5000` | 整数 `1000..600000`；机器侧推进的间隔 |
+| `tasksAutopilotMaxStart` | `2` | 整数 `1..32`；单遍推进最多启动几个 `queued` 任务 |
+| `tasksAutopilotMaxPump` | `4` | 整数 `1..200`；单遍推进对每种活跃状态最多推进几个任务 |
 | `tasksAdapterDebugDetail` | `false` | 布尔；为 `true` 时把适配器失败的原始文本（脱敏后截断到 512 字符）以 `[raw]` 前缀写进宿主 debug 日志；默认只记安全字段 |
 
 **典型 CLI 流程**（可复制执行，前置已设 `tasksEnabled: true` 并重启宿主）：
@@ -753,7 +757,7 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 43 个测试文件，共 375 例，另有 catalog smoke；无需运行中的 Harness
+npm test                       # 44 个测试文件，共 381 例，另有 catalog smoke；无需运行中的 Harness
 node test/host.test.mjs        # 1 例：真实 WebServer 集成（需先 npm ci）
 node test/e2e.mjs              # 14 例：端到端，打真实 Harness（--cwd 只接受绝对路径）
 node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harness
@@ -775,7 +779,7 @@ npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案
 `check:surface` 查两个方向：方案写了的接口必须真实存在；代码里任务族/代理族的新接口必须要么在方案里、要么在快照的 `implementationOnly` 里如实记着。0.9.0 就是靠这一类对账才发现「方案写了 `dsh.tasks.resolve`、实现漏了」。
 
 <details>
-<summary>43 个测试文件各自覆盖什么</summary>
+<summary>44 个测试文件各自覆盖什么</summary>
 
 | 套件 | 例 | 覆盖 |
 | --- | --- | --- |
@@ -837,7 +841,7 @@ npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案
 - **边界**检查协议层：batch、通知、id 形态、鉴权头、超大 body（应得真正的 413 而不是断连）、参数注入防护、超时钳制、并发 ask、`limit` 语义。
 - **端口漂移**（手工）：把 `endpoint.json` 的 url 改成死端口再跑 `dsh-rpc ping`，应得退出码 3 与含 `nothing is listening`、`pid`、`health --wait` 的可读报错。
 
-本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 43 个测试文件 **375/375** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.mjs` 输出 `methods: 34` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
+本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 44 个测试文件 **381/381** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.mjs` 输出 `methods: 34` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
 
 ## 许可证
 
