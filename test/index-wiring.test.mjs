@@ -75,13 +75,13 @@ async function callJsonRpc(routeHandler, token, method, params = {}) {
   return { status, body: JSON.parse(responseBody) };
 }
 
-test("index.mjs leaves task DB untouched when tasksEnabled=false", () => {
+test("index.mjs leaves task DB untouched when tasksEnabled=false", async () => {
   const prevHome = process.env.DSH_HOME;
   const home = mkdtempSync(join(tmpdir(), "dsh-wire-off-"));
   process.env.DSH_HOME = home;
   const fake = makeFakeCtx();
   try {
-    apply(fake.ctx, { token: "a".repeat(32), tasksEnabled: false });
+    await apply(fake.ctx, { token: "a".repeat(32), tasksEnabled: false });
     const defaultDb = join(home, "storages", "task-center", "tasks.db");
     assert.equal(existsSync(defaultDb), false);
   } finally {
@@ -106,7 +106,7 @@ test("index.mjs opens tasks.db, seeds baseline entities, wires dispatcher, and h
   };
 
   try {
-    apply(fake.ctx, {
+    await apply(fake.ctx, {
       token,
       defaultCwd: home,
       tasksEnabled: true,
@@ -154,6 +154,60 @@ test("index.mjs opens tasks.db, seeds baseline entities, wires dispatcher, and h
     const badDispatch = await callJsonRpc(rpcHandler, token, "dsh.tasks.dispatch", { taskId: "task_missing" });
     assert.equal(badDispatch.status, 200);
     assert.ok(isTaskError({ data: badDispatch.body.error.data }, TASK_ERROR.NOT_FOUND));
+  } finally {
+    fake.dispose();
+    if (prevHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("index.mjs survives a strict Host whose ctx.get() throws for unknown services", async () => {
+  // Regression for the 0.9.0 on-state smoke failure: Cordis ctx.get(name, strict)
+  // throws for a service nobody provides, which used to abort the whole task-centre
+  // startup and leave the plugin on a silent in-memory store.
+  const prevHome = process.env.DSH_HOME;
+  const home = mkdtempSync(join(tmpdir(), "dsh-wire-strict-"));
+  process.env.DSH_HOME = home;
+  const token = "c".repeat(32);
+  const fake = makeFakeCtx();
+  const strictGet = (name) => {
+    throw new Error(`service not found: ${String(name)}`);
+  };
+  fake.ctx.get = strictGet;
+
+  try {
+    await apply(fake.ctx, { token, defaultCwd: home, tasksEnabled: true });
+
+    const rpcHandler = fake.routes.get("/dsh-rpc");
+    assert.equal(typeof rpcHandler, "function");
+
+    const ping = await callJsonRpc(rpcHandler, token, "dsh.ping", {});
+    assert.equal(ping.status, 200);
+    const centre = ping.body.result.taskCentre;
+    assert.equal(centre.ready, true, "the task centre must report itself ready");
+    assert.equal(centre.mode, "file", "a ready task centre must be backed by the file store");
+    assert.equal(centre.seedError, null, "baseline seeding must actually succeed");
+    assert.equal(centre.startError, null, "startup must not record an error");
+    assert.equal(
+      fake.warnings.some((w) => /task center disabled due to startup error/.test(w)),
+      false,
+      "a missing optional service must not disable the task centre",
+    );
+
+    // The seeding ran against the file store, not a throwaway in-memory database.
+    const dbPath = join(home, "storages", "task-center", "tasks.db");
+    assert.equal(existsSync(dbPath), true);
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const principals = db.prepare("SELECT principal_id FROM principals").all().map((row) => row.principal_id);
+      const workspaces = db.prepare("SELECT workspace_id FROM workspaces").all().map((row) => row.workspace_id);
+      assert.deepEqual(principals, ["local-operator"]);
+      assert.deepEqual(workspaces, ["local"]);
+    } finally {
+      db.close();
+    }
   } finally {
     fake.dispose();
     if (prevHome === undefined) delete process.env.DSH_HOME;

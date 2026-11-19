@@ -72,7 +72,7 @@ test("the bridge mounts on the real WebServer and unmounts cleanly", { timeout: 
     assert.match(origin, /^http:\/\/127\.0\.0\.1:\d+$/, "the published origin must be a real bound address");
 
     const host = fakeCtx({ webServer, sessionController: {} });
-    apply(host, {});
+    await apply(host, {});
 
     const health = await fetch(`${origin}/dsh-rpc/health`);
     assert.equal(health.status, 200, "health is served without a token");
