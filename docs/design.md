@@ -583,7 +583,7 @@ compression: gzip
 ## 33. 决策 0.9.0-f：熔断开关默认关（为什么新能力默认不上线）
 
 - **决策**：`tasksEnabled` 默认 `false`、`tasksExternalAdapter` 默认 `"none"`、`tasksMaxConcurrent` 默认 `1`、`tasksRequireReconcileOnUnknown` 默认 `true`、`tasksPreviewTtlMs` 默认 `300000`。新能力必须通过 `cordis.patch.yml` 显式开启。
-- **为什么**：`0.9.0` 的消费者既有直接做会话问答的既有客户端，也有渐进接入任务中心的操作者。如果一升级就自动创建 SQLite 库、起 5 秒后台定时器、挂载 6 个新 MCP 工具或默认把并发放宽到多路外部进程，就会改变老用户的磁盘、端口、工具列表预算并放大外部进程失控半径。默认全关确保 0.8.x 用户的升级回归面为零，打开后也先被并发=1 与未知即转核对两条安全带兜住。
+- **为什么**：`0.9.0` 的消费者既有直接做会话问答的既有客户端，也有渐进接入任务中心的操作者。如果一升级就自动创建 SQLite 库、起 5 秒后台定时器、挂载 11 个新 MCP 工具（8 个任务 + 3 个代理）或默认把并发放宽到多路外部进程，就会改变老用户的磁盘、端口、工具列表预算并放大外部进程失控半径。默认全关确保 0.8.x 用户的升级回归面为零，打开后也先被并发=1 与未知即转核对两条安全带兜住。
 - **反例或代价**：新装 `0.9.0` 的用户不能"开箱直接调用 `dsh_task_submit`"，必须按手册修改 `cordis.patch.yml` 并重启一次宿主，多出一步显式激活动作。
 
 ## 34. 决策 0.9.0-g：取消确认、幂等载荷与租约围栏
@@ -645,7 +645,7 @@ compression: gzip
 
 ## 40. 决策 0.9.0-m：任务事件是排障路径，预览必须校验归属
 
-1. **`dsh.tasks.events` 只走 RPC/CLI**：引擎的 `events()` 一直存在，但没有入口，外部只能靠「再取一次 task detail」猜发生了什么。事件是排障与审计路径，不是驱动路径，所以不进 MCP 工具面（MCP 面固定 6 个任务工具），也不改 `tasksEnabled` 之外的语义。
+1. **`dsh.tasks.events` 只走 RPC/CLI**：引擎的 `events()` 一直存在，但没有入口，外部只能靠「再取一次 task detail」猜发生了什么。事件是排障与审计路径，不是驱动路径，所以不进 MCP 工具面（MCP 面固定 8 个任务工具），也不改 `tasksEnabled` 之外的语义。
 2. **预览校验修订归属**：`capabilityRevisionId` 存在 ≠ 该实例能执行它。预览现在要求实现「能力修订被这个实例声明过」，否则报 `CAPABILITY_VERSION_MISSING`；这条和 §4.4 的候选筛选是同一条规则的两半——**能被声明才谈得上被选中**。
 3. **探测过期即拒**：`probe_expires_at` 过期的实例，其能力声明不再算证据（`PROBE_STALE`）。这条不区分 `verified` / `unverified`，只区分「证据还有效」与「证据已失效」。
 4. **候选要给出排除原因**：`candidates[]` 现在同时包含选中项（`SELECTED`）与同类实例的排除项（`AGENT_DISABLED` / `PROBE_STALE`），调用方看到的是路由决定，不是黑箱。
@@ -714,12 +714,7 @@ compression: gzip
 - **为什么现在就写成这样**：这套任务中心的第一批使用方是本机同一个人的若干 agent（Codex 出规划、DSH 执行、Antigravity 兜底）。它们同属一个 OS 用户、共用同一个 loopback token，进程边界之上没有可信的身份来源；在这一层做「伪隔离」只会增加参数与分支，不增加任何实际抵抗力。
 - **真正的边界在哪**：token 文件（`$DSH_HOME/dsh-rpc/token` 或 `DSH_RPC_TOKEN`）加本机文件系统权限。谁能读到 token，谁就能调全部方法——这一点在 README 的「已知边界」里已经对等披露，包括子会话能读到 token 的实测结论。
 - **将来要真隔离，得先有身份来源**：把 `principalId` 变成每个方法都强制、且由传输层注入（不能由调用方自选）的参数，再配一个主体→token 的映射；在那之前，A06 只能算「未实现」，不能算「已通过」。这条已写进 README 的「已知边界」，避免使用者以为它不是同一个人的 agent 就天然被隔离。
-## 48. 决策 0.9.1-b：异步列表必须 await，否则「没人推任务」会伪装成「系统慢」
-
-- **现象**：0.9.1-a 装上真机后，经 MCP 提交的任务 45 秒不动，事件只有 `task.accepted`；手工 `dsh.tasks.dispatch` 一秒成功。宿主的 5 秒定时器是活的（同一回调里的 `drainEffects` 把 `cancel_requested` 按时推到了 `needs_reconcile`），失败的是 `autopilot.step()` 的第一步。
-- **根因**：`step()` 写的是 `engine.list({status:"queued", limit}).items ?? []`。`engine.list` 是 `async`（从读事务里取行），所以 `.items` 永远是 `undefined`，`?? []` 把它兜成空数组。**兜底表达式把缺陷兜成了正常态**：空账本和不工作在这一行长得完全一样，日志、事件、返回值全都干净。
-- **为什么单元测试没抓住**：测试里的假引擎写成了同步 `list()`，直接返回对象，于是漏掉的 `await` 在测试里是“对的”。假件比真件宽松，就是在替被测代码遮洞。假引擎现在也是 `async`，并单列一例「异步分页必须 await 才派发」。
-- **规矩**：测试替身必须与被替对象的**返回形状**一致（异步就是异步）；对可能为 `undefined` 的结构做 `?? []` 之前，先确认那不是“调用方式错了”。可观测性同步补上——`ping.taskCentre.autopilotStats` 现在记录遍数、上次时间、启动/推进/失败条数与最后一条错误：一个"在跑但什么也没推"的环，应该从返回值就能看出来，而不是靠手工派发做对照实验才能排除。
+## 47. 决策 0.9.1-a：任务由机器侧自己推进，MCP 面不加 pump
 
 - **现象**：A08 真机探针（外部 agent 只经 MCP 提交）跑出来的结果是：握手通过、工具面 11 个齐全、预览与提交都成功，然后任务在 `queued v1` 上停满 45 秒一动不动，最后只能 `dsh_task_cancel`。原因不是权限，也不是适配器：MCP 面按方案只给 8 个 `dsh_task_*` + 3 个 `dsh_agents_*`，`dispatch` 与 `pump` 都在机器侧；而宿主原来只有 5 秒一次的 `drainEffects`（出箱清理），并不派发、也不推进。
 - **取舍一：给 MCP 加 `dsh_task_pump`？** 不做。推进是「机器该干的活」，把它变成调用方的义务，等于要求每个外部 agent 自己写轮询循环才能让任务跑起来；而且读接口带副作用会让 `get` 的语义变脏。工具面维持方案里的 8 + 3。
@@ -727,6 +722,12 @@ compression: gzip
 - **实现边界**：单遍有 `tasksAutopilotMaxStart` / `tasksAutopilotMaxPump` 与 pump 的 `maxSteps`/`deadlineMs` 三重上限；上一遍没跑完时本遍直接 `skipped`，避免慢适配器把定时器叠成风暴；单个任务失败只记日志并继续其余任务，失败会以 `needs_reconcile` 之类的账本状态落地，而不是被吞掉。
 - **怎么钉住**：`lib/tasks/autopilot.mjs` 不碰数据库、只依赖 `engine.list` 与 `dispatcher.startTask/pump`，因此 `test/tasks-autopilot.test.mjs` 用假引擎/假派发器覆盖了五种情形——覆盖所有活跃状态、失败不中断、慢遍不叠加、空账本不动作、破库只报不抛。
 
+## 48. 决策 0.9.1-b：异步列表必须 await，否则「没人推任务」会伪装成「系统慢」
+
+- **现象**：0.9.1-a 装上真机后，经 MCP 提交的任务 45 秒不动，事件只有 `task.accepted`；手工 `dsh.tasks.dispatch` 一秒成功。宿主的 5 秒定时器是活的（同一回调里的 `drainEffects` 把 `cancel_requested` 按时推到了 `needs_reconcile`），失败的是 `autopilot.step()` 的第一步。
+- **根因**：`step()` 写的是 `engine.list({status:"queued", limit}).items ?? []`。`engine.list` 是 `async`（从读事务里取行），所以 `.items` 永远是 `undefined`，`?? []` 把它兜成空数组。**兜底表达式把缺陷兜成了正常态**：空账本和不工作在这一行长得完全一样，日志、事件、返回值全都干净。
+- **为什么单元测试没抓住**：测试里的假引擎写成了同步 `list()`，直接返回对象，于是漏掉的 `await` 在测试里是“对的”。假件比真件宽松，就是在替被测代码遮洞。假引擎现在也是 `async`，并单列一例「异步分页必须 await 才派发」。
+- **规矩**：测试替身必须与被替对象的**返回形状**一致（异步就是异步）；对可能为 `undefined` 的结构做 `?? []` 之前，先确认那不是“调用方式错了”。可观测性同步补上——`ping.taskCentre.autopilotStats` 现在记录遍数、上次时间、启动/推进/失败条数与最后一条错误：一个"在跑但什么也没推"的环，应该从返回值就能看出来，而不是靠手工派发做对照实验才能排除。
 ## 49. 决策 0.9.1-c：外部执行方必须被显式选中，缺适配器不许伪装成「排队中」
 
 A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravity` 类代理、能预览、能提交，看起来一切正常；但派发永远不动——任务停在 `queued v1`，事件里只有 `task.accepted`。
@@ -750,3 +751,11 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 3. 执行方缺席或撒谎时，结论必须是 `unknown`，不是"大概可以"——没装配的适配器不许借别人的证据。
 4. 回归钉住两件事：活适配器必须验得出来（`verified` + `verifiedControls`），未装配适配器的代理必须停在 `unknown`。
 
+## 51. 决策 0.9.1-e：「派发中」与「已启动」之间，账本必须假设自己会被撕开
+
+合并前复核（Antigravity）指出一处会停摆的路径：`startTask` 先把任务推进 `dispatching`（`dispatch.selected`），再 `await adapter.start`；崩溃落在这两步之间，账本里就是「`dispatching`、没有 attempt 行、没有 locator」。重启后这一行仍算活跃任务，`pump` 拿不到 locator、每遍抛错，而 `dispatching` 又占着 `maxConcurrent` 名额——一条写坏的行能把整个任务中心拖停。
+
+- **规矩一：没有启动回执，就不许假装在执行**。`pump` 遇到「`dispatching` + 无 attempt」不再重试、不再调适配器事件：宽限期内返回 `awaitingStart`（启动可能只是慢），超期转 `needs_reconcile` 并写 `dispatch.orphaned`，把「谁去确认它到底起了没有」交回人。宽限期可配（`startOrphanGraceMs`，默认 60 秒），因为冷启动慢的适配器不该被误判，而永远不回来的启动也不该永远占槽。
+- **规矩二：关店前先把在途那一遍收完**。`cleanupTasks` 现在记下 `inFlightPass`，停机时先 `await` 它再 `close()`；空闲时（没有在途遍）就地同步关闭，避免把 `close()` 推迟到调用方的下一条语句之后。理由是同一条：把存储从正在写账本的事务底下抽走，正是产生「写坏的行」的方式。
+- **规矩三：阶段由状态决定，不由理由决定**。同一轮复核还发现 `derivePhase` 的核对期靠事件名白名单判断，`dispatch.failed` / `inspect.unknown` 不在名单里就会被投影成 `machine/working`。枚举理由这件事本身就是漏项来源——`needs_reconcile` 状态存在，就说明有一笔需要人做的核对。
+- **怎么钉住**：`test/tasks-dispatch.test.mjs` 的 `pump hands an interrupted start to a person instead of retrying forever`（宽限期内 `awaitingStart` 且 `adapter.calls.events === 0`；超期后 `needs_reconcile` / `orphaned` / `dispatch.orphaned`）；`test/tasks-engine.test.mjs` 的优先序用例把三种租约形态一律钉成 `person/reconcile`，并把 8 种 `lastEvent`（含 `dispatch.failed` / `inspect.unknown` / `null`）全覆盖。

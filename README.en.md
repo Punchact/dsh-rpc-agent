@@ -76,7 +76,7 @@ Repository and package name are both `dsh-rpc-agent`; the commands (`dsh-rpc`, `
 - **Self-describing**: `dsh_capabilities` returns an eight-section snapshot (runtime, permission presets, callable tools, MCP prefixes, sessions, workspaces, plugins), so a planner does not have to guess what this machine offers.
 - **No pretend knowledge**: when an outer client caps tool calls below the bridge budget, the bridge says so and recommends polling in slices instead of letting a long job look like a failure.
 - **Managed external agent tasks (Task centre, `tasksEnabled: false` by default)**: a 15-table SQLite ledger, 11-state machine, and capability cards/read-only probes driving DSH itself, Antigravity, and Codex App Server; see [docs/task-center.md](./docs/task-center.md).
-- **Regression tests guard the sharp edges**: 45 test files (386 cases) + catalog smoke (386/386 pass locally, including the 15 `approvals` cases) + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
+- **Regression tests guard the sharp edges**: 45 test files (387 cases) + catalog smoke (387/387 pass locally, including the 15 `approvals` cases) + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
 
 ## Install and update
 
@@ -757,7 +757,7 @@ Everything the page shows comes from that read-only endpoint; it writes nothing.
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 45 test files, 386 cases, plus catalog smoke; no running Harness needed
+npm test                       # 45 test files, 387 cases, plus catalog smoke; no running Harness needed
 node test/host.test.mjs        # 1 case: real WebServer integration (needs npm ci first)
 node test/e2e.mjs              # 14 cases: end to end against a real Harness (--cwd takes an absolute path only)
 node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a real Harness
@@ -792,13 +792,15 @@ npm run docs:surface    # re-extract the snapshot after editing the plan doc (ne
 | `capabilities` | 4 | Section selection, `max_chars` trimming, status roll-up |
 | `tasks-store` | 4 | SQLite 15 tables, WAL, foreign keys, concurrent write-transaction retries |
 | `tasks-state` | 5 | 11-state transition table, illegal transitions, optimistic locks, terminal append-only events |
-| `tasks-engine` | 8 | Idempotency keys, cancel/complete races, schema-validation gate, derived phase precedence, restart durability |
+| `tasks-engine` | 13 | Idempotency keys, cancel/complete races, schema-validation gate, derived phase precedence, restart durability |
 | `tasks-degraded` | 4 | Degraded permission: controls the card marks `unsupported` (`start`/`steer`/`cancel`/`inspect`/`events`/`approval`) map to a readable consequence; task detail/list carry `degraded[]` |
 | `tasks-breaker` | 2 | With `tasksEnabled=false` the RPC family answers `-32601` and `discover` stops advertising it; enabled, the methods are reachable |
 | `agents-card` | 5 | `capability-card@1` normalization, empty `limitations` rejection, `verified` merging |
 | `agents-capability-revisions` | 5 | one immutable revision per declared capability at registration: parsing, `required` for writes, idempotent re-register, new revision when the card changes |
-| `agents-probe` | 1 | Read-only probe timeout/throw isolation and `unknown` recording |
+| `agents-probe` | 3 | Read-only probe timeout/throw isolation and `unknown` recording |
+| `agents-probe-wiring` | 2 | The probe must reach the real adapter: a live adapter reports `verified` with `start` among `verifiedControls`, and an agent with no wired adapter stays `unknown` (it never borrows someone else's evidence) |
 | `tasks-preview` | 3 | One-shot preview consumption, digest match, TTL expiry, principal isolation, and `degraded[]` from the capability card shape |
+| `tasks-flow-regressions` | 3 | Three regressions from the first live end-to-end run: one report per state change, one question per problem, and an unconfirmed stop escalating to `needs_reconcile` |
 | `tasks-events-and-preview` | 4 | task event cursor, revision ownership, stale probe, candidate exclusion reasons |
 | `tasks-input` | 3 | input delivery: idempotency key, payload conflict, question ownership, terminal and stale-attempt refusals |
 | `tasks-artifact` | 3 | artifact claims in a report: path/size/hash checks, refusals surfaced not swallowed, windowed reads with base64 fallback |
@@ -808,12 +810,13 @@ npm run docs:surface    # re-extract the snapshot after editing the plan doc (ne
 | `adapters-redact` | 5 | Credential-shaped redaction (Bearer/Basic/Cookie/userinfo/PAT/AK), cookie pairs masked without breaking JSON, truncation, depth limit, and token budgets left intact |
 | `adapters-antigravity` | 3 | `projectEnvConfig.projectId`, model placeholder lookup, `ForceStopCascadeTree`, response cap, unavailable handling |
 | `adapters-codex` | 5 | `codex.exe` discovery, `stdio://` handshake, frame shape and size limits, event queue, `turn/interrupt` |
-| `adapters-dsh` | 7 | DSH baseline 7-op mapping, honest stop, `resultValid: false`, and dispatch integration |
+| `adapters-dsh` | 8 | DSH baseline 7-op mapping, honest stop, `resultValid: false`, and dispatch integration |
 | `methods-dsh-ops` | 2 | `createDshAdapterOps` error containment, auto-wiring, `registerAgent`, `decideApproval` |
-| `tasks-dispatch` | 10 | `startTask`/`pump`/`drainEffects`, lease reclamation, atomic `maxConcurrent` gate, failure sanitising |
+| `tasks-dispatch` | 11 | `startTask`/`pump`/`drainEffects`, lease reclamation, atomic `maxConcurrent` gate, failure sanitising |
+| `tasks-autopilot` | 7 | The advance loop: every active status covered, one failure does not stop the pass, a slow pass does not stack, an empty ledger stays quiet, async paging is awaited before dispatch, and a broken ledger reports instead of throwing |
 | `config-breakers` | 3 | Five circuit-breaker defaults, valid bounds, `ConfigError` rejections |
 | `index-wiring` | 3 | Off leaves DB untouched, on initializes/seeds, external adapter init degradation |
-| `mcp-tasks-tools` | 6 | 6 gated task MCP tools visibility, disabled rejections, `reconcile`/`decideApproval` exclusion, argument validation and prototype-key refusal |
+| `mcp-tasks-tools` | 6 | 8 gated task MCP tools visibility, disabled rejections, `reconcile`/`decideApproval` exclusion, argument validation and prototype-key refusal |
 | `cli-tasks` | 5 | `tasks` / `agents` flag parsing, `UsageError` (exit 2), JSON-RPC calls, version-skew hint |
 | `cli-agents-approve` | 3 | `tasks approve` flag checks, `dsh.tasks.decideApproval`, and `agents` CLI commands |
 | `registry` | 10 | Sticky-session I/O, concurrent updates, key isolation, rotation |
@@ -828,7 +831,7 @@ npm run docs:surface    # re-extract the snapshot after editing the plan doc (ne
 
 </details>
 
-`npm test` runs these forty-two test files plus the catalog smoke in a fixed order; `npm run test:host` runs the real-WebServer integration test; `npm run test:e2e` / `npm run test:edge` need a live Harness.
+`npm test` runs these 45 test files plus the catalog smoke in a fixed order; `npm run test:host` runs the real-WebServer integration test; `npm run test:e2e` / `npm run test:edge` need a live Harness.
 
 > [!TIP]
 > **If `node --test` hits `spawn EPERM` in a restricted sandbox**: run individual files via `node <file>` or pass `node --test --test-isolation=none <file>`.
@@ -840,7 +843,7 @@ A few worth calling out:
 - **Edge** probes the protocol layer: batches, notifications, id shapes, auth headers, oversized bodies (a genuine 413, not a dropped connection), parameter-injection defences, timeout clamping, concurrent asks, `limit` semantics.
 - **Port drift** (manual): point `endpoint.json` at a dead port and run `dsh-rpc ping`; expect exit code 3 and a readable error mentioning `nothing is listening`, `pid` and `health --wait`.
 
-Local verification (2026-11-19, 0.9.0, real repository): all 45 test files in the `npm test` chain pass (**386/386** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.mjs` (`methods: 34` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`). Formatting (UTF-8 without BOM, LF) is a review convention here, not an automated gate.
+Local verification (2026-11-19, 0.9.0, real repository): all 45 test files in the `npm test` chain pass (**387/387** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.mjs` (`methods: 34` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`). Formatting (UTF-8 without BOM, LF) is a review convention here, not an automated gate.
 
 ## License
 

@@ -210,7 +210,12 @@ export async function apply(ctx, input = {}) {
       };
       taskCentre.autopilotStats = autopilotStats;
 
+      let shuttingDown = false;
+      let passRunning = false;
+      let inFlightPass = Promise.resolve();
       const drainTimer = setInterval(() => {
+        if (shuttingDown) return;
+        passRunning = true;
         const tick = autopilot
           ? autopilot
               .step()
@@ -228,15 +233,33 @@ export async function apply(ctx, input = {}) {
           : Promise.resolve();
         // Effects (adapter stop/kill requests) always drain, even with autopilot off:
         // they are leftovers of decisions already made, not new work.
-        tick.finally(() => taskDispatcher.drainEffects({ limit: 50 }).catch(() => {}));
+        inFlightPass = tick
+          .finally(() => taskDispatcher.drainEffects({ limit: 50 }).catch(() => {}))
+          .finally(() => {
+            passRunning = false;
+          });
       }, config.tasksAutopilotIntervalMs);
       drainTimer.unref?.();
 
-      const cleanupTasks = () => {
+      const cleanupTasks = async () => {
+        shuttingDown = true;
         try {
           clearInterval(drainTimer);
         } catch {
           // ignore timer cleanup errors
+        }
+        // Let the pass that is already running finish before the ledger goes away. Closing the
+        // store under an in-flight transition surfaces as a write error in the middle of
+        // shutdown, and a start that is interrupted mid-transition is exactly what leaves a
+        // `dispatching` task with no attempt row. When nothing is running we close right here,
+        // synchronously: a shutdown that is idle has nothing to wait for, and deferring the
+        // close past the caller's next statement would leave the file open behind a `dispose()`.
+        if (passRunning) {
+          try {
+            await inFlightPass;
+          } catch {
+            // ignore in-flight pass errors during shutdown
+          }
         }
         try {
           taskStore?.close?.();
