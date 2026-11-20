@@ -31,7 +31,198 @@ after(() => clearInterval(SUITE_KEEPALIVE));
 
 const ORIGIN = { getOrigin: () => "http://127.0.0.1:0" };
 
-async function waitFor(predicate, message) {
+interface FakeScriptStep {
+  kind: "start" | "foreign" | "text" | "reasoning" | "tool" | "toolResult" | "end" | "rawEnd";
+  turn?: number;
+  own?: boolean;
+  text?: string;
+  callId?: string;
+  name?: string;
+  isError?: boolean;
+  error?: unknown;
+  gate?: Promise<unknown>;
+  reason?: { kind: string; [key: string]: unknown };
+}
+
+interface FakeEvent {
+  type: string;
+  seq: number;
+  time?: number;
+  data: Record<string, unknown>;
+}
+
+interface TimelineEntry {
+  kind: "model" | "prompt" | "permission";
+  request?: Record<string, unknown>;
+  sessionId?: string;
+  name?: string;
+}
+
+interface FakeControllerOptions {
+  script?: FakeScriptStep[];
+  scripts?: FakeScriptStep[][] | null;
+  historical?: FakeEvent[];
+  distinctSessions?: boolean;
+  timeline?: TimelineEntry[] | null;
+  hostCwd?: string;
+  models?: Record<string, unknown> | null;
+  stuckAfterSnapshot?: boolean;
+  stuckBeforeSnapshot?: boolean;
+  stuckOnReturn?: boolean;
+}
+
+interface RpcErrorLike {
+  code?: number;
+  message?: string;
+  data?: {
+    sessionId?: string;
+    turn?: number;
+    next?: { tool?: string; args?: Record<string, unknown> };
+    [key: string]: unknown;
+  };
+}
+
+interface TurnToolRecord {
+  callId: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  seq: number;
+  at: number;
+  output?: string;
+  isError?: boolean;
+  error?: Record<string, unknown> | string;
+  endedAt?: number;
+  ok?: boolean;
+}
+
+interface CollectTurnResultLike {
+  status?: string;
+  reason?: { kind: string; [key: string]: unknown };
+  text?: string;
+  reasoning?: string;
+  tools: TurnToolRecord[];
+  [key: string]: unknown;
+}
+
+interface HistoryRecord {
+  type: string;
+  seq: number;
+  time?: number;
+  data?: Record<string, unknown>;
+}
+
+interface HistoryResult {
+  sessionId: string;
+  cursor: number;
+  turn?: number;
+  running?: boolean;
+  messageCount?: number;
+  hasMore?: boolean;
+  truncated?: boolean;
+  records: HistoryRecord[];
+}
+
+interface TurnResult {
+  sessionId: string;
+  turn: number | null;
+  status: string;
+  reason?: { kind: string; message?: string; [key: string]: unknown };
+  partial?: boolean;
+  text: string;
+  reasoning?: string;
+  tools: TurnToolRecord[];
+  created?: boolean;
+  reused?: boolean;
+  rotated?: boolean;
+  previousSessionId?: string;
+  timedOut?: boolean;
+  accepted?: boolean;
+  requestId?: string;
+  cwd?: string;
+  usage?: Record<string, number | undefined>;
+  selected?: { provider: string; model: string; reasoningEffort?: string };
+  permissionPreset?: string;
+  sandbox?: { denied: boolean; marker?: string; source?: string };
+  since?: number;
+  cursor: number;
+  sliceMs?: number;
+  requestedMs?: number;
+  pendingApproval?: { approvalId: string; [key: string]: unknown };
+  next?: { tool: string; reason?: string; args?: Record<string, unknown> };
+  [key: string]: unknown;
+}
+
+interface DispatchResultTest {
+  plugin: string;
+  methods: Array<{ name: string; [key: string]: unknown }>;
+  ok?: boolean;
+  [key: string]: unknown;
+}
+
+interface MethodsTestApi {
+  ask(
+    params: Record<string, unknown>,
+    options?: { onEvent?: (frame: { type: string; [key: string]: unknown }) => void; signal?: AbortSignal },
+  ): Promise<TurnResult>;
+  wait(params: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<TurnResult>;
+  history(params: Record<string, unknown>): Promise<HistoryResult>;
+  prompt(params: Record<string, unknown>): Promise<{
+    accepted: boolean;
+    mode: string;
+    requestId: string;
+    selected?: Record<string, unknown>;
+  }>;
+  cancel(params: Record<string, unknown>): Promise<Record<string, unknown>>;
+  listSessions(params?: Record<string, unknown>): Promise<{
+    total: number;
+    sort: string;
+    items: Array<{ sessionId: string; [key: string]: unknown }>;
+  }>;
+  createSession(params?: Record<string, unknown>): Promise<{ sessionId: string; [key: string]: unknown }>;
+  configure(params: Record<string, unknown>): Promise<{ permissionPreset?: string; [key: string]: unknown }>;
+  permissionCatalog(): Promise<{
+    defaultPreset: string | null;
+    options: Array<{ value: string; cost: string | null; [key: string]: unknown }>;
+  }>;
+  listWorkspaces(params?: Record<string, unknown>): Promise<{
+    total: number;
+    items: Array<{
+      id: string;
+      title: string;
+      path: string;
+      status: string;
+      sessions: number;
+      createdAt: number;
+      updatedAt: number;
+    }>;
+  }>;
+  createWorkspace(params: Record<string, unknown>): Promise<{ id: string; [key: string]: unknown }>;
+  discover(): Promise<{
+    plugin: string;
+    config: { defaultTimeoutMs: number; maxWaitSliceMs: number; [key: string]: unknown };
+    methods: Array<{ name: string; [key: string]: unknown }>;
+    [key: string]: unknown;
+  }>;
+  ping(): Promise<{
+    ok: boolean;
+    activeRuns: Array<Record<string, unknown>>;
+    taskCentre?: {
+      autopilot?: Record<string, unknown>;
+      autopilotStats?: Record<string, unknown>;
+      [key: string]: unknown;
+    };
+    [key: string]: unknown;
+  }>;
+  handlers: Record<string, (params?: Record<string, unknown>) => Promise<Record<string, unknown>>>;
+}
+
+interface ResolvedConfigTest {
+  maxWaitSliceMs: number;
+  maxWaitSliceMsRequested?: number;
+  [key: string]: unknown;
+}
+
+async function waitFor(predicate: () => unknown | Promise<unknown>, message: string): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (await predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -39,27 +230,30 @@ async function waitFor(predicate, message) {
   assert.fail(message);
 }
 
-function deferred() {
-  let resolve;
-  const promise = new Promise((done) => {
+function deferred<T = void>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((done) => {
     resolve = done;
   });
   return { promise, resolve };
 }
 
-function bus() {
-  const queue = [];
-  const waiters = [];
+function bus<T = unknown>() {
+  const queue: T[] = [];
+  const waiters: Array<(result: IteratorResult<T>) => void> = [];
   let closed = false;
   return {
-    push(item) {
+    push(item: T) {
       if (closed) return;
       const waiter = waiters.shift();
       if (waiter) waiter({ value: item, done: false });
       else queue.push(item);
     },
-    next() {
-      if (queue.length > 0) return Promise.resolve({ value: queue.shift(), done: false });
+    next(): Promise<IteratorResult<T>> {
+      if (queue.length > 0) return Promise.resolve({ value: queue.shift() as T, done: false });
       if (closed) return Promise.resolve({ value: undefined, done: true });
       return new Promise((resolve) => waiters.push(resolve));
     },
@@ -81,25 +275,25 @@ function fakeController({
   stuckAfterSnapshot = false,
   stuckBeforeSnapshot = false,
   stuckOnReturn = false,
-} = {}) {
-  const events = [...historical];
-  const subscribers = new Set();
-  const prompts = [];
-  const created = [];
-  const sessions = new Map();
-  const cancelled = [];
-  const inspected = [];
-  const selections = [];
+}: FakeControllerOptions = {}) {
+  const events: FakeEvent[] = [...historical];
+  const subscribers = new Set<(frame: { type: "event"; event: FakeEvent }) => void>();
+  const prompts: Array<Record<string, unknown>> = [];
+  const created: Array<Record<string, unknown>> = [];
+  const sessions = new Map<string, { running: boolean; blank: boolean; cwd: string }>();
+  const cancelled: Array<Record<string, unknown>> = [];
+  const inspected: string[] = [];
+  const selections: Array<Record<string, unknown>> = [];
   let seq = events.length > 0 ? events[events.length - 1].seq : 0;
 
   // The real SessionController dereferences the caller signal unconditionally
   // (`signal.throwIfAborted()`), so tolerating an undefined signal here would
   // hide a genuine crash class from the suite.
-  const requireSignal = (signal) => signal.throwIfAborted();
+  const requireSignal = (signal: AbortSignal) => signal.throwIfAborted();
 
-  const append = (type, data) => {
+  const append = (type: string, data: Record<string, unknown>) => {
     seq += 1;
-    const event = { type, seq, time: Date.now(), data };
+    const event: FakeEvent = { type, seq, time: Date.now(), data };
     events.push(event);
     for (const push of subscribers) push({ type: "event", event });
   };
@@ -112,20 +306,22 @@ function fakeController({
     inspected,
     selections,
 
-    async create(request) {
+    async create(request: { agentPreset?: string; [key: string]: unknown }) {
       created.push(request);
       const sessionId = distinctSessions ? `session-${created.length}` : "session-test";
       if (distinctSessions) sessions.set(sessionId, { running: false, blank: true, cwd: hostCwd });
       return { sessionId, agentPreset: request.agentPreset };
     },
 
-    async inspect(sessionId, signal) {
+    async inspect(sessionId: string, signal: AbortSignal) {
       requireSignal(signal);
       inspected.push(sessionId);
       return { meta: { cwd: hostCwd }, inheritedEventCount: 0, events: [] };
     },
 
-    async list(_request, signal) {
+    async list(_request: unknown, signal: AbortSignal): Promise<{
+      items: Array<{ sessionId: string; running: boolean; blank: boolean; updatedAt: number | string; cwd?: string }>;
+    }> {
       requireSignal(signal);
       if (!distinctSessions) {
         return { items: [{ sessionId: "session-test", running: false, blank: false, updatedAt: 1, cwd: "/tmp" }] };
@@ -139,22 +335,25 @@ function fakeController({
       return { default: { provider: "p", model: "m" }, routableProviders: ["p"], groups: [], failures: [] };
     },
 
-    async selectModel(request) {
+    async selectModel(request: { provider: string; model: string; reasoningEffort?: string; [key: string]: unknown }) {
       // The Host declares `selectModel(request)` without a signal argument, so the
       // bridge must not invent one — this fake fails loudly if it ever does.
       timeline?.push({ kind: "model", request });
       selections.push(request);
-      const selected = { provider: request.provider, model: request.model };
+      const selected: { provider: string; model: string; reasoningEffort?: string } = {
+        provider: request.provider,
+        model: request.model,
+      };
       if (request.reasoningEffort !== undefined) selected.reasoningEffort = request.reasoningEffort;
       return { selected };
     },
 
-    async cancel(request) {
+    async cancel(request: { sessionId?: string; [key: string]: unknown }) {
       cancelled.push(request);
       return { accepted: true, sessionId: request.sessionId };
     },
 
-    prompt(request, signal) {
+    prompt(request: { sessionId: string; requestId?: string; [key: string]: unknown }, signal: AbortSignal) {
       requireSignal(signal);
       timeline?.push({ kind: "prompt", request });
       prompts.push(request);
@@ -238,9 +437,9 @@ function fakeController({
       return Promise.resolve({ accepted: true });
     },
 
-    async *follow(_request, signal) {
-      const out = bus();
-      const push = (frame) => out.push(frame);
+    async *follow(_request: unknown, signal?: AbortSignal) {
+      const out = bus<{ type: "event"; event: FakeEvent }>();
+      const push = (frame: { type: "event"; event: FakeEvent }) => out.push(frame);
       subscribers.add(push);
       const onAbort = () => out.close();
       signal?.addEventListener("abort", onAbort, { once: true });
@@ -249,7 +448,7 @@ function fakeController({
           // A Host that accepted the subscription and then stopped answering: the
           // very first frame never arrives, so nothing bounds `history` unless the
           // bridge bounds it itself.
-          await new Promise(() => {});
+          await new Promise<never>(() => {});
         }
         yield {
           type: "snapshot",
@@ -262,7 +461,7 @@ function fakeController({
           // A Host whose stream stopped producing frames and whose abort handler
           // never runs: nothing is pending on an event, so there is nothing for
           // `out.close()` to resolve.
-          await new Promise(() => {});
+          await new Promise<never>(() => {});
         }
         for (;;) {
           const next = await out.next();
@@ -275,7 +474,7 @@ function fakeController({
         out.close();
         if (stuckOnReturn) {
           // Teardown that never completes: the answer must not wait for it.
-          await new Promise(() => {});
+          await new Promise<never>(() => {});
         }
       }
     },
@@ -284,45 +483,62 @@ function fakeController({
   return controller;
 }
 
-function build(controller, overrides = {}, services = {}, options = {}) {
+function build(
+  controller: ReturnType<typeof fakeController> | Record<string, unknown>,
+  overrides: Record<string, unknown> = {},
+  services: Record<string, unknown> = {},
+  options: { approvals?: unknown } = {},
+): MethodsTestApi {
   return createMethods(
-    { sessionController: controller, webServer: ORIGIN, approvals: options.approvals ?? null },
+    {
+      sessionController: controller as never,
+      webServer: ORIGIN as never,
+      approvals: (options.approvals ?? null) as null,
+    },
     resolveConfig(overrides),
-    { get: (name) => services[name] },
+    { get: (name: string) => services[name] },
     {},
-  );
+  ) as unknown as MethodsTestApi;
 }
 
 // The optional Host services the bridge reaches for through `ctx.get`. They are
 // genuinely optional, so a deployment that lacks them must fail with a readable
 // message rather than a TypeError.
-function fakeWorkspaces({ items = [] } = {}) {
+function fakeWorkspaces({ items = [] }: { items?: Array<Record<string, unknown>> } = {}) {
   return {
-    calls: [],
+    calls: [] as Array<{ path: string; title: string | undefined }>,
     list() {
       return items;
     },
-    async create(path, title) {
+    async create(path: string, title?: string) {
       this.calls.push({ path, title });
       return { id: "ws-new", path, title: title ?? path, createdAt: 1, updatedAt: 1, sessionIds: [] };
     },
   };
 }
 
-function fakePermissions({ options = [], defaultPreset = null, timeline = null } = {}) {
+function fakePermissions({
+  options = [],
+  defaultPreset = null,
+  timeline = null,
+}: {
+  options?: Array<Record<string, unknown>>;
+  defaultPreset?: string | null;
+  timeline?: TimelineEntry[] | null;
+} = {}) {
   return {
-    applied: [],
+    applied: [] as Array<{ sessionId: string | undefined; name: string }>,
     async catalog() {
       return { options, defaultOptions: {}, defaultPreset };
     },
-    set(session, name) {
+    set(session: { id?: string } | undefined, name: string) {
       timeline?.push({ kind: "permission", sessionId: session?.id, name });
       this.applied.push({ sessionId: session?.id, name });
     },
   };
 }
 
-const happyScript = [
+const happyScript: FakeScriptStep[] = [
   { kind: "start", turn: 1 },
   { kind: "tool", turn: 1, callId: "c1", name: "bash" },
   { kind: "reasoning", turn: 1, text: "thinking" },
@@ -557,7 +773,7 @@ test("the concurrency cap counts runs, not sessions", async () => {
   const first = methods.wait({ sessionId: "session-test", timeoutMs: 5000 }, { signal: ac.signal });
   await assert.rejects(
     () => methods.wait({ sessionId: "session-test", timeoutMs: 5000 }),
-    (error) => error.code === -32004,
+    (error: RpcErrorLike) => error.code === -32004,
   );
   ac.abort();
   const result = await first;
@@ -569,15 +785,15 @@ test("a non-positive or fractional limit is rejected instead of coerced", async 
   for (const limit of [0, -1, 2.5, "5"]) {
     await assert.rejects(
       () => methods.listSessions({ limit }),
-      (error) => {
+      (error: RpcErrorLike) => {
         assert.equal(error.code, -32602);
-        assert.match(error.message, /`limit` must be a positive integer/);
+        assert.match(error.message ?? "", /`limit` must be a positive integer/);
         return true;
       },
     );
     await assert.rejects(
       () => methods.history({ sessionId: "session-test", limit }),
-      (error) => error.code === -32602,
+      (error: RpcErrorLike) => error.code === -32602,
     );
   }
 });
@@ -608,14 +824,17 @@ test("sessions.list maps the host summary shape", async () => {
 });
 
 test("dispatcher rejects unknown methods and exposes the catalog", async () => {
-  const dispatch = buildDispatcher(build(fakeController({ script: happyScript })));
+  const dispatch = buildDispatcher(build(fakeController({ script: happyScript })) as never) as unknown as (
+    method: string,
+    params: Record<string, unknown>,
+  ) => Promise<DispatchResultTest>;
 
   const catalog = await dispatch("dsh.discover", {});
   assert.equal(catalog.plugin, "dsh-rpc-agent");
-  assert.equal(catalog.methods.some((entry) => entry.name === "dsh.sessions.ask"), true);
+  assert.equal(catalog.methods.some((entry: { name: string }) => entry.name === "dsh.sessions.ask"), true);
 
-  await assert.rejects(() => dispatch("dsh.nope", {}), (error) => error.code === -32601);
-  await assert.rejects(() => dispatch("ask", { text: "   " }), (error) => error.code === -32602);
+  await assert.rejects(() => dispatch("dsh.nope", {}), (error: RpcErrorLike) => error.code === -32601);
+  await assert.rejects(() => dispatch("ask", { text: "   " }), (error: RpcErrorLike) => error.code === -32602);
   const aliased = await dispatch("ping", {});
   assert.equal(aliased.ok, true);
 });
@@ -650,11 +869,11 @@ test("prompt refuses create-time-only options instead of ignoring them", async (
   const methods = build(controller);
   await assert.rejects(
     () => methods.prompt({ sessionId: "session-test", text: "hi", cwd: "C:/elsewhere" }),
-    (error) => error.code === -32602 && /only apply when the session is created/.test(error.message),
+    (error: RpcErrorLike) => error.code === -32602 && /only apply when the session is created/.test(error.message ?? ""),
   );
   await assert.rejects(
     () => methods.prompt({ sessionId: "session-test", text: "hi", agentPreset: "minimal" }),
-    (error) => error.code === -32602 && /only applies when the session is created/.test(error.message),
+    (error: RpcErrorLike) => error.code === -32602 && /only applies when the session is created/.test(error.message ?? ""),
   );
 });
 
@@ -669,7 +888,7 @@ test("driver options cannot be injected through JSON params", async () => {
 
 test("driver options are honoured through the internal channel", async () => {
   const controller = fakeController({ script: happyScript });
-  const seen = [];
+  const seen: string[] = [];
   const result = await build(controller).ask(
     { text: "go" },
     { onEvent: (frame) => seen.push(frame.type) },
@@ -684,7 +903,7 @@ test("a second prompting run on one session is refused instead of crossing turns
   const first = methods.ask({ sessionId: "session-test", text: "甲" });
   await assert.rejects(
     () => methods.ask({ sessionId: "session-test", text: "乙" }),
-    (error) => error.code === -32004,
+    (error: RpcErrorLike) => error.code === -32004,
   );
   const result = await first;
   assert.equal(result.status, "completed");
@@ -750,7 +969,7 @@ test("a queued run is visible while waiting, and its own deadline ends the wait"
 
   await assert.rejects(
     () => second,
-    (error) => error.code === -32005 && /stayed busy/.test(error.message),
+    (error: RpcErrorLike) => error.code === -32005 && /stayed busy/.test(error.message ?? ""),
   );
 
   holder.abort();
@@ -787,7 +1006,7 @@ test("naming a workspace and a cwd together is refused", async () => {
   const controller = fakeController();
   await assert.rejects(
     () => build(controller).createSession({ workspaceId: "ws-1", cwd: "/tmp/work" }),
-    (error) => error.code === -32602 && /cannot be combined/.test(error.message),
+    (error: RpcErrorLike) => error.code === -32602 && /cannot be combined/.test(error.message ?? ""),
   );
   assert.equal(controller.created.length, 0, "nothing may be created when the request is contradictory");
 });
@@ -796,7 +1015,7 @@ test("a caller-chosen session id is refused instead of silently replaced", async
   const controller = fakeController();
   await assert.rejects(
     () => build(controller).createSession({ sessionId: "session-3f2a" }),
-    (error) => error.code === -32602 && /assigned by the Host/.test(error.message),
+    (error: RpcErrorLike) => error.code === -32602 && /assigned by the Host/.test(error.message ?? ""),
   );
   assert.equal(controller.created.length, 0, "nothing may be created when the requested id cannot be honoured");
 });
@@ -831,7 +1050,7 @@ test("a bare model id offered twice names both spellings instead of guessing", a
   const controller = fakeController({ models: twoProviderModels });
   await assert.rejects(
     () => build(controller).configure({ sessionId: "session-test", model: "shared" }),
-    (error) => error.code === -32602 && /spell it "provider\/shared"/.test(error.message),
+    (error: RpcErrorLike) => error.code === -32602 && /spell it "provider\/shared"/.test(error.message ?? ""),
   );
   assert.equal(controller.selections.length, 0);
 });
@@ -840,7 +1059,7 @@ test("an unknown model is refused with a pointer to the catalog", async () => {
   const controller = fakeController({ models: twoProviderModels });
   await assert.rejects(
     () => build(controller).configure({ sessionId: "session-test", model: "nope" }),
-    (error) => error.code === -32602 && /call dsh\.models/.test(error.message),
+    (error: RpcErrorLike) => error.code === -32602 && /call dsh\.models/.test(error.message ?? ""),
   );
 });
 
@@ -848,7 +1067,7 @@ test("reasoning effort alone is refused, because the Host cannot read the model 
   const controller = fakeController({ models: twoProviderModels });
   await assert.rejects(
     () => build(controller).configure({ sessionId: "session-test", reasoningEffort: "high" }),
-    (error) => error.code === -32602 && /needs `model`/.test(error.message),
+    (error: RpcErrorLike) => error.code === -32602 && /needs `model`/.test(error.message ?? ""),
   );
   assert.equal(controller.selections.length, 0);
 });
@@ -857,7 +1076,7 @@ test("configure with nothing to configure says so", async () => {
   const controller = fakeController();
   await assert.rejects(
     () => build(controller).configure({ sessionId: "session-test" }),
-    (error) => error.code === -32602 && /nothing to configure/.test(error.message),
+    (error: RpcErrorLike) => error.code === -32602 && /nothing to configure/.test(error.message ?? ""),
   );
 });
 
@@ -867,7 +1086,7 @@ test("a permission preset is applied to the live session object", async () => {
     defaultPreset: "workspace-write",
   });
   const controller = fakeController();
-  const services = { permissionPresets: permissions, sessions: { get: (id) => ({ id }) } };
+  const services = { permissionPresets: permissions, sessions: { get: (id: string) => ({ id }) } };
   const result = await build(controller, {}, services).configure({
     sessionId: "session-test",
     permissionPreset: "read-only",
@@ -878,10 +1097,10 @@ test("a permission preset is applied to the live session object", async () => {
 
 test("an unknown permission preset is refused before touching the session", async () => {
   const permissions = fakePermissions({ options: [{ value: "read-only" }] });
-  const services = { permissionPresets: permissions, sessions: { get: (id) => ({ id }) } };
+  const services = { permissionPresets: permissions, sessions: { get: (id: string) => ({ id }) } };
   await assert.rejects(
     () => build(fakeController(), {}, services).configure({ sessionId: "session-test", permissionPreset: "yolo" }),
-    (error) => error.code === -32602 && /available: read-only/.test(error.message),
+    (error: RpcErrorLike) => error.code === -32602 && /available: read-only/.test(error.message ?? ""),
   );
   assert.equal(permissions.applied.length, 0);
 });
@@ -889,7 +1108,7 @@ test("an unknown permission preset is refused before touching the session", asyn
 test("a deployment without permissionPresets reports that instead of crashing", async () => {
   await assert.rejects(
     () => build(fakeController(), {}, {}).configure({ sessionId: "session-test", permissionPreset: "read-only" }),
-    (error) => error.code === -32000 && /no permissionPresets service/.test(error.message),
+    (error: RpcErrorLike) => error.code === -32000 && /no permissionPresets service/.test(error.message ?? ""),
   );
 });
 
@@ -912,19 +1131,19 @@ test("a sandbox refusal is reported as a fact, and the preset stays the caller's
   const result = await build(controller).ask({ text: "写到 workspace 外" });
 
   assert.equal(result.status, "completed");
-  assert.equal(result.sandbox.denied, true);
-  assert.equal(result.sandbox.marker, "[sandbox: file access denied under workspace-write mode]");
-  assert.equal(result.sandbox.source, "tool");
+  assert.equal(result.sandbox!.denied, true);
+  assert.equal(result.sandbox!.marker, "[sandbox: file access denied under workspace-write mode]");
+  assert.equal(result.sandbox!.source, "tool");
   // The bridge names the decision but does not make it: handing back a ready-made
   // "retry with danger-full-access" call would let the blocked agent's own wording
   // steer it. Only the session id travels; `permission` is the caller's to add.
-  assert.deepEqual(result.next.args, { session_id: "session-test" });
-  assert.match(result.next.reason, /caller's decision/);
+  assert.deepEqual(result.next!.args, { session_id: "session-test" });
+  assert.match(result.next!.reason ?? "", /caller's decision/);
   assert.doesNotMatch(JSON.stringify(result.next), /danger-full-access/);
-  assert.equal(result.next.tool, "dsh_ask");
+  assert.equal(result.next!.tool, "dsh_ask");
   // The refusal is not an error: the turn ran and the tool error keeps its own flag.
   assert.equal(result.tools[0].isError, true);
-  assert.match(result.tools[0].output, /sandbox: file access denied/);
+  assert.match(result.tools[0].output ?? "", /sandbox: file access denied/);
 });
 
 test("a refusal only the agent mentions is reported, but flagged as the weaker source", async () => {
@@ -939,13 +1158,13 @@ test("a refusal only the agent mentions is reported, but flagged as the weaker s
   });
   const result = await build(controller).ask({ text: "写到 workspace 外" });
 
-  assert.equal(result.sandbox.denied, true);
-  assert.equal(result.sandbox.source, "text");
+  assert.equal(result.sandbox!.denied, true);
+  assert.equal(result.sandbox!.source, "text");
 });
 
 test("a turn's tool output is bounded even when every call is chatty", async () => {
   const noisy = "x".repeat(4000);
-  const script = [{ kind: "start", turn: 1 }];
+  const script: FakeScriptStep[] = [{ kind: "start", turn: 1 }];
   for (let i = 0; i < 6; i += 1) {
     script.push({ kind: "tool", turn: 1, callId: `c${i}`, name: "bash" });
     script.push({ kind: "toolResult", turn: 1, callId: `c${i}`, text: noisy });
@@ -956,7 +1175,7 @@ test("a turn's tool output is bounded even when every call is chatty", async () 
   const total = result.tools.reduce((sum, tool) => sum + (tool.output?.length ?? 0), 0);
 
   assert.ok(total <= 20000 + 400, `tool output should stay near the budget, got ${total}`);
-  assert.match(result.tools.at(-1).output, /omitted/);
+  assert.match(result.tools.at(-1)?.output ?? "", /omitted/);
 });
 
 test("an ordinary failure is not mistaken for a sandbox refusal", async () => {
@@ -984,8 +1203,8 @@ test("permission presets carry a cost sentence even when the deployment declared
   const catalog = await build(fakeController(), {}, { permissionPresets: permissions }).permissionCatalog();
 
   assert.equal(catalog.defaultPreset, "workspace-write");
-  assert.match(catalog.options[0].cost, /writes inside the session workspace/);
-  assert.match(catalog.options[1].cost, /approvals disabled/);
+  assert.match(catalog.options[0].cost ?? "", /writes inside the session workspace/);
+  assert.match(catalog.options[1].cost ?? "", /approvals disabled/);
   assert.equal(catalog.options[2].cost, null); // unknown preset: no invented wording
 });
 
@@ -1042,7 +1261,7 @@ test("reusing a session cannot relocate it", async () => {
   const controller = fakeController({ script: happyScript });
   await assert.rejects(
     () => build(controller).ask({ sessionId: "session-test", text: "go", workspaceId: "ws-1" }),
-    (error) => error.code === -32602 && /only apply when the session is created/.test(error.message),
+    (error: RpcErrorLike) => error.code === -32602 && /only apply when the session is created/.test(error.message ?? ""),
   );
   assert.equal(controller.prompts.length, 0, "a refused request must not reach the Host");
 });
@@ -1051,7 +1270,7 @@ test("reusing a session cannot change its agent preset", async () => {
   const controller = fakeController({ script: happyScript });
   await assert.rejects(
     () => build(controller).ask({ sessionId: "session-test", text: "go", agentPreset: "minimal" }),
-    (error) => error.code === -32602 && /`agentPreset` only applies when the session is created/.test(error.message),
+    (error: RpcErrorLike) => error.code === -32602 && /`agentPreset` only applies when the session is created/.test(error.message ?? ""),
   );
   assert.equal(controller.prompts.length, 0, "a refused request must not reach the Host");
 });
@@ -1059,7 +1278,7 @@ test("reusing a session cannot change its agent preset", async () => {
 test("ask applies options and reports them alongside the turn", async () => {
   const controller = fakeController({ models: twoProviderModels, script: happyScript });
   const permissions = fakePermissions({ options: [{ value: "read-only" }] });
-  const services = { permissionPresets: permissions, sessions: { get: (id) => ({ id }) } };
+  const services = { permissionPresets: permissions, sessions: { get: (id: string) => ({ id }) } };
   const result = await build(controller, {}, services).ask({
     text: "go",
     model: "alpha/one",
@@ -1083,7 +1302,7 @@ test("ask with wait:false hands back a handle instead of waiting for the turn", 
   assert.equal(result.turn, null);
   assert.equal(result.text, "");
   assert.equal(result.sessionId, "session-test");
-  assert.match(result.requestId, /^rpc-/);
+  assert.match(result.requestId ?? "", /^rpc-/);
   assert.equal(controller.prompts.length, 1, "the prompt must still be submitted");
 });
 
@@ -1092,7 +1311,7 @@ test("queue and wait:false are refused together instead of silently ignoring one
 
   await assert.rejects(
     () => build(controller).ask({ text: "x", wait: false, queue: true }),
-    (error) => error.code === -32602 && /queue.*wait: false/.test(error.message),
+    (error: RpcErrorLike) => error.code === -32602 && /queue.*wait: false/.test(error.message ?? ""),
   );
   assert.equal(controller.prompts.length, 0, "a contradictory request must not reach the Host");
 });
@@ -1106,7 +1325,7 @@ test("a non-blocking ask refuses to stack onto a turn that is already running", 
 
   await assert.rejects(
     () => build(controller).ask({ sessionId: "session-test", text: "again", wait: false }),
-    (error) => error.code === -32004 && /already running a turn/.test(error.message),
+    (error: RpcErrorLike) => error.code === -32004 && /already running a turn/.test(error.message ?? ""),
   );
   assert.equal(controller.prompts.length, 0, "a refused request must not reach the Host");
 });
@@ -1255,7 +1474,7 @@ test("concurrent first asks for one sticky key create one session", async () => 
 test("concurrent default-turn asks for one sticky key queue on one active session", async () => {
   const { lookupEntry, registryKey } = await import("../dist/lib/registry.mjs");
   const firstTurnEnd = deferred();
-  const timeline = [];
+  const timeline: TimelineEntry[] = [];
   const controller = fakeController({
     distinctSessions: true,
     timeline,
@@ -1274,11 +1493,11 @@ test("concurrent default-turn asks for one sticky key queue on one active sessio
     ],
   });
   const permissions = fakePermissions({ options: [{ value: "read-only" }], timeline });
-  const services = { permissionPresets: permissions, sessions: { get: (id) => ({ id }) } };
+  const services = { permissionPresets: permissions, sessions: { get: (id: string) => ({ id }) } };
   const methods = build(controller, {}, services);
   const firstPromise = methods.ask({ text: "first", project: "sticky-wait-true" });
   firstPromise.catch(() => {});
-  let secondPromise;
+  let secondPromise: Promise<TurnResult> | undefined;
   try {
     await waitFor(() => controller.prompts.length === 1, "the first prompt is active before starting the second ask");
     const hostSession = (await controller.list({}, new AbortController().signal)).items[0];
@@ -1319,7 +1538,7 @@ test("concurrent default-turn asks for one sticky key queue on one active sessio
 
 test("a sticky queued ask does not change options when the previous ask times out with its Host turn still running", async () => {
   const firstTurnEnd = deferred();
-  const timeline = [];
+  const timeline: TimelineEntry[] = [];
   const controller = fakeController({
     distinctSessions: true,
     timeline,
@@ -1340,11 +1559,11 @@ test("a sticky queued ask does not change options when the previous ask times ou
   const permissions = fakePermissions({ options: [{ value: "read-only" }], timeline });
   const methods = build(controller, {}, {
     permissionPresets: permissions,
-    sessions: { get: (id) => ({ id }) },
+    sessions: { get: (id: string) => ({ id }) },
   });
   const firstPromise = methods.ask({ text: "first", project: "sticky-host-still-running", timeoutMs: 1000 });
   firstPromise.catch(() => {});
-  let secondPromise;
+  let secondPromise: Promise<TurnResult> | undefined;
   try {
     await waitFor(
       () => controller.events.some((event) => event.type === "assistant/message"),
@@ -1368,10 +1587,10 @@ test("a sticky queued ask does not change options when the previous ask times ou
     assert.equal(first.status, "timeout");
     assert.equal((await controller.list({}, new AbortController().signal)).items[0].running, true);
     assert.equal(controller.events.some((event) => event.type === "turn/end"), false);
-    await assert.rejects(secondPromise, (error) => {
+    await assert.rejects(secondPromise, (error: RpcErrorLike) => {
       assert.equal(error.code, -32004);
-      assert.equal(error.data.sessionId, first.sessionId);
-      assert.equal(error.data.turn, 1);
+      assert.equal(error.data!.sessionId, first.sessionId);
+      assert.equal(error.data!.turn, 1);
       return true;
     });
     assert.equal(controller.created.length, 1);
@@ -1419,11 +1638,11 @@ test("an unknown mode or reuse value is refused, not silently mapped", async () 
   const methods = build(fakeController({ script: happyScript }));
   await assert.rejects(
     () => methods.ask({ text: "甲", mode: "detach" }),
-    (error) => error.code === -32602 && /mode/.test(error.message),
+    (error: RpcErrorLike) => error.code === -32602 && /mode/.test(error.message ?? ""),
   );
   await assert.rejects(
     () => methods.ask({ text: "甲", reuse: "sometimes" }),
-    (error) => error.code === -32602 && /reuse/.test(error.message),
+    (error: RpcErrorLike) => error.code === -32602 && /reuse/.test(error.message ?? ""),
   );
 });
 
@@ -1438,9 +1657,9 @@ test("mode: turn refuses a session that is already running, and names the way ou
 
   await assert.rejects(
     () => methods.ask({ sessionId: "session-test", text: "插队" }),
-    (error) =>
+    (error: RpcErrorLike) =>
       error.code === -32004 &&
-      /already running/.test(error.message) &&
+      /already running/.test(error.message ?? "") &&
       error.data?.next?.tool === "dsh_wait" &&
       error.data?.next?.args?.session_id === "session-test",
   );
@@ -1535,17 +1754,17 @@ test("discover publishes the running config, so clients stop copying defaults", 
 
 test("the wait slice default is two minutes and a stray value is clamped, not rejected", () => {
   assert.equal(resolveConfig({}).maxWaitSliceMs, 120_000);
-  assert.equal(resolveConfig({}).maxWaitSliceMsRequested, undefined);
+  assert.equal((resolveConfig({}) as ResolvedConfigTest).maxWaitSliceMsRequested, undefined);
 
-  const tooBig = resolveConfig({ maxWaitSliceMs: 900_000 });
+  const tooBig = resolveConfig({ maxWaitSliceMs: 900_000 }) as ResolvedConfigTest;
   assert.equal(tooBig.maxWaitSliceMs, 240_000, "one response cannot wait longer than the ceiling");
   assert.equal(tooBig.maxWaitSliceMsRequested, 900_000, "the operator can still see what was asked for");
 
-  const tooSmall = resolveConfig({ maxWaitSliceMs: 200 });
+  const tooSmall = resolveConfig({ maxWaitSliceMs: 200 }) as ResolvedConfigTest;
   assert.equal(tooSmall.maxWaitSliceMs, 1_000, "a slice below one second is pointless");
   assert.equal(tooSmall.maxWaitSliceMsRequested, 200);
 
-  assert.equal(resolveConfig({ maxWaitSliceMs: 90_000 }).maxWaitSliceMsRequested, undefined);
+  assert.equal((resolveConfig({ maxWaitSliceMs: 90_000 }) as ResolvedConfigTest).maxWaitSliceMsRequested, undefined);
 });
 
 test("a Host stream that never returns control cannot hold the answer past the slice", async () => {
@@ -1579,18 +1798,29 @@ test("a finished call lets go of the caller's abort signal", async () => {
   // subscription and its release.
   const controller = new AbortController();
   const signal = controller.signal;
-  const added = [];
-  const removed = [];
+  type SignalListener = Parameters<AbortSignal["addEventListener"]>[1];
+  type SignalAddOptions = Parameters<AbortSignal["addEventListener"]>[2];
+  type SignalRemoveOptions = Parameters<AbortSignal["removeEventListener"]>[2];
+  const added: SignalListener[] = [];
+  const removed: SignalListener[] = [];
   const realAdd = signal.addEventListener.bind(signal);
   const realRemove = signal.removeEventListener.bind(signal);
-  signal.addEventListener = (type, listener, options) => {
+  signal.addEventListener = ((
+    type: string,
+    listener: SignalListener,
+    options?: SignalAddOptions,
+  ) => {
     if (type === "abort") added.push(listener);
     return realAdd(type, listener, options);
-  };
-  signal.removeEventListener = (type, listener, options) => {
+  }) as typeof signal.addEventListener;
+  signal.removeEventListener = ((
+    type: string,
+    listener: SignalListener,
+    options?: SignalRemoveOptions,
+  ) => {
     if (type === "abort") removed.push(listener);
     return realRemove(type, listener, options);
-  };
+  }) as typeof signal.removeEventListener;
 
   const methods = build(fakeController({ script: happyScript }));
   const result = await methods.ask({ sessionId: "session-test", text: "go" }, { signal });
@@ -1629,8 +1859,8 @@ test("a turn held on an approval answers while the approval is still open", asyn
   const elapsed = Date.now() - started;
   assert.equal(result.status, "waiting-approval");
   assert.equal(result.timedOut, false);
-  assert.equal(result.pendingApproval.approvalId, opened.approvalId);
-  assert.equal(result.next.tool, "dsh_approvals_resolve");
+  assert.equal(result.pendingApproval!.approvalId, opened.approvalId);
+  assert.equal(result.next!.tool, "dsh_approvals_resolve");
   assert.ok(elapsed < 5_000, `answered while the approval was open (${elapsed} ms)`);
   store.resolve(opened.approvalId, "reject");
 });
@@ -1644,7 +1874,7 @@ test("a preset change cannot touch a session this bridge does not own", async ()
     options: [{ value: "workspace-write" }, { value: "danger-full-access" }],
     defaultPreset: "workspace-write",
   });
-  const sessions = { get: (id) => ({ id, header: { cwd: "C:/work" } }) };
+  const sessions = { get: (id: string) => ({ id, header: { cwd: "C:/work" } }) };
   const methods = build(fakeController({}), {}, { permissionPresets: permissions, sessions });
   await assert.rejects(
     () => methods.configure({ sessionId: "someone-else", permissionPreset: "workspace-write" }),
@@ -1658,7 +1888,7 @@ test("with approvals on, a preset change cannot skip the gate to full access", a
     options: [{ value: "workspace-write" }, { value: "danger-full-access" }],
     defaultPreset: "workspace-write",
   });
-  const sessions = { get: (id) => ({ id, header: { cwd: "C:/work" } }) };
+  const sessions = { get: (id: string) => ({ id, header: { cwd: "C:/work" } }) };
   const methods = build(
     fakeController({}),
     { approvals: { mode: "deny", deadlineMs: 60_000 } },
@@ -1671,7 +1901,7 @@ test("with approvals on, a preset change cannot skip the gate to full access", a
   );
   // Nothing wider than the current preset is an escalation, so it still works.
   await methods.configure({ sessionId: created.sessionId, permissionPreset: "workspace-write" });
-  assert.equal(permissions.applied.at(-1).name, "workspace-write");
+  assert.equal(permissions.applied.at(-1)?.name, "workspace-write");
 });
 
 test("a prompt that never settles reports a timeout and releases its run slot", async () => {
@@ -1734,7 +1964,7 @@ test("collectTurn records seq, at, endedAt and ok while preserving legacy fields
       },
     },
   ];
-  const collected = collectTurn(events, 1);
+  const collected = collectTurn(events, 1) as unknown as CollectTurnResultLike;
   assert.equal(collected.tools.length, 2);
 
   const [first, second] = collected.tools;
@@ -1746,7 +1976,7 @@ test("collectTurn records seq, at, endedAt and ok while preserving legacy fields
   assert.equal(first.seq, 2);
   assert.equal(first.at, 1010);
   assert.equal(first.endedAt, 1025);
-  assert.ok(first.endedAt >= first.at);
+  assert.ok(first.endedAt! >= first.at);
   assert.equal(first.ok, true);
 
   assert.equal(second.callId, "c2");
@@ -1758,7 +1988,7 @@ test("collectTurn records seq, at, endedAt and ok while preserving legacy fields
   assert.equal(second.seq, 4);
   assert.equal(second.at, 1030);
   assert.equal(second.endedAt, 1050);
-  assert.ok(second.endedAt >= second.at);
+  assert.ok(second.endedAt! >= second.at);
   assert.equal(second.ok, false);
   assert.ok(second.seq > first.seq);
   assert.ok(second.at >= first.at);
@@ -1869,9 +2099,18 @@ test("history enforces maxChars with an explicit truncated flag and validates ba
   assert.equal(withinBudget.truncated, false);
   assert.equal(withinBudget.records.length, 3);
 
-  await assert.rejects(() => methods.history({ sessionId: "session-test", since: -1 }), (err) => err.code === -32602);
-  await assert.rejects(() => methods.history({ sessionId: "session-test", kinds: "tool/call" }), (err) => err.code === -32602);
-  await assert.rejects(() => methods.history({ sessionId: "session-test", maxChars: -5 }), (err) => err.code === -32602);
+  await assert.rejects(
+    () => methods.history({ sessionId: "session-test", since: -1 }),
+    (err: RpcErrorLike) => err.code === -32602,
+  );
+  await assert.rejects(
+    () => methods.history({ sessionId: "session-test", kinds: "tool/call" }),
+    (err: RpcErrorLike) => err.code === -32602,
+  );
+  await assert.rejects(
+    () => methods.history({ sessionId: "session-test", maxChars: -5 }),
+    (err: RpcErrorLike) => err.code === -32602,
+  );
 });
 
 test("METHOD_CATALOG is single source of truth for createMethods().handlers and ping.taskCentre projection", async () => {
@@ -1887,8 +2126,8 @@ test("METHOD_CATALOG is single source of truth for createMethods().handlers and 
   };
   const methods = createMethods(
     {
-      sessionController: fakeController({ script: happyScript }),
-      webServer: ORIGIN,
+      sessionController: fakeController({ script: happyScript }) as never,
+      webServer: ORIGIN as never,
       taskCentre: {
         enabled: true,
         mode: "memory",
@@ -1898,12 +2137,12 @@ test("METHOD_CATALOG is single source of truth for createMethods().handlers and 
         startError: null,
         autopilot,
         autopilotStats,
-      },
+      } as unknown as null,
     },
     resolveConfig({ tasksEnabled: true }),
     { get: () => undefined },
     { tokenSource: "env" },
-  );
+  ) as unknown as MethodsTestApi;
 
   const catalogNames = METHOD_CATALOG.map((entry) => entry.name).sort();
   const handlerKeys = Object.keys(methods.handlers).sort();
@@ -1912,9 +2151,11 @@ test("METHOD_CATALOG is single source of truth for createMethods().handlers and 
     assert.equal(typeof methods.handlers[name], "function", `missing handler for ${name}`);
   }
 
-  const discovered = await methods.handlers["dsh.discover"]();
+  const discovered = (await methods.handlers["dsh.discover"]()) as { methods: unknown[] };
   assert.equal(discovered.methods.length, 34);
-  const ping = await methods.handlers["dsh.ping"]();
+  const ping = (await methods.handlers["dsh.ping"]()) as {
+    taskCentre: { autopilot: unknown; autopilotStats: unknown };
+  };
   assert.deepEqual(ping.taskCentre.autopilot, autopilot);
   assert.deepEqual(ping.taskCentre.autopilotStats, autopilotStats);
 });
@@ -2013,7 +2254,7 @@ void badName; void missingHandler; void partialMap; void badCancel;
   };
 
   const program = ts.createProgram([validFile, badFile], options, host);
-  const collectDiagnostics = (rootFile) => {
+  const collectDiagnostics = (rootFile: string) => {
     const sourceFile = program.getSourceFile(rootFile);
     if (!sourceFile) throw new Error(`tsc did not load the probe ${rootFile}`);
     return ts
