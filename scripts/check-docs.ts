@@ -71,10 +71,17 @@ const readDist = (rel: string): string => {
 };
 
 // --- 单源数字（代码侧锚点一律扫 dist/ 产物） ----------------------------------------------
-const methodsSource = readDist("lib/methods.mjs");
-const rpcNames = [...methodsSource.matchAll(/name:\s*"(dsh\.[a-zA-Z.]+)"/g)].map((m) => m[1]);
+// RPC 名字既可能留在 `lib/methods.mjs`（旧布局），也可能被拆到 `lib/methods/*.mjs`
+// （0.9.5-i 把 4.4k 行的 methods.mts 分成 types/catalog/adapter-ops/helpers），所以两处都扫。
+const methodsSources = [
+  readDist("lib/methods.mjs"),
+  ...readdirSync(join(REPO, "dist", "lib", "methods"))
+    .filter((name) => name.endsWith(".mjs"))
+    .map((name) => readDist(join("lib", "methods", name))),
+];
+const rpcNames = methodsSources.flatMap((source) => [...source.matchAll(/name:\s*"(dsh\.[a-zA-Z.]+)"/g)].map((m) => m[1]));
 const rpcTotal = rpcNames.length;
-if (rpcTotal === 0) throw new Error("check-docs: no RPC method names found in dist/lib/methods.mjs");
+if (rpcTotal === 0) throw new Error("check-docs: no RPC method names found in dist/lib/methods.mjs or dist/lib/methods/*.mjs");
 
 const mcpSource = readDist("bin/dsh-rpc-mcp.mjs");
 const sliceTable = (constName: string): string => {
@@ -83,8 +90,12 @@ const sliceTable = (constName: string): string => {
   const end = mcpSource.indexOf("\n];", start);
   return mcpSource.slice(start, end < 0 ? undefined : end);
 };
-const baseTools = [...sliceTable("BASE_TOOLS").matchAll(/name:\s*"(dsh_[a-z_]+)"/g)].map((m) => m[1]);
-const taskTools = [...sliceTable("TASK_TOOLS").matchAll(/name:\s*"(dsh_[a-z_]+)"/g)].map((m) => m[1]);
+const baseTools = [...sliceTable("BASE_TOOLS").matchAll(/name:\s*"(dsh_[a-z_]+)"/g)].flatMap((m) =>
+  m[1] !== undefined ? [m[1]] : [],
+);
+const taskTools = [...sliceTable("TASK_TOOLS").matchAll(/name:\s*"(dsh_[a-z_]+)"/g)].flatMap((m) =>
+  m[1] !== undefined ? [m[1]] : [],
+);
 const taskOnly = taskTools.filter((n) => n.startsWith("dsh_task_"));
 const agentOnly = taskTools.filter((n) => n.startsWith("dsh_agents_"));
 const mcpBase = baseTools.length;
@@ -195,8 +206,8 @@ for (const rule of rules) {
   }
   for (const m of matches) {
     const want = rule.expect(m);
-    const groups = m.groups as Record<string, string>;
-    const got: Record<string, string> = Object.fromEntries(Object.keys(want).map((k) => [k, groups[k]]));
+    const groups = (m.groups ?? {}) as Record<string, string | undefined>;
+    const got: Record<string, string | undefined> = Object.fromEntries(Object.keys(want).map((k) => [k, groups[k]]));
     const diffs = Object.keys(want).filter((k) => String(want[k]) !== String(got[k]));
     if (diffs.length === 0) continue;
     const line = text.slice(0, scope.start).split("\n").length + body.slice(0, m.index).split("\n").length - 1;
@@ -205,7 +216,10 @@ for (const rule of rules) {
     );
     if (mode === "write") {
       let replacement = m[0];
-      for (const k of diffs) replacement = replacement.replace(groups[k], String(want[k]));
+      for (const k of diffs) {
+        const current = groups[k];
+        if (current !== undefined) replacement = replacement.replace(current, String(want[k]));
+      }
       rewrites.push({ file: rule.file, absoluteStart: scope.start + m.index, length: m[0].length, replacement });
     }
   }
