@@ -476,6 +476,12 @@ export interface SeedBaselineEntitiesOptions {
     rootPath: string;
     allowedSideEffects?: string[];
     policy?: Record<string, unknown>;
+    /**
+     * Replace the stored root when it differs. Off by default so a second boot cannot move a
+     * workspace other tasks already ran in; the host turns it on only for an explicit
+     * `tasksWorkspaceRoot` setting, where the operator has said which tree this bridge owns.
+     */
+    replaceRoot?: boolean;
   } | null;
   agent?: {
     agentId: string;
@@ -899,8 +905,12 @@ export async function seedBaselineEntities(
     }
     if (workspace) {
       db.prepare(
-        `INSERT OR IGNORE INTO workspaces (workspace_id, root_path, allowed_side_effects_json, policy_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        workspace.replaceRoot
+          ? `INSERT INTO workspaces (workspace_id, root_path, allowed_side_effects_json, policy_json, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(workspace_id) DO UPDATE SET root_path = excluded.root_path, updated_at = excluded.updated_at`
+          : `INSERT OR IGNORE INTO workspaces (workspace_id, root_path, allowed_side_effects_json, policy_json, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
       ).run(
         workspace.workspaceId,
         workspace.rootPath,

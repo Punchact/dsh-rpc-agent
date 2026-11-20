@@ -59,6 +59,10 @@ interface CodexAdapterOptions {
   binary: string;
   requestTimeoutMs?: number;
   probeTimeoutMs?: number;
+  interruptConfirmMs?: number;
+  persistThreads?: boolean;
+  serviceName?: string;
+  threadSource?: string;
 }
 
 interface CodexEventRecord {
@@ -204,7 +208,10 @@ test("codex adapter executes initialize -> initialized -> thread/start -> turn/s
   const adapter = buildCodexAdapter({
     spawn: fake.spawn,
     spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0-alpha.5.1\n" }),
-    binary: "C:\\fake\\codex.exe",
+    binary: fakeBinaryPath,
+    // No `turn/completed` is emitted in this test, so the cancel must report an
+    // unconfirmed stop quickly rather than block the dispatcher.
+    interruptConfirmMs: 40,
   });
 
   const started = await adapter.start({
@@ -224,7 +231,9 @@ test("codex adapter executes initialize -> initialized -> thread/start -> turn/s
 
   // Send steer input and cancel
   await adapter.sendInput(started.locator, { text: "keep it concise" });
-  await adapter.cancel(started.locator);
+  const cancelled = (await adapter.cancel(started.locator)) as { requestAccepted: boolean; confirmedStopped: boolean };
+  assert.equal(cancelled.requestAccepted, true);
+  assert.equal(cancelled.confirmedStopped, false, "an acknowledged interrupt is not a confirmed stop");
   assert.equal(fake.sentMessages[4].method, "turn/steer");
   assert.equal(fake.sentMessages[5].method, "turn/interrupt");
   assert.equal(fake.sentMessages[5].params?.threadId, "thr-1");
@@ -240,6 +249,33 @@ test("codex adapter executes initialize -> initialized -> thread/start -> turn/s
   const last = drained.events[drained.events.length - 1];
   assert.equal(last.report.state, "ready");
   assert.equal(last.report.resultValid, true);
+});
+
+test("codex adapter confirms a cancel only after the server reports the turn as interrupted", async () => {
+  const fake = makeFakeSpawn();
+  const adapter = buildCodexAdapter({
+    spawn: fake.spawn,
+    spawnSync: () => ({ status: 0, stdout: "codex-cli 0.169.1\n" }),
+    binary: fakeBinaryPath,
+    interruptConfirmMs: 2_000,
+  });
+
+  const started = await adapter.start({
+    task: { taskId: "t-cancel", requestSummary: { prompt: "write 40 bullets" } },
+    workspace: { rootPath: "C:\\repo" },
+  });
+
+  const pending = adapter.cancel(started.locator) as Promise<{ confirmedStopped: boolean }>;
+  // The turn stops a beat later: that notification, not the ack, is the proof.
+  setTimeout(() => {
+    fake.emitServerLine({
+      method: "turn/completed",
+      params: { threadId: "thr-1", turn: { id: "turn-1", status: "interrupted" } },
+    });
+  }, 30);
+
+  const cancelled = await pending;
+  assert.equal(cancelled.confirmedStopped, true);
 });
 
 test("codex adapter ignores req/agent binary overrides and resolveCodexBinary skips 0-byte or non-file candidates", async () => {
@@ -301,7 +337,7 @@ test("codex adapter enforces frame limit, non-object filtering, bounded event qu
   const adapter = buildCodexAdapter({
     spawn: fake.spawn,
     spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
-    binary: "C:\\fake\\codex.exe",
+    binary: fakeBinaryPath,
     requestTimeoutMs: 2_000,
   });
 
@@ -361,7 +397,7 @@ test("codex adapter enforces strict frame validation, UTF-8 StringDecoder assemb
     const adapter = buildCodexAdapter({
       spawn: fake.spawn,
       spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
-      binary: "C:\\fake\\codex.exe",
+      binary: fakeBinaryPath,
     });
     const started = await adapter.start({
       task: { taskId: `t-bad-${expectedCode}`, requestSummary: { prompt: "hi" } },
@@ -383,7 +419,7 @@ test("codex adapter enforces strict frame validation, UTF-8 StringDecoder assemb
   const adapter = buildCodexAdapter({
     spawn: fake.spawn,
     spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
-    binary: "C:\\fake\\codex.exe",
+    binary: fakeBinaryPath,
   });
   const started = await adapter.start({
     task: { taskId: "t-utf8-apr", requestSummary: { prompt: "hi" } },
@@ -451,12 +487,29 @@ test("probe only turns green after the app-server answers initialize", async () 
 
   const initialized = fake.sentMessages.filter((msg) => msg.method === "initialize");
   assert.equal(initialized.length, 1, "a probe costs exactly one handshake");
-  assert.equal(initialized[0].params!.clientInfo!.name, "dsh-task-hub", "handshake identifies itself");
+  // The service name is what the desktop app writes for its own threads and what makes a
+  // bridged session visible there, so the adapter identifies as `codex_work_desktop` by
+  // default; `serviceName` overrides it.
+  assert.equal(initialized[0].params!.clientInfo!.name, "codex_work_desktop", "handshake identifies as the desktop service");
   assert.equal(
     fake.sentMessages.some((msg) => msg.method === "thread/start" || msg.method === "turn/start"),
     false,
     "a probe must not start work",
   );
+});
+
+test("a configured serviceName replaces the desktop default on the wire", async () => {
+  const fake = makeFakeSpawn();
+  const adapter = buildCodexAdapter({
+    spawn: fake.spawn,
+    spawnSync: () => ({ status: 0, stdout: "codex-cli 0.169.1\n" }),
+    binary: fakeBinaryPath,
+    serviceName: "dsh-task-hub",
+  });
+  const probed = (await adapter.probe()) as { ok?: boolean };
+  assert.equal(probed.ok, true);
+  const initialized = fake.sentMessages.filter((msg) => msg.method === "initialize");
+  assert.equal(initialized[0].params!.clientInfo!.name, "dsh-task-hub");
 });
 
 test("probe stays red when the app-server never answers", async () => {

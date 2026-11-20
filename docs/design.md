@@ -898,3 +898,66 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 **代价与边界**。①`test/` 的 `.ts` 同样受“不可擦语法”限制（`enum`/`namespace`/参数属性），将来要用得先改写法。②`count-cases` 的 `testChainDigest` 会随文件内容变化，每次迁一批必须 `npm run count:cases` 刷一遍，否则 `check-docs` 报过期——这是设计使然，不是噪声。③`.ts` 测试只能在仓库内跑（`node_modules` 里的 `.ts` 会被拒绝剥类型），装到 profile 的那份包不含 `test/`，两者互不影响。
 
 **怎么钉住**。`tsconfig.test.json`（`strict`、`noEmit`）+ `check:types` 串进 `verify` + `check-test-targets` 只认 `.ts`（有 `.mjs` 溜回来就不会被扫到，等于立刻暴露）+ 三条不变量在迁移过程中逐批核对（`test(` 435、`assert` 2,241、忽略指令 0）。
+
+## 64. 决策 0.9.5-c：取消只有执行方亲口说停了才算停
+
+**现象**：真机 A09 冒烟（Codex 作为外部执行方）里，任务进入 `running` 后取消，状态走到 `cancel_requested`，5 秒内被升进 `needs_reconcile`，事件是 `cancel.unconfirmed`——取消其实生效了，但账本说“没确认”。
+
+**为什么**：`codex app-server` 的 `turn/interrupt` 只是回执；真正的停止由随后的 `turn/completed` 带上 `status: "interrupted"` 通知。适配器当时的选择是“永不自称停成功”，于是永远返回 `confirmedStopped: false`；而 `src/lib/tasks/dispatch.mts:859` 的规则是“只被接受、没被确认的停止，不许永远挂在 `cancel_requested`”——两个各自正确的决定叠成了“每次取消都交给人”。
+
+**决定**：`cancel()` 在发出中断后**有界地等那条通知**（`interruptConfirmMs`，默认 1.5 秒），等到即 `confirmedStopped: true`，等不到才 `false`。等不到的情况仍按既有规则升级，不改变“死会话不许挂死”的初衷。
+
+**边界**：等待窗口小于任何一次 pump 预算；通知若晚于窗口才到，取消仍会按 `cancel.unconfirmed` 走人工核对——宁可让人看一眼，也不谎称停在某个没兑现的承诺上。
+
+## 65. 决策 0.9.5-d：桥的会话必须能在 Codex 窗口里看见
+
+**现象**：Codex 作为外部执行方在真机上 7/7 通过、turn 真的跑完（`threadId`/`turnId`/`agentMessage` 俱全），但用户在本机 Codex 窗口里**一条也看不到**。他的原话是「完全没有一次成功的会话显示在可见的窗口上」。
+
+**为什么**：适配器启动线程时传了 `ephemeral: true`。三组对照实测（同一台机、同一份 app-server）：
+- `ephemeral: true` → `~/.codex/sessions/` 下**没有** rollout，`state_5.sqlite.threads` 里**没有**行；
+- 省略该参数 → 写 rollout + 落行；
+- `ephemeral: false` → 同省略。
+桌面端的列表读的是这两份东西，所以桥的会话对它是“从未发生过”。
+
+**决定**：桥默认**持久化**（不传 `ephemeral`），并按桌面端自己的口径写：`clientInfo.name = codex_work_desktop`（桌面端自家服务名，落在 `threads.originator`）、`thread/start` 带 `threadSource: "user"`。真机对照显示桥的会话行与桌面端自建线程同形（`originator=codex_work_desktop, source=vscode, thread_source=user`）。
+
+**边界**：这是“让本机工具产出的会话与桌面端自己的会话在同一张表里同形”，不是伪造用户动作——任务账本仍在 DSH 自己的库（§54），桥只把“这次 turn 发生过”如实写进 Codex 自己的会话库；不想被记录时可传 `persistThreads: false` 退回旧行为。
+
+## 66. 决策 0.9.5-e：会话粘性放在任务账本之外，按「执行端 + 代理 + 工作区」分桶
+
+**现象**：桥的每次派发都是一次新会话——Codex 建新 thread、Antigravity 建新 cascade。任务本身没问题，但同一个代理在同一个仓库里连续干三件事，执行端那边看到的是三段互不相识的对话：前面的判断、读过的文件、被否决的方案，全部重来。用户一句「保存一定的会话粘性」点出的是成本，不是偏好。
+
+**决定**：新增 `src/lib/adapters/sticky.mts`，把「这个代理在这个工作区用的是哪个远端会话」记在 `~/.dsh/storages/task-center/executor-sessions.json`（与账本同目录、不同文件）。键是 `kind:agentId:workspaceId`，值是执行端给的 id；Codex 启动时先 `thread/resume`，Antigravity 复用 `cascadeId`。落表时机是**成功之后**，失败即忘（线程被归档/删除时 `resume` 会失败，回落新建并覆盖）。
+
+**为什么不写进账本**：账本记的是「一个任务做了什么」，随任务终态冻结；粘性记的是「这对代理/工作区当前在跟谁说话」，跨任务存活、跨重启存活。混进 `tasks` 表会让两个生命周期互相污染——清账本不该丢会话，换会话也不该动任务。
+
+**边界**：①只记 id，不记内容；映射丢了最坏结果是新开一个会话，不会丢任务；②上限 200 条、按最近使用裁剪；③读坏文件按空处理，因为这不是事实来源，是加速器；④`agentId` 或工作区缺失时不落表（无主键的粘性没有意义），显式 `cascadeId` 永远优先于记忆。
+
+**怎么钉住**：`test/adapters-sticky.test.ts` 七例（跨实例持久化、键隔离、坏文件、禁用、上限、空 id、默认路径），`test/adapters-codex-sticky.test.ts` 三例（续用 `thread/resume`、`resume` 失败回落、无身份不落表），`test/adapters-antigravity-sticky.test.ts` 两例（cascade 续用、显式 id 优先）。
+
+## 67. 决策 0.9.5-f：线程锁在进程里，在哪个窗口看得见由两件事决定
+
+**现象**：给执行端加了会话粘性之后，A10 探针在真机上第二轮拿到了新的 `threadId`；另一头，
+桥派的 Codex 会话明明写了 rollout，回读 Codex 自己的库却归不到 `dsh-rpc-plugin` 项目下。
+
+**取证**：
+- 对「刚建、还没跑过 turn」的线程 resume → `no rollout found for thread id ...`；对跑过 turn 的既有线程 resume →
+  `thread ... already has an active writer`，stderr 是 `thread-store conflict`。后者说明桥没有关掉第一轮占的
+  app-server——它一直开着，握着那个线程的锁。
+- `state_5.sqlite.threads` 里桥的行走的是 `cwd = C:\Users\Andy\.dsh\profiles\desktop`，而 Codex 窗口按
+  cwd 与登记的项目根匹配，profile 目录不在任何项目根下，于是「会话存在但归不进项目」。
+
+**决定**：
+1. **同一线程复用同一进程**：`start()` 先算「这个代理 + 这个工作区」记住的线程，若适配器自己还开着对应
+   app-server，就直接在这条会话上 `turn/start`，不再 spawn 第二个进程去抢锁。池子最多 8 个，超出按插入
+   顺序关最旧的；新增 `dispose()` 在停机时全部释放。
+2. **桥的能量边界显式化**：新增 `tasksWorkspaceRoot`，显式说了「这个桥的任务属于哪棵树」时替换 `local`
+   工作区的根（`replaceRoot`），没说就不动——二次启动不许悄悄搬走已有工作区。
+
+**边界**：①别的进程（例如桌面应用自己）若持有同一线程，resume 仍会失败，这时只回落新建并 `forget`，
+不重试抢锁；②`tasksWorkspaceRoot` 只影响本桥的 `local` 工作区与外部执行方的 cwd，不改宿主工作目录；
+③池子上限是常数而非配置——它是保护，不是旋钮。
+
+**怎么钉住**：`test/adapters-codex-sticky.test.ts` 五例（续用、失败回落、无身份不落表、同适配器复用、
+`dispose` 后重开），`test/tasks-engine.test.ts` 一例（`replaceRoot` 才改根）。真机判据在 A10 探针：
+两轮拿到同一 `threadId`，且该线程在 Codex 库里落在登记的项目根下。

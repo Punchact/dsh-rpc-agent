@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 import { TASK_ERROR, taskError } from "../tasks/errors.mjs";
+import { createStickySessions, type StickySessions } from "./sticky.mjs";
 import {
   ADAPTER_FAILURE_MESSAGES,
   type AdapterEventEntry,
@@ -23,6 +24,8 @@ const WINDOWS_APPS_ROOT = "C:\\Program Files\\WindowsApps";
 export const MAX_FRAME_CHARS = 4 * 1024 * 1024;
 export const MAX_EVENT_QUEUE = 500;
 export const MAX_PENDING_APPROVALS = 200;
+// One app-server process per live thread; each holds that thread's store lock.
+const MAX_OPEN_SESSIONS = 8;
 const MAX_STDERR_CHARS = 4096;
 
 export interface CodexFsOps {
@@ -78,11 +81,26 @@ export interface CreateCodexAdapterOptions {
   clientInfo?: CodexClientInfo;
   requestTimeoutMs?: number;
   probeTimeoutMs?: number;
+  // How long `cancel()` waits for the server to report the turn as interrupted before it
+  // reports `confirmedStopped: false` and lets the dispatcher escalate to a human.
+  interruptConfirmMs?: number;
+  // Sessions must be visible in the Codex window. `ephemeral: true` writes no rollout at
+  // all, so the app can never list the thread; `serviceName`/`threadSource` are what the
+  // desktop app writes for its own threads, and one of them is how it recognises a
+  // session it is allowed to show.
+  persistThreads?: boolean;
+  // Session stickiness: one thread per (agent, workspace) so successive turns of the
+  // same executor continue the same conversation instead of starting a new one.
+  sticky?: StickySessions | null;
+  serviceName?: string;
+  threadSource?: string;
   fsOps?: CodexFsOps;
 }
 
 export interface CodexAdapter extends RuntimeAdapter {
   kind: "codex";
+  /** Close every app-server process this adapter owns (releases their thread locks). */
+  dispose(): Promise<void>;
 }
 
 interface PendingRequest {
@@ -104,6 +122,14 @@ interface CodexSession {
   threadId: string | null;
   readonly turnId: string | null;
   eventQueue: AdapterEventEntry[];
+  /**
+   * Absolute cursor of the first event that belongs to the turn now running.
+   *
+   * A reused session still holds the previous turn's events, and its `turn/completed` is a
+   * `ready` report — reporting it again would hand the new task the old turn's result in
+   * milliseconds. Everything before this cursor is another turn's history.
+   */
+  turnFloor: number;
   pendingApprovals: Map<string, PendingApproval>;
   droppedEvents: number;
   droppedApprovals: number;
@@ -113,7 +139,65 @@ interface CodexSession {
   pushEvent(entry: AdapterEventEntry): void;
   sendNotification(method: string, params?: unknown): void;
   sendRequest(method: string, params?: Record<string, unknown>): Promise<any>;
+  waitForInterrupt(turnId: string | null, timeoutMs: number): Promise<boolean>;
   close(): void;
+  isClosed(): boolean;
+}
+
+/**
+ * Start one turn on an already-attached thread.
+ *
+ * A thread is owned by a single app-server process: a second process that calls
+ * `thread/resume` on it gets `thread ... already has an active writer`. So "continue the
+ * previous session" means reuse the live process, not spawn a new one next to it.
+ */
+async function beginTurnOn(
+  session: CodexSession,
+  threadId: string,
+  req: any,
+  summary: any,
+  resolved: { path: string; source: string },
+  version: string | null,
+) {
+  const promptText =
+    req.prompt ??
+    req.text ??
+    summary.prompt ??
+    summary.input?.prompt ??
+    summary.input?.text ??
+    JSON.stringify(summary.input ?? {});
+
+  // Captured before the request so anything queued while it is in flight belongs to this turn;
+  // the cursor is absolute, because a trimmed queue shifts the index space.
+  const floorCursor = session.droppedEvents + session.eventQueue.length;
+  const turnResp = await session.sendRequest("turn/start", {
+    threadId,
+    input: [{ type: "text", text: String(promptText) }],
+  });
+  session.turnFloor = floorCursor;
+  const turnId = turnResp?.turn?.id ?? turnResp?.turnId ?? null;
+  if (turnId) {
+    session.pushEvent({
+      adapterEventId: `codex:0:turn/start`,
+      report: reportOf("progress", {
+        observedMethod: "turn/start",
+        turnId,
+        evidence: { method: "turn/start", turnId },
+      }),
+    });
+  }
+
+  return {
+    accepted: true,
+    locator: {
+      kind: "codex",
+      threadId,
+      turnId,
+      binary: resolved.path,
+      binarySource: resolved.source,
+      ...(version ? { version } : {}),
+    },
+  };
 }
 
 const ALLOWED_CODEX_METHODS = new Set([
@@ -304,11 +388,19 @@ export function createCodexAdapter({
   spawnSync = childProcess.spawnSync,
   binary: defaultBinary = "",
   now = Date.now,
-  clientInfo = { name: "dsh-task-hub", version: "0.9.0" },
+  clientInfo,
+  persistThreads = true,
+  sticky = createStickySessions(),
+  serviceName = "codex_work_desktop",
+  threadSource = "user",
   requestTimeoutMs = 5_000,
   probeTimeoutMs = 4_000,
+  interruptConfirmMs = 1_500,
   fsOps = { existsSync, readdirSync, accessSync, statSync } as unknown as CodexFsOps,
 }: CreateCodexAdapterOptions = {}): CodexAdapter {
+  // The service name is what the desktop app writes for its own threads; defaulting it to
+  // `codex_work_desktop` makes a bridged session look like one the app is willing to list.
+  const resolvedClientInfo: CodexClientInfo = clientInfo ?? { name: serviceName, version: "0.9.0" };
   const sessions = new Map<string, CodexSession>();
 
   function attachSession(child: any, binaryInfo: { path: string; source: string; version: string | null }): CodexSession {
@@ -318,6 +410,10 @@ export function createCodexAdapter({
     const stderrDecoder = new StringDecoder("utf8");
     const pending = new Map<string | number, PendingRequest>();
     const eventQueue: AdapterEventEntry[] = [];
+    // A cancel is only real when the server says the turn stopped. `turn/interrupt` merely
+    // acknowledges the request, so `cancel()` waits on these waiters for the matching
+    // `turn/completed` with `status: "interrupted"` instead of claiming the stop itself.
+    const interruptWaiters = new Set<{ turnId: string | null; settle: (confirmed: boolean) => void }>();
     let latestTurnId: string | null = null;
     let closed = false;
     let eventSeq = 0;
@@ -330,6 +426,7 @@ export function createCodexAdapter({
         return latestTurnId;
       },
       eventQueue,
+      turnFloor: 0,
       pendingApprovals: new Map(),
       droppedEvents: 0,
       droppedApprovals: 0,
@@ -371,11 +468,30 @@ export function createCodexAdapter({
               }),
             );
           }, requestTimeoutMs);
-          if (typeof timer.unref === "function") timer.unref();
+          // Deliberately not unref'd: a caller is awaiting this promise, and an unref'd timer
+          // lets the event loop drain first, which surfaces as "Promise resolution is still
+          // pending" instead of the timeout this code means to report.
 
           pending.set(id, { resolve, reject, timer, method });
           const line = JSON.stringify({ jsonrpc: "2.0", id, method, params });
           child.stdin.write(`${line}\n`);
+        });
+      },
+
+      waitForInterrupt(turnId: string | null, timeoutMs: number): Promise<boolean> {
+        return new Promise<boolean>((resolve) => {
+          const waiter = {
+            turnId,
+            settle: (confirmed: boolean) => {
+              clearTimeout(timer);
+              interruptWaiters.delete(waiter);
+              resolve(confirmed);
+            },
+          };
+          const timer = setTimeout(() => waiter.settle(false), Math.max(1, Math.floor(timeoutMs)));
+          // Same reason as the request timeout: cancel() awaits this, so the timer must keep
+          // the loop alive long enough to answer "did not confirm" instead of vanishing.
+          interruptWaiters.add(waiter);
         });
       },
 
@@ -406,6 +522,10 @@ export function createCodexAdapter({
         } catch {
           // best effort
         }
+      },
+
+      isClosed() {
+        return closed;
       },
     };
 
@@ -539,6 +659,13 @@ export function createCodexAdapter({
         } else if (msg.method === "turn/completed") {
           const turn = params.turn ?? {};
           const status = turn.status ?? "completed";
+          if (status === "interrupted") {
+            // This is the only honest confirmation of a stop: settle the waiters so a
+            // pending `cancel()` can report `confirmedStopped: true`.
+            for (const waiter of [...interruptWaiters]) {
+              if (waiter.turnId === null || waiter.turnId === (turn.id ?? latestTurnId)) waiter.settle(true);
+            }
+          }
           let report: AgentReport;
           if (status === "interrupted") {
             report = reportOf("dropped", {
@@ -666,7 +793,7 @@ export function createCodexAdapter({
 
       const handshake: CodexHandshakeResult =
         typeof spawn === "function"
-          ? await handshakeAppServer({ spawn, path: resolved.path, clientInfo, timeoutMs: probeTimeoutMs })
+          ? await handshakeAppServer({ spawn, path: resolved.path, clientInfo: resolvedClientInfo, timeoutMs: probeTimeoutMs })
           : { ok: false, reason: "no_spawn" };
 
       if (!handshake.ok) {
@@ -728,6 +855,20 @@ export function createCodexAdapter({
         }
       }
 
+      // Which session does this agent+workspace already own? If its app-server is still
+      // running, the thread lives there and a second process must not try to take it.
+      const stickyKey = {
+        kind: "codex",
+        agentId: String(agent.agentId ?? ""),
+        workspaceId: String(workspace.workspaceId ?? workspace.workspace_id ?? workspace.rootPath ?? workspace.root_path ?? ""),
+      };
+      const stickyUsable = stickyKey.agentId.length > 0 && stickyKey.workspaceId.length > 0;
+      const rememberedEarly = stickyUsable && sticky ? sticky.get(stickyKey) : null;
+      const liveSession = rememberedEarly ? sessions.get(rememberedEarly) : null;
+      if (liveSession && !liveSession.isClosed() && liveSession.threadId) {
+        return await beginTurnOn(liveSession, liveSession.threadId, req, summary, resolved, version);
+      }
+
       let child: any;
       try {
         child = spawn(resolved.path, ["app-server", "--listen", "stdio://"], {
@@ -746,17 +887,48 @@ export function createCodexAdapter({
       const session = attachSession(child, { ...resolved, version });
 
       try {
-        await session.sendRequest("initialize", { clientInfo });
+        await session.sendRequest("initialize", { clientInfo: resolvedClientInfo });
         session.sendNotification("initialized");
 
         const cwd = req.cwd ?? workspace.rootPath ?? workspace.root_path ?? process.cwd();
         const model = req.model ?? summary.model ?? adapterConfig.model ?? undefined;
-        const threadResp = await session.sendRequest("thread/start", {
-          cwd,
-          ...(model ? { model } : {}),
-          ephemeral: true,
-        });
-        const threadId = threadResp?.thread?.id ?? threadResp?.threadId;
+        // Session stickiness: if this agent already has a thread in this workspace, continue
+        // it. `thread/resume` fails when the thread was archived or removed, and that failure
+        // is a normal outcome rather than an error — fall through to a fresh thread.
+        // (`stickyKey`/`stickyUsable` are computed before the spawn: a live session for the
+        // remembered thread is reused there instead of being fought over.)
+        let threadId: string | null = null;
+        let resumed = false;
+        if (stickyUsable && sticky) {
+          const remembered = sticky.get(stickyKey);
+          if (remembered) {
+            try {
+              const resumedResp = await session.sendRequest("thread/resume", { threadId: remembered });
+              const resumedId = resumedResp?.thread?.id ?? resumedResp?.threadId ?? remembered;
+              if (typeof resumedId === "string" && resumedId.length > 0) {
+                threadId = resumedId;
+                resumed = true;
+                session.threadId = resumedId;
+              }
+            } catch {
+              sticky.forget(stickyKey);
+            }
+          }
+        }
+        // An `ephemeral: true` thread is never written to `~/.codex/sessions`, so the
+        // desktop app cannot list it. Persistent threads record the rollout plus a row in
+        // `state_5.sqlite`, together with the service name the app uses for its own work.
+        if (!threadId) {
+          const threadResp = await session.sendRequest("thread/start", {
+            cwd,
+            ...(model ? { model } : {}),
+            threadSource,
+            ...(persistThreads ? {} : { ephemeral: true }),
+          });
+          const created = threadResp?.thread?.id ?? threadResp?.threadId;
+          threadId = typeof created === "string" && created.length > 0 ? created : null;
+        }
+        if (stickyUsable && sticky && threadId && !resumed) sticky.remember(stickyKey, threadId);
         if (!threadId) {
           throw taskError(TASK_ERROR.ADAPTER_UNAVAILABLE, ADAPTER_FAILURE_MESSAGES.unavailable, {
             reason: "missing_thread_id",
@@ -764,42 +936,15 @@ export function createCodexAdapter({
         }
         session.threadId = threadId;
         sessions.set(threadId, session);
-
-        const promptText =
-          req.prompt ??
-          req.text ??
-          summary.prompt ??
-          summary.input?.prompt ??
-          summary.input?.text ??
-          JSON.stringify(summary.input ?? {});
-
-        const turnResp = await session.sendRequest("turn/start", {
-          threadId,
-          input: [{ type: "text", text: String(promptText) }],
-        });
-        const turnId = turnResp?.turn?.id ?? turnResp?.turnId ?? null;
-        if (turnId) {
-          session.pushEvent({
-            adapterEventId: `codex:0:turn/start`,
-            report: reportOf("progress", {
-              observedMethod: "turn/start",
-              turnId,
-              evidence: { method: "turn/start", turnId },
-            }),
-          });
+        // Keep the pool bounded: an idle process is a lock on its thread, not a free resource.
+        while (sessions.size > MAX_OPEN_SESSIONS) {
+          const oldest = sessions.keys().next();
+          if (oldest.done) break;
+          sessions.get(oldest.value)?.close();
+          sessions.delete(oldest.value);
         }
 
-        return {
-          accepted: true,
-          locator: {
-            kind: "codex",
-            threadId,
-            turnId,
-            binary: resolved.path,
-            binarySource: resolved.source,
-            ...(version ? { version } : {}),
-          },
-        };
+        return await beginTurnOn(session, threadId, req, summary, resolved, version);
       } catch (error) {
         session.close();
         throw error;
@@ -818,8 +963,12 @@ export function createCodexAdapter({
           evidence: { threadId },
         });
       }
-      if (session.eventQueue.length > 0) {
-        return session.eventQueue[session.eventQueue.length - 1].report!;
+      // Only this turn's events may answer for this task; the previous turn's completion is
+      // still in the queue when a live session is reused.
+      const fromFloor = Math.max(0, session.turnFloor - session.droppedEvents);
+      const own = session.eventQueue.slice(fromFloor);
+      if (own.length > 0) {
+        return own[own.length - 1].report!;
       }
       return reportOf("progress", {
         observedStatus: "inProgress",
@@ -863,9 +1012,12 @@ export function createCodexAdapter({
         threadId,
         ...(turnId ? { turnId } : {}),
       });
-      // `turn/interrupt` only acknowledges the request: the stop is confirmed when the
-      // server reports the turn as interrupted, so never claim it here.
-      return { requestAccepted: true, confirmedStopped: false, threadId, turnId: turnId ?? null };
+      // `turn/interrupt` only acknowledges the request. The stop is real when the server
+      // reports the turn as interrupted, so wait a bounded moment for that notification
+      // instead of either lying (`true`) or giving up immediately (`false`, which makes the
+      // dispatcher escalate every cancel to a human).
+      const confirmedStopped = await session.waitForInterrupt(turnId ?? null, interruptConfirmMs);
+      return { requestAccepted: true, confirmedStopped, threadId, turnId: turnId ?? null };
     },
 
     async events(arg1, arg2, arg3) {
@@ -887,7 +1039,10 @@ export function createCodexAdapter({
         return { events: [], nextCursor: cursor, droppedEvents: 0, droppedApprovals: 0 };
       }
       const rawCursor = Number.isInteger(cursor) && cursor >= 0 ? cursor : 0;
-      const offset = Math.max(0, rawCursor - session.droppedEvents);
+      // A fresh attempt asks from 0, but a reused session still holds earlier turns; replaying
+      // them would let the previous `turn/completed` answer for this task.
+      const cursorAtLeastFloor = Math.max(rawCursor, session.turnFloor);
+      const offset = Math.max(0, cursorAtLeastFloor - session.droppedEvents);
       const sliced = session.eventQueue.slice(offset);
       return {
         events: sliced,
@@ -922,6 +1077,17 @@ export function createCodexAdapter({
       });
       session.child.stdin.write(`${line}\n`);
       return { accepted: true, threadId, approvalId };
+    },
+
+    /**
+     * Release every app-server process this adapter owns. A thread's store lock lives in its
+     * process, so leaving them running keeps those threads un-resumable for everyone else.
+     */
+    async dispose() {
+      for (const [threadId, session] of sessions) {
+        session.close();
+        sessions.delete(threadId);
+      }
     },
   };
 

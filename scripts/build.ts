@@ -4,7 +4,7 @@
 //   2. Compile `src/**/*.mts` -> `<staging>/**/*.mjs` via tsc (0 files in PR 1a is valid).
 //   3. Byte-for-byte copy all unmigrated files.
 //   4. Emit `<staging>/package.json` matching root `package.json`.
-//   5. Assert SHA-256 byte fidelity and total file count (58).
+//   5. Assert SHA-256 byte fidelity and total file count (see publish-manifest.ts).
 //   6. Swap the staging tree into `dist/` with two renames.
 //
 // Why staging instead of "clean dist, then fill it": a test process that is
@@ -18,6 +18,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  EXPECTED_DIST_FILES,
+} from "./publish-manifest.ts";
+import {
   buildDistManifest,
   collectMigratedOutputs,
   collectUnmigratedFiles,
@@ -28,7 +31,6 @@ import {
 const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const DIST = join(REPO, "dist");
 const STAGING = join(REPO, `.dist-staging-${process.pid}`);
-const EXPECTED_DIST_FILES = 58;
 
 // 1. Build into a staging directory
 rmSync(STAGING, { recursive: true, force: true });

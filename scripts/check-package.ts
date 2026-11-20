@@ -12,6 +12,8 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, posix, resolve } from "node:path";
 
+import { EXPECTED_DIST_FILES } from "./publish-manifest.ts";
+
 interface NpmPackFileEntry {
   path: string;
 }
@@ -42,7 +44,7 @@ interface DistPackageJson {
 }
 
 const distRoot = resolve(import.meta.dirname, "..", "dist");
-const EXPECTED_FILE_COUNT = 58;
+const EXPECTED_FILE_COUNT = EXPECTED_DIST_FILES;
 
 const REQUIRED = [
   "package.json",

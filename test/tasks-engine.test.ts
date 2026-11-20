@@ -883,3 +883,30 @@ void badEngineCalls;
   const badDiagnostics = runProbe(badProbe, badSource);
   assert.ok(badDiagnostics.length >= 4, `expected >= 4 compile-time rejections, got ${badDiagnostics.length}`);
 });
+
+test("a configured workspace root replaces the stored one, a plain seed never does", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ws-root-"));
+  const store = openStore({ path: join(dir, "tasks.db") });
+  const seed = seedBaselineEntities as unknown as (
+    target: TestStore,
+    opts: { workspace: { workspaceId: string; rootPath: string; replaceRoot?: boolean } },
+  ) => Promise<unknown>;
+  const rootOf = () =>
+    store.withWriteTx((db: any) =>
+      (db.prepare("SELECT root_path FROM workspaces WHERE workspace_id = ?").get("local") as { root_path: string } | undefined)?.root_path ?? null,
+    );
+
+  try {
+    await seed(store, { workspace: { workspaceId: "local", rootPath: "C:\\\\before" } });
+    assert.equal(await rootOf(), "C:\\\\before");
+
+    await seed(store, { workspace: { workspaceId: "local", rootPath: "C:\\\\after" } });
+    assert.equal(await rootOf(), "C:\\\\before", "a seed without replaceRoot leaves the existing root alone");
+
+    await seed(store, { workspace: { workspaceId: "local", rootPath: "C:\\\\after", replaceRoot: true } });
+    assert.equal(await rootOf(), "C:\\\\after", "the explicit setting moves the root");
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

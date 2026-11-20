@@ -7,8 +7,9 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { EXPECTED_DIST_FILES } from "./publish-manifest.ts";
+
 const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const EXPECTED_DIST_FILES = 58;
 
 const ROOT_FILES = [
   "index.mjs",

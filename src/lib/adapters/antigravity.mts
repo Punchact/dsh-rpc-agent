@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { TASK_ERROR, taskError } from "../tasks/errors.mjs";
+import { createStickySessions, type StickySessions } from "./sticky.mjs";
 import {
   ADAPTER_FAILURE_MESSAGES,
   type AgentReport,
@@ -39,6 +40,8 @@ export interface CreateAntigravityAdapterOptions {
   timeoutMs?: number;
   maxResponseChars?: number;
   fsOps?: AntigravityFsOps;
+  // Session stickiness: one cascade per (agent, workspace) so successive turns keep context.
+  sticky?: StickySessions | null;
 }
 
 export interface AntigravityAdapter extends RuntimeAdapter {
@@ -93,6 +96,7 @@ export function createAntigravityAdapter({
   now = Date.now,
   defaultModel = DEFAULT_ANTIGRAVITY_MODEL,
   projectId: defaultProjectId = "",
+  sticky = createStickySessions(),
   timeoutMs = DEFAULT_RPC_TIMEOUT_MS,
   maxResponseChars = DEFAULT_MAX_RESPONSE_CHARS,
   fsOps = { readdirSync, readFileSync, statSync } as unknown as AntigravityFsOps,
@@ -390,7 +394,16 @@ export function createAntigravityAdapter({
       const adapterConfig = agent.adapterConfig ?? agent.adapter_config ?? {};
 
       const descriptor = findAliveDescriptor();
-      const cascadeId: string = req.cascadeId ?? randomUUID();
+      const stickyKey = {
+      kind: "antigravity",
+      agentId: String(agent.agentId ?? ""),
+      workspaceId: String(workspace.workspaceId ?? workspace.workspace_id ?? workspace.rootPath ?? workspace.root_path ?? ""),
+    };
+    const stickyUsable = stickyKey.agentId.length > 0 && stickyKey.workspaceId.length > 0;
+    // Session stickiness: continuing the same cascade keeps the executor's context, which is
+    // why a remembered cascade id outranks a fresh uuid.
+    const cascadeId: string =
+      req.cascadeId ?? (stickyUsable && sticky ? sticky.get(stickyKey) : null) ?? randomUUID();
 
       const wsPath = req.workspacePath ?? workspace.rootPath ?? workspace.root_path ?? "";
       const wsUri = toWorkspaceUri(wsPath);
@@ -417,6 +430,7 @@ export function createAntigravityAdapter({
       }
 
       await callRpc(descriptor, "StartCascade", startBody);
+    if (stickyUsable && sticky) sticky.remember(stickyKey, cascadeId);
 
       const requestedModelId =
         req.model ?? summary.model ?? summary.input?.model ?? adapterConfig.model ?? null;

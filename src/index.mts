@@ -235,7 +235,14 @@ export async function apply(ctx: HostPluginContext, input: Record<string, unknow
       try {
         await seedBaselineEntities(taskStore, {
           principal: { principalId: "local-operator", kind: "operator" },
-          workspace: { workspaceId: "local", rootPath: config.defaultCwd || process.cwd() },
+          // `tasksWorkspaceRoot` says which tree this bridge owns: external executors start
+          // their sessions in it, which is what puts them under the matching project in the
+          // executor's own window. Without it the workspace stays wherever the Host runs.
+          workspace: {
+            workspaceId: "local",
+            rootPath: config.tasksWorkspaceRoot || config.defaultCwd || process.cwd(),
+            ...(config.tasksWorkspaceRoot ? { replaceRoot: true } : {}),
+          },
         });
       } catch (err: unknown) {
         taskCentre.seedError = errorMessage(err);
