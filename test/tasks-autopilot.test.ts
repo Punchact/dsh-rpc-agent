@@ -5,23 +5,73 @@ import ts from "typescript";
 
 import { ACTIVE_STATUSES, createAutopilot } from "../dist/lib/tasks/autopilot.mjs";
 
-function makeEngine(byStatus = {}) {
-  const calls = [];
+interface TaskStub {
+  taskId: string;
+}
+
+interface AutopilotStartCall {
+  taskId: string;
+}
+
+interface AutopilotPumpCall {
+  taskId: string;
+  maxSteps?: number;
+  deadlineMs?: number;
+}
+
+interface AutopilotDispatchOutcome {
+  task: { taskId: string; status: string; stateVersion: number };
+}
+
+interface AutopilotEngineStub {
+  calls?: Array<{ status?: string; limit?: number }>;
+  list(params?: { status?: string; limit?: number }): Promise<{
+    items: TaskStub[];
+    hasMore: boolean;
+    nextCursor: null;
+  }>;
+}
+
+interface AutopilotDispatcherStub {
+  calls: { start: AutopilotStartCall[]; pump: AutopilotPumpCall[] };
+  startTask(params: AutopilotStartCall): Promise<AutopilotDispatchOutcome>;
+  pump(params: AutopilotPumpCall): Promise<AutopilotDispatchOutcome>;
+}
+
+interface AutopilotStepOutcome {
+  skipped: boolean;
+  started: Array<{ taskId: string }>;
+  pumped: Array<{ taskId: string; status: string }>;
+  failed: Array<{ action: string; message: string }>;
+}
+
+const buildAutopilot = createAutopilot as unknown as (opts: Record<string, unknown>) => {
+  step(): Promise<AutopilotStepOutcome>;
+};
+
+function makeEngine(byStatus: Record<string, TaskStub[]> = {}) {
+  const calls: Array<{ status?: string; limit?: number }> = [];
   return {
     calls,
     // The real engine answers from a read transaction, so it is async. Keeping the fake
     // async too is what makes a forgotten `await` fail here instead of on a live host.
-    async list(params = {}) {
+    async list(params: { status?: string; limit?: number } = {}) {
       calls.push({ ...params });
-      const all = byStatus[params.status] ?? [];
+      const all = (params.status ? byStatus[params.status] : undefined) ?? [];
       const limit = params.limit ?? 50;
       return { items: all.slice(0, limit), hasMore: all.length > limit, nextCursor: null };
     },
   };
 }
 
-function makeDispatcher({ onStart, onPump } = {}) {
-  const calls = { start: [], pump: [] };
+function makeDispatcher({
+  onStart,
+  onPump,
+}: {
+  onStart?: (params: AutopilotStartCall) => AutopilotDispatchOutcome | Promise<AutopilotDispatchOutcome>;
+  onPump?: (params: AutopilotPumpCall) => AutopilotDispatchOutcome | Promise<AutopilotDispatchOutcome>;
+} = {}): AutopilotDispatcherStub {
+  const calls: { start: AutopilotStartCall[]; pump: AutopilotPumpCall[] } = { start: [], pump: [] };
   return {
     calls,
     async startTask(params) {
@@ -38,8 +88,8 @@ function makeDispatcher({ onStart, onPump } = {}) {
 }
 
 const warningLog = () => {
-  const lines = [];
-  return { lines, warn: (msg) => lines.push(msg) };
+  const lines: string[] = [];
+  return { lines, warn: (msg: string) => lines.push(msg) };
 };
 
 test("a pass starts queued tasks and pumps every active status", async () => {
@@ -52,7 +102,7 @@ test("a pass starts queued tasks and pumps every active status", async () => {
     waiting_approval: [{ taskId: "task_w2" }],
   });
   const dispatcher = makeDispatcher();
-  const autopilot = createAutopilot({ engine, dispatcher, maxStart: 2, maxPump: 1 });
+  const autopilot = buildAutopilot({ engine, dispatcher, maxStart: 2, maxPump: 1 });
 
   const result = await autopilot.step();
 
@@ -93,7 +143,7 @@ test("one failing task does not stop the others, and the failure is reported", a
       return { task: { taskId: params.taskId, status: "running", stateVersion: 4 } };
     },
   });
-  const autopilot = createAutopilot({ engine, dispatcher, logger, maxStart: 5, maxPump: 5 });
+  const autopilot = buildAutopilot({ engine, dispatcher, logger, maxStart: 5, maxPump: 5 });
 
   const result = await autopilot.step();
 
@@ -117,13 +167,13 @@ test("one failing task does not stop the others, and the failure is reported", a
 });
 
 test("a slow pass refuses to stack a second one on top of itself", async () => {
-  let release;
-  const gate = new Promise((resolve) => {
+  let release!: (value: AutopilotDispatchOutcome) => void;
+  const gate = new Promise<AutopilotDispatchOutcome>((resolve) => {
     release = resolve;
   });
   const engine = makeEngine({ queued: [{ taskId: "task_q1" }] });
   const dispatcher = makeDispatcher({ onStart: async () => gate });
-  const autopilot = createAutopilot({ engine, dispatcher });
+  const autopilot = buildAutopilot({ engine, dispatcher });
 
   const first = autopilot.step();
   const second = await autopilot.step();
@@ -138,7 +188,7 @@ test("a slow pass refuses to stack a second one on top of itself", async () => {
 test("an empty ledger costs one list per status and drives nothing", async () => {
   const engine = makeEngine({});
   const dispatcher = makeDispatcher();
-  const autopilot = createAutopilot({ engine, dispatcher });
+  const autopilot = buildAutopilot({ engine, dispatcher });
 
   const result = await autopilot.step();
 
@@ -153,7 +203,7 @@ test("an empty ledger costs one list per status and drives nothing", async () =>
 test("the bounded pump budget is passed through to the dispatcher", async () => {
   const engine = makeEngine({ running: [{ taskId: "task_r1" }] });
   const dispatcher = makeDispatcher();
-  const autopilot = createAutopilot({
+  const autopilot = buildAutopilot({
     engine,
     dispatcher,
     pumpMaxSteps: 7,
@@ -168,18 +218,18 @@ test("the bounded pump budget is passed through to the dispatcher", async () => 
 test("a page answered asynchronously is awaited before dispatch", async () => {
   // Pins the live defect: `engine.list` returns a Promise, and a pass that forgets to
   // await it sees `undefined.items` and silently starts nothing.
-  const engine = {
+  const engine: AutopilotEngineStub = {
     async list(params) {
       await Promise.resolve();
       return {
-        items: params.status === "queued" ? [{ taskId: "task_async" }] : [],
+        items: params?.status === "queued" ? [{ taskId: "task_async" }] : [],
         hasMore: false,
         nextCursor: null,
       };
     },
   };
   const dispatcher = makeDispatcher();
-  const autopilot = createAutopilot({ engine, dispatcher });
+  const autopilot = buildAutopilot({ engine, dispatcher });
 
   const result = await autopilot.step();
 
@@ -192,15 +242,15 @@ test("a page answered asynchronously is awaited before dispatch", async () => {
 });
 
 test("a broken ledger query is reported, not thrown at the timer", async () => {
-  const engine = {
+  const engine: AutopilotEngineStub = {
     async list(params) {
-      if (params.status === "queued") throw new Error("database is gone");
+      if (params?.status === "queued") throw new Error("database is gone");
       return { items: [], hasMore: false, nextCursor: null };
     },
   };
   const dispatcher = makeDispatcher();
   const logger = warningLog();
-  const autopilot = createAutopilot({ engine, dispatcher, logger });
+  const autopilot = buildAutopilot({ engine, dispatcher, logger });
 
   const result = await autopilot.step();
 

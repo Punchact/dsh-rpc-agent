@@ -10,17 +10,49 @@ import { createTaskEngine, seedBaselineEntities } from "../dist/lib/tasks/engine
 import { createDispatcher } from "../dist/lib/tasks/dispatch.mjs";
 import { openStore } from "../dist/lib/tasks/store.mjs";
 
-const SHA = (buffer) => createHash("sha256").update(buffer).digest("hex");
+interface ArtifactIndexedPayload {
+  artifacts: Array<{ artifactId: string }>;
+}
+
+interface ArtifactRefusedPayload {
+  refused: Array<{ reason: string; sourcePath?: unknown }>;
+}
+
+interface ArtifactEngineView {
+  submit(input: Record<string, unknown>): Promise<{ taskId: string }>;
+  applyReport(input: Record<string, unknown>): Promise<unknown>;
+  events(input: { taskId: string }): Promise<{ events: Array<{ type: string; payload: Record<string, unknown> }> }>;
+  readArtifact(input: { taskId: string; artifactId: string; offset: number; length: number }): Promise<{
+    encoding: string;
+    content: string;
+    bytesRead: number;
+    truncated: boolean;
+    kind: string;
+    sha256: string;
+  }>;
+}
+
+interface ArtifactDispatcherView {
+  startTask(input: { taskId: string }): Promise<{ attemptId?: string; attempt?: { attemptId?: string } }>;
+}
+
+const seedBaseline = seedBaselineEntities as unknown as (
+  store: unknown,
+  seed: Record<string, unknown>,
+) => Promise<void>;
+const buildDispatcher = createDispatcher as unknown as (opts: Record<string, unknown>) => ArtifactDispatcherView;
+
+const SHA = (buffer: Buffer) => createHash("sha256").update(buffer).digest("hex");
 
 async function makeWorld() {
   const store = openStore({ path: ":memory:" });
-  await seedBaselineEntities(store, {
+  await seedBaseline(store, {
     principal: { principalId: "local-operator" },
     workspace: { workspaceId: "ws-lab", rootPath: "C:\\ws-lab" },
     agent: { agentId: "ag-art", adapterKind: "dsh", capabilities: { cancel: "supported" } },
     capabilityRevision: { revisionId: "rev-art-1", capability: "review.diff@1" },
   });
-  const engine = createTaskEngine(store);
+  const engine = createTaskEngine(store) as unknown as ArtifactEngineView;
   const adapter = {
     kind: "dsh",
     async probe() {
@@ -45,11 +77,11 @@ async function makeWorld() {
       return { delivered: true };
     },
   };
-  const dispatcher = createDispatcher({ store, engine, adapters: { dsh: adapter } });
+  const dispatcher = buildDispatcher({ store, engine, adapters: { dsh: adapter } });
   return { store, engine, dispatcher };
 }
 
-async function startTask(engine, dispatcher, key) {
+async function startTask(engine: ArtifactEngineView, dispatcher: ArtifactDispatcherView, key: string) {
   const submitted = await engine.submit({
     idempotencyKey: key,
     capabilityRevisionId: "rev-art-1",
@@ -86,7 +118,7 @@ test("a report indexes verifiable artifacts and readArtifact returns a bounded w
     const events = await engine.events({ taskId });
     const indexed = events.events.find((event) => event.type === "artifact.indexed");
     assert.ok(indexed, "expected artifact.indexed");
-    const artifactId = indexed.payload.artifacts[0].artifactId;
+    const artifactId = (indexed.payload as unknown as ArtifactIndexedPayload).artifacts[0].artifactId;
     assert.match(artifactId, /^art_[0-9a-f]{24}$/);
 
     const meta = await engine.readArtifact({ taskId, artifactId, offset: 0, length: 8 });
@@ -131,8 +163,9 @@ test("an unverifiable claim is refused, not silently dropped, and non-UTF-8 byte
     const events = await engine.events({ taskId });
     const refused = events.events.find((event) => event.type === "artifact.refused");
     assert.ok(refused, "expected artifact.refused");
-    assert.equal(refused.payload.refused.length, 2);
-    for (const entry of refused.payload.refused) {
+    const refusedPayload = refused.payload as unknown as ArtifactRefusedPayload;
+    assert.equal(refusedPayload.refused.length, 2);
+    for (const entry of refusedPayload.refused) {
       assert.equal(typeof entry.reason, "string");
       assert.equal(entry.sourcePath, undefined, "a refusal must not echo the path");
     }
@@ -147,8 +180,8 @@ test("an unverifiable claim is refused, not silently dropped, and non-UTF-8 byte
       },
     });
     const after = await engine.events({ taskId });
-    const accepted = after.events.filter((event) => event.type === "artifact.indexed").pop();
-    const artifactId = accepted.payload.artifacts[0].artifactId;
+    const accepted = after.events.filter((event) => event.type === "artifact.indexed").pop()!;
+    const artifactId = (accepted.payload as unknown as ArtifactIndexedPayload).artifacts[0].artifactId;
 
     const read = await engine.readArtifact({ taskId, artifactId, offset: 0, length: 5 });
     assert.equal(read.encoding, "base64");
