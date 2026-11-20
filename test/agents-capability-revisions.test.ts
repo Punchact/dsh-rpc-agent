@@ -6,7 +6,31 @@ import { createMethods } from "../dist/lib/methods.mjs";
 import { createTaskEngine, seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
 import { openStore } from "../dist/lib/tasks/store.mjs";
 
-function baseCard(overrides = {}) {
+type TestStore = ReturnType<typeof openStore>;
+type TestEngine = ReturnType<typeof createTaskEngine>;
+interface SqliteDbLike {
+  prepare(sql: string): {
+    all(...args: unknown[]): unknown[];
+  };
+}
+type SeedEntitiesFn = (
+  store: TestStore,
+  opts: {
+    principal?: { principalId: string; kind?: string };
+    workspace?: { workspaceId: string; rootPath: string };
+  },
+) => Promise<unknown>;
+
+interface CapabilityRevisionRow {
+  revision_id: string;
+  capability: string;
+  side_effect_kind: string;
+  cancel_policy: string;
+}
+
+const seedBaseline = seedBaselineEntities as unknown as SeedEntitiesFn;
+
+function baseCard(overrides: Record<string, unknown> = {}) {
   return {
     identity: { agentId: "ag_1", name: "ag_1", kind: "dsh", version: "1.0.0" },
     controls: {
@@ -22,7 +46,7 @@ function baseCard(overrides = {}) {
   };
 }
 
-function makeMethods(store, engine) {
+function makeMethods(store: TestStore, engine: TestEngine) {
   return createMethods(
     {
       sessionController: {
@@ -31,8 +55,8 @@ function makeMethods(store, engine) {
         },
       },
       webServer: { getOrigin: () => "http://127.0.0.1:1" },
-      taskStore: store,
-      taskEngine: engine,
+      taskStore: store as unknown as null,
+      taskEngine: engine as unknown as null,
     },
     { tasksEnabled: true, tasksMaxConcurrent: 2 },
     { logger: { info() {}, warn() {}, error() {}, debug() {} }, get: () => undefined },
@@ -81,7 +105,7 @@ test("registering an agent publishes one immutable revision per declared capabil
   const store = openStore({ path: ":memory:" });
   const engine = createTaskEngine(store);
   try {
-    await seedBaselineEntities(store, {
+    await seedBaseline(store, {
       principal: { principalId: "local-operator" },
       workspace: { workspaceId: "local", rootPath: "C:\\work\\repo" },
     });
@@ -95,7 +119,7 @@ test("registering an agent publishes one immutable revision per declared capabil
     const revisionId = first.capabilityRevisions[0].revisionId;
     assert.match(revisionId, /^cap_[0-9a-f]{24}$/);
 
-    let rows = store.read((db) => db.prepare("SELECT * FROM capability_revisions").all());
+    let rows = store.read((db: SqliteDbLike) => db.prepare("SELECT * FROM capability_revisions").all()) as CapabilityRevisionRow[];
     assert.equal(rows.length, 1);
     assert.equal(rows[0].revision_id, revisionId);
     assert.equal(rows[0].capability, "review.diff");
@@ -105,7 +129,7 @@ test("registering an agent publishes one immutable revision per declared capabil
     // Re-registering the unchanged card is idempotent: same revision, one row.
     const again = await methods.registerAgent({ card });
     assert.equal(again.capabilityRevisions[0].revisionId, revisionId);
-    rows = store.read((db) => db.prepare("SELECT * FROM capability_revisions").all());
+    rows = store.read((db: SqliteDbLike) => db.prepare("SELECT * FROM capability_revisions").all()) as CapabilityRevisionRow[];
     assert.equal(rows.length, 1);
 
     // agents.list exposes the revisions so a caller can discover what to submit.

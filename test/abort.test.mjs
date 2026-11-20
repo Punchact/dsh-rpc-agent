@@ -24,7 +24,7 @@ import { request as httpRequest } from "node:http";
 import { spawn } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 
-import { closeServer, listenSafe } from "./helpers/stub-server.mjs";
+import { closeServer, listenSafe } from "./helpers/stub-server.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";

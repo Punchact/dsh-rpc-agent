@@ -58,14 +58,14 @@ test("the MCP entry point answers initialize through a junction", async () => {
     stdio: ["pipe", "pipe", "pipe"],
   });
   let buffer = "";
-  const reply = new Promise((resolveReply, rejectReply) => {
+  const reply = new Promise<{ id: unknown; result?: { protocolVersion?: unknown } }>((resolveReply, rejectReply) => {
     const timer = setTimeout(() => rejectReply(new Error("the MCP entry never answered initialize")), 15000);
-    child.stdout.setEncoding("utf8").on("data", (chunk) => {
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
       buffer += chunk;
       const newline = buffer.indexOf("\n");
       if (newline < 0) return;
       clearTimeout(timer);
-      resolveReply(JSON.parse(buffer.slice(0, newline)));
+      resolveReply(JSON.parse(buffer.slice(0, newline)) as { id: unknown; result?: { protocolVersion?: unknown } });
     });
   });
   child.stderr.setEncoding("utf8").on("data", () => {});
@@ -78,7 +78,7 @@ test("the MCP entry point answers initialize through a junction", async () => {
     assert.equal(typeof message.result?.protocolVersion, "string");
   } finally {
     child.stdin.end();
-    await new Promise((done) => {
+    await new Promise<void>((done) => {
       const timer = setTimeout(() => {
         child.kill();
         done();

@@ -78,14 +78,14 @@ test("config resolves, validates, and describes maxResultChars and timeoutAdvice
   for (const bad of [-1, 200_001, 1.5, "20000", null, NaN]) {
     assert.throws(
       () => resolveConfig({ maxResultChars: bad }),
-      (err) => err instanceof ConfigError && err.problems.some((p) => p.startsWith("maxResultChars:")),
+      (err) => err instanceof ConfigError && err.problems.some((p: string) => p.startsWith("maxResultChars:")),
     );
   }
 
   for (const bad of ["true", 1, 0, null]) {
     assert.throws(
       () => resolveConfig({ timeoutAdvice: bad }),
-      (err) => err instanceof ConfigError && err.problems.some((p) => p.startsWith("timeoutAdvice:")),
+      (err) => err instanceof ConfigError && err.problems.some((p: string) => p.startsWith("timeoutAdvice:")),
     );
   }
 });

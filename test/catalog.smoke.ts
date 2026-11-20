@@ -15,8 +15,13 @@ import { readFileSync } from "node:fs";
 import { createMethods } from "../dist/lib/methods.mjs";
 import { resolveConfig } from "../dist/lib/config.mjs";
 
-const failures = [];
-function check(ok, message) {
+interface SmokeMethodEntry {
+  name: string;
+  params?: Record<string, unknown>;
+}
+
+const failures: string[] = [];
+function check(ok: boolean, message: string): void {
   if (!ok) failures.push(message);
 }
 
@@ -108,8 +113,8 @@ check(
 check(infoOff.config?.tasksEnabled === false, "discover does not report the breaker as off");
 check(info.config?.tasksEnabled === true, "discover does not report the breaker as on");
 
-const paramsOf = (name) =>
-  Object.keys(info.methods.find((method) => method.name === name)?.params ?? {});
+const paramsOf = (name: string): string[] =>
+  Object.keys((info.methods as SmokeMethodEntry[]).find((method) => method.name === name)?.params ?? {});
 
 const askParams = paramsOf("dsh.sessions.ask");
 for (const want of ["workspaceId", "model", "reasoningEffort", "permissionPreset"]) {
@@ -143,8 +148,9 @@ const handlers = [
   "pumpTask",
   "decideApprovalTask",
 ];
+const methodMap = methods as unknown as Record<string, unknown>;
 for (const name of handlers) {
-  check(typeof methods[name] === "function", `handler missing: ${name}`);
+  check(typeof methodMap[name] === "function", `handler missing: ${name}`);
 }
 
 console.log(`methods: ${names.length}`);

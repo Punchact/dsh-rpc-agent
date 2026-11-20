@@ -4,24 +4,32 @@
 // bridge over real HTTP, because the failure they prevent lived in the transport.
 
 import assert from "node:assert/strict";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import test from "node:test";
 
 import { MAX_WAIT_SLICE_MS, WAIT_SLICE_MS, waitForTurn } from "../dist/lib/client.mjs";
-import { closeServer, listenSafe } from "./helpers/stub-server.mjs";
+import { closeServer, listenSafe } from "./helpers/stub-server.ts";
 
 const TOKEN = "test-token";
+
+interface StubRpcCall {
+  jsonrpc: string;
+  id?: unknown;
+  method: string;
+  params: Record<string, unknown>;
+}
 
 /**
  * Serve `script` one entry per request, then repeat the last entry. Each entry is
  * the JSON-RPC `result` to return.
  */
-async function stubBridge(script) {
-  const calls = [];
-  const { server, url } = await listenSafe((req, res) => {
-    const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
+async function stubBridge(script: Array<Record<string, unknown>>) {
+  const calls: StubRpcCall[] = [];
+  const { server, url } = await listenSafe((req: IncomingMessage, res: ServerResponse) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
-      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as StubRpcCall;
       calls.push(body);
       const index = Math.min(calls.length - 1, script.length - 1);
       const result = script[index];

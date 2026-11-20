@@ -13,7 +13,19 @@ import { createMethods } from "../dist/lib/methods.mjs";
 import { createTaskEngine, seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
 import { openStore } from "../dist/lib/tasks/store.mjs";
 
-function card(agentId, kind = "antigravity") {
+type TestStore = ReturnType<typeof openStore>;
+type SeedEntitiesFn = (
+  store: TestStore,
+  opts: {
+    principal?: { principalId: string; kind?: string };
+    workspace?: { workspaceId: string; rootPath: string };
+    capabilityRevision?: { revisionId: string; capability: string };
+  },
+) => Promise<unknown>;
+type ProbeAdapterArg = Parameters<typeof probesFromAdapter>[0];
+const seedBaseline = seedBaselineEntities as unknown as SeedEntitiesFn;
+
+function card(agentId: string, kind = "antigravity") {
   return {
     cardVersion: "capability-card@1",
     identity: { agentId, name: "External executor", kind, version: "1.0.0" },
@@ -30,10 +42,10 @@ function card(agentId, kind = "antigravity") {
   };
 }
 
-async function setup({ adapters }) {
+async function setup({ adapters }: { adapters: Record<string, ProbeAdapterArg> }) {
   const cfg = resolveConfig({ tasksEnabled: true });
   const store = openStore({ path: ":memory:" });
-  await seedBaselineEntities(store, {
+  await seedBaseline(store, {
     principal: { principalId: "local-operator" },
     workspace: { workspaceId: "local", rootPath: "C:\\ws" },
     capabilityRevision: { revisionId: "cap-review-1", capability: "review.diff@1" },
@@ -43,11 +55,11 @@ async function setup({ adapters }) {
     {
       sessionController: {},
       webServer: { getOrigin: () => "http://127.0.0.1:0" },
-      taskStore: store,
-      taskEngine: engine,
-      adapters,
+      taskStore: store as unknown as null,
+      taskEngine: engine as unknown as null,
+      adapters: adapters as unknown as null,
       // Exactly what index.mjs passes: the adapter the agent is assigned to.
-      agentProbes: (row) => probesFromAdapter(adapters[row?.adapter_kind]),
+      agentProbes: ((row: { adapter_kind: string }) => probesFromAdapter(adapters[row?.adapter_kind])) as unknown as null,
     },
     cfg,
     { get: () => undefined },

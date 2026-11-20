@@ -4,7 +4,15 @@ import assert from "node:assert/strict";
 import { formatTaskSummary as formatTaskSummaryFromBin } from "../dist/bin/dsh-rpc-mcp.mjs";
 import { formatTaskListLine, formatTaskSummary, formatToolError } from "../dist/lib/mcp-format.mjs";
 
-function textOf(result) {
+interface SummaryContentPart {
+  text: string;
+}
+
+interface SummaryToolResult {
+  content: SummaryContentPart[];
+}
+
+function textOf(result: SummaryToolResult): string {
   return result.content.map((part) => part.text).join("\n");
 }
 

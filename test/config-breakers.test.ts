@@ -41,7 +41,7 @@ test("circuit-breaker switches accept all valid values", () => {
 });
 
 test("circuit-breaker switches reject invalid values with ConfigError naming the key", () => {
-  const badCases = [
+  const badCases: Array<[Record<string, unknown>, RegExp]> = [
     [{ tasksEnabled: "true" }, /tasksEnabled/],
     [{ tasksMaxConcurrent: 0 }, /tasksMaxConcurrent/],
     [{ tasksMaxConcurrent: 33 }, /tasksMaxConcurrent/],
@@ -109,7 +109,7 @@ void rememberEntry("k", { missingSessionId: true });
   const cmd = ts.parseJsonConfigFileContent(parsed.config, ts.sys, repoRoot);
   const options = { ...cmd.options, noEmit: true };
 
-  const runProbe = (filePath, content) => {
+  const runProbe = (filePath: string, content: string) => {
     const virtualFiles = new Map([[resolve(filePath), content]]);
     const host = ts.createCompilerHost(options, true);
     const origGetSourceFile = host.getSourceFile.bind(host);
