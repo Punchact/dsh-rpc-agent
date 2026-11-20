@@ -12,6 +12,35 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, posix, resolve } from "node:path";
 
+interface NpmPackFileEntry {
+  path: string;
+}
+
+interface NpmPackManifest {
+  name: string;
+  version: string;
+  entryCount: number;
+  unpackedSize: number;
+  size: number;
+  files: NpmPackFileEntry[];
+}
+
+interface DistPackageJson {
+  private?: boolean;
+  publishConfig?: {
+    access?: string;
+  };
+  main?: string;
+  exports?: Record<string, unknown>;
+  bin?: Record<string, string>;
+  icon?: string;
+  dsh?: {
+    bundle?: {
+      patch?: string;
+    };
+  };
+}
+
 const distRoot = resolve(import.meta.dirname, "..", "dist");
 const EXPECTED_FILE_COUNT = 58;
 
@@ -36,13 +65,13 @@ const REQUIRED = [
 // node_modules and, worse, invite them to be run from an install whose Harness is not running.
 const FORBIDDEN_PREFIXES = ["test/", "scripts/", "node_modules/"];
 
-const problems = [];
+const problems: string[] = [];
 
-function fail(message) {
+function fail(message: string): void {
   problems.push(message);
 }
 
-function packList() {
+function packList(): NpmPackManifest[] | null {
   // A sandbox that forbids spawning cmd.exe cannot run npm at all (measured 2026-11-06:
   // `spawnSync C:\WINDOWS\system32\cmd.exe EPERM` under DSH's workspace-write policy). Rather
   // than skip the check, accept an already-captured `npm pack --dry-run --json` document: the
@@ -50,9 +79,9 @@ function packList() {
   const captured = process.env.CHECK_PACKAGE_JSON;
   if (captured) {
     try {
-      return JSON.parse(readFileSync(resolve(captured), "utf8"));
+      return JSON.parse(readFileSync(resolve(captured), "utf8")) as NpmPackManifest[];
     } catch (error) {
-      fail(`could not read CHECK_PACKAGE_JSON=${captured}: ${error.message}`);
+      fail(`could not read CHECK_PACKAGE_JSON=${captured}: ${error instanceof Error ? error.message : String(error)}`);
       return null;
     }
   }
@@ -79,7 +108,7 @@ function packList() {
   if (out.error) {
     fail(
       `could not run npm pack: ${out.error.message}` +
-        (out.error.code === "EPERM"
+        ((out.error as NodeJS.ErrnoException).code === "EPERM"
           ? ' — spawning a shell is blocked here; capture `npm pack --dry-run --json` yourself and pass CHECK_PACKAGE_JSON=<file>'
           : ""),
     );
@@ -96,9 +125,9 @@ function packList() {
     return null;
   }
   try {
-    return JSON.parse(out.stdout.slice(start));
+    return JSON.parse(out.stdout.slice(start)) as NpmPackManifest[];
   } catch (error) {
-    fail(`could not parse npm pack output: ${error.message}`);
+    fail(`could not parse npm pack output: ${error instanceof Error ? error.message : String(error)}`);
     return null;
   }
 }
@@ -135,7 +164,7 @@ for (const path of shipped) {
 }
 
 // package.json promises things by path; every promise must resolve inside the tarball.
-const pkg = JSON.parse(readFileSync(resolve(distRoot, "package.json"), "utf8"));
+const pkg = JSON.parse(readFileSync(resolve(distRoot, "package.json"), "utf8")) as DistPackageJson;
 
 // A tarball check cannot tell "publishable" from "not publishable": `npm publish --dry-run`
 // exits 0 even when `private` is true (measured 2026-11-05, npm 11.19). npm only refuses at the
@@ -148,7 +177,7 @@ if (pkg.publishConfig?.access !== "public") {
   fail(`publishConfig.access must be "public", got ${JSON.stringify(pkg.publishConfig?.access)}`);
 }
 
-const promised = [];
+const promised: Array<[string, string]> = [];
 if (pkg.main) promised.push(["main", pkg.main]);
 for (const [key, value] of Object.entries(pkg.exports ?? {})) {
   if (typeof value === "string" && !value.includes("*")) promised.push([`exports "${key}"`, value]);

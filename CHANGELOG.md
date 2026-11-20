@@ -1,5 +1,11 @@
 # 变更记录
 
+## [0.9.5] - 未发布
+
+- **门禁脚本也迁到 TypeScript（9 个文件 / 1,458 行）**：`scripts/` 下 `build`、`check-dist-fidelity`、`check-docs`、`check-entry-parity`、`check-package`、`check-release-path`、`check-surface`、`check-test-targets`、`count-cases` 从 `.mjs` 改成 `.ts`，由 Node 22.19+/24 的原生类型剥离直接运行（`node scripts/build.ts`），不需要额外构建步骤，也**不进发布包**。此前这 1,458 行既不在 `tsconfig.json` 的 `include` 里、也没有任何类型检查覆盖——"发布面 100% TypeScript"之外的一块盲区。新增 `tsconfig.scripts.json`（`noEmit`、`allowImportingTsExtensions`、继承 `strict`），`npm run check:types` 现在同时检查 `client.js` 与 `scripts/`，strict 报错从 **93 条收敛到 0**；`package.json`、两个 workflow、`docs/` 里的脚本路径同步更新，CI 的语法检查 glob 改为 `scripts/*.ts`（`node --check` 对 `.ts` 可用，本机与 CI 实测）。九处脚本的运行输出文案逐字未变（`docs ok …`、`surface ok …`、`check-release-path: ok …`、`build: 编译 41 个 .mts …` 等），`npm run verify` 与 `test:host` 均 exit 0。
+
+> 本版验证：校验 34 个 RPC 方法、MCP 11（默认）+ 11（	asksEnabled: true 时共 22）个工具；全链 47 个测试文件、434 例，本机 434/434 通过。
+
 ## [0.9.4] - 2026-11-20
 
 > 本版主题：全仓迁到 TypeScript，并把发布链路改成“发布的就是验过的那一份”。发布面 100% TypeScript（41 个 `.mts` 编译，仅 `client.js` 按决策 0.9.4-a 原位 `@ts-check`）；包内所有 `.mjs` 均为产物，不含源码。

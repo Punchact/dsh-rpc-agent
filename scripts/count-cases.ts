@@ -7,8 +7,8 @@
 // 摘要与「声明的用例条数」，`check-docs` 靠这两项判断「这个数是刚量的，还是有人手改的」。
 //
 // 用法：
-//   node scripts/count-cases.mjs            量一次并打印（不落盘）
-//   node scripts/count-cases.mjs --record   量一次并写进 docs/counts.json
+//   node scripts/count-cases.ts             量一次并打印（不落盘）
+//   node scripts/count-cases.ts --record    量一次并写进 docs/counts.json
 //
 // 沙箱注意：本机沙箱禁止 Node 用管道拉子进程 stdio（EPERM），所以子进程用 inherit，
 // TAP 用 `--test-reporter-destination` 直接落文件。
@@ -20,18 +20,42 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
+interface PackageJsonShape {
+  scripts?: {
+    test?: string;
+  };
+}
+
+interface CountsJsonShape {
+  note?: string;
+}
+
+export interface ChainDigestResult {
+  files: number;
+  digest: string;
+  declared: number;
+}
+
+interface MeasureResult {
+  pass: number;
+  fail: number;
+  skip: number;
+  status: number | null;
+  stderr: Buffer | string | null;
+}
+
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 const countsPath = join(REPO, "docs", "counts.json");
-const packageJson = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8"));
+const packageJson = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8")) as PackageJsonShape;
 
 /** `npm test` 链上的测试文件（顺序即执行顺序）。 */
-export function chainTestFiles() {
+export function chainTestFiles(): string[] {
   const chain = String(packageJson.scripts?.test ?? "");
   return [...chain.matchAll(/node (test\/[A-Za-z0-9_.-]+\.test\.mjs)/g)].map((m) => m[1]);
 }
 
 /** 测试文件内容摘要 + 声明的用例条数：任何一个变了，旧数字就不可信。 */
-export function chainDigest(files = chainTestFiles()) {
+export function chainDigest(files: string[] = chainTestFiles()): ChainDigestResult {
   const hash = createHash("sha256");
   let declared = 0;
   for (const rel of files) {
@@ -46,7 +70,7 @@ export function chainDigest(files = chainTestFiles()) {
 }
 
 /** 真跑一遍，从 TAP 里取 `# pass`。 */
-function measure(files) {
+function measure(files: string[]): MeasureResult {
   const dir = mkdtempSync(join(tmpdir(), "dsh-count-"));
   const tapPath = join(dir, "tap.log");
   try {
@@ -85,7 +109,7 @@ if (isMain) {
 
   if (record) {
     const counts = {
-      note: JSON.parse(readFileSync(countsPath, "utf8")).note,
+      note: (JSON.parse(readFileSync(countsPath, "utf8")) as CountsJsonShape).note,
       testCases: result.pass,
       testFiles: meta.files,
       declaredCases: meta.declared,

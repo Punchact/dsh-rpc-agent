@@ -10,10 +10,19 @@ import { join, posix, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import ts from "typescript";
 
+interface PackageJsonShape {
+  exports?: Record<string, unknown>;
+}
+
+interface ErrnoLikeError {
+  code?: unknown;
+  message?: unknown;
+}
+
 const REPO = resolve(import.meta.dirname, "..");
 const DIST = resolve(REPO, "dist");
 
-const problems = [];
+const problems: string[] = [];
 let checkedItems = 0;
 
 if (!existsSync(DIST) || !existsSync(join(DIST, "package.json"))) {
@@ -21,11 +30,11 @@ if (!existsSync(DIST) || !existsSync(join(DIST, "package.json"))) {
   process.exit(1);
 }
 
-function firstLine(absPath) {
+function firstLine(absPath: string): string {
   return readFileSync(absPath, "utf8").split(/\r?\n/, 1)[0];
 }
 
-function toPosixRel(root, absPath) {
+function toPosixRel(root: string, absPath: string): string {
   return relative(root, absPath).split("\\").join("/");
 }
 
@@ -33,12 +42,13 @@ function toPosixRel(root, absPath) {
 // Importing a half-built dist throws (a missing module, a syntax error). That is a real
 // failure of this check, but it must read like one: report the module and exit 1 instead of
 // dumping a Node stack trace, otherwise CI failure reports look like a broken tool.
-async function importEntry(label, absPath) {
+async function importEntry(label: string, absPath: string): Promise<Record<string, unknown>> {
   try {
-    return await import(pathToFileURL(absPath).href);
+    return (await import(pathToFileURL(absPath).href)) as Record<string, unknown>;
   } catch (error) {
+    const err = error as ErrnoLikeError | null | undefined;
     console.error(`check-entry-parity: FAIL (1)`);
-    console.error(`  - ${label} 无法导入（${toPosixRel(REPO, absPath)}）: ${error?.code ?? ""} ${error?.message ?? error}`);
+    console.error(`  - ${label} 无法导入（${toPosixRel(REPO, absPath)}）: ${err?.code ?? ""} ${err?.message ?? error}`);
     process.exit(1);
   }
 }
@@ -47,7 +57,7 @@ async function importEntry(label, absPath) {
 // unbuilt source entries in REPO can no longer be dynamically `import()`ed at runtime.
 // Parse the source entry's exported runtime names via TypeScript AST and compare against
 // the live `import()` of the built `dist/` entry.
-function resolveSourceEntryPath(relMjsPath) {
+function resolveSourceEntryPath(relMjsPath: string): string | null {
   const direct = join(REPO, relMjsPath);
   if (existsSync(direct)) return direct;
   if (relMjsPath.endsWith(".mjs")) {
@@ -57,7 +67,7 @@ function resolveSourceEntryPath(relMjsPath) {
   return null;
 }
 
-function collectBindingNames(nameNode, out) {
+function collectBindingNames(nameNode: ts.BindingName, out: string[]): void {
   if (ts.isIdentifier(nameNode)) {
     out.push(nameNode.text);
   } else if (ts.isObjectBindingPattern(nameNode)) {
@@ -69,7 +79,7 @@ function collectBindingNames(nameNode, out) {
   }
 }
 
-function extractSourceExports(label, relMjsPath) {
+function extractSourceExports(label: string, relMjsPath: string): string[] {
   const absPath = resolveSourceEntryPath(relMjsPath);
   if (!absPath) {
     console.error(`check-entry-parity: FAIL (1)`);
@@ -78,16 +88,17 @@ function extractSourceExports(label, relMjsPath) {
   }
   const text = readFileSync(absPath, "utf8");
   const sf = ts.createSourceFile(absPath, text, ts.ScriptTarget.Latest, true);
-  const names = new Set();
+  const names = new Set<string>();
   for (const stmt of sf.statements) {
-    const hasExport = Boolean(stmt.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword));
-    const hasDefault = Boolean(stmt.modifiers?.some((m) => m.kind === ts.SyntaxKind.DefaultKeyword));
+    const modifiers = (stmt as { modifiers?: readonly ts.ModifierLike[] }).modifiers;
+    const hasExport = Boolean(modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword));
+    const hasDefault = Boolean(modifiers?.some((m) => m.kind === ts.SyntaxKind.DefaultKeyword));
     if (hasExport) {
       if (hasDefault) names.add("default");
       if (ts.isFunctionDeclaration(stmt) || ts.isClassDeclaration(stmt)) {
         if (stmt.name) names.add(stmt.name.text);
       } else if (ts.isVariableStatement(stmt)) {
-        const extracted = [];
+        const extracted: string[] = [];
         for (const decl of stmt.declarationList.declarations) {
           collectBindingNames(decl.name, extracted);
         }
@@ -143,9 +154,9 @@ for (const binRel of ["bin/dsh-rpc.mjs", "bin/dsh-rpc-mcp.mjs"]) {
 }
 
 // 3. package.json exports subpaths in src vs dist
-const srcPkg = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8"));
-const distPkg = JSON.parse(readFileSync(join(DIST, "package.json"), "utf8"));
-const stripDistPrefix = (target) =>
+const srcPkg = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8")) as PackageJsonShape;
+const distPkg = JSON.parse(readFileSync(join(DIST, "package.json"), "utf8")) as PackageJsonShape;
+const stripDistPrefix = (target: unknown): unknown =>
   typeof target === "string" ? target.replace(/^\.\/dist\//, "./").replace(/^dist\//, "") : target;
 
 const srcExports = srcPkg.exports ?? {};
@@ -176,7 +187,7 @@ for (const [subpath, srcTarget] of Object.entries(srcExports)) {
       problems.push(`exports["${subpath}"] 目录缺失: ${dirRel}`);
       continue;
     }
-    const matchDir = (base) =>
+    const matchDir = (base: string): string[] =>
       readdirSync(join(base, dirRel))
         .filter((f) => f.startsWith(prefix) && f.endsWith(suffix))
         .sort();

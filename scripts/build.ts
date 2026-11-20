@@ -22,7 +22,8 @@ import {
   collectMigratedOutputs,
   collectUnmigratedFiles,
   verifyDistFidelity,
-} from "./check-dist-fidelity.mjs";
+  type PackageManifest,
+} from "./check-dist-fidelity.ts";
 
 const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const DIST = join(REPO, "dist");
@@ -79,7 +80,7 @@ for (const rel of unmigrated) {
 }
 
 // 4. Write <staging>/package.json (publishable manifest derived from root package.json)
-const rootPkg = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8"));
+const rootPkg = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8")) as PackageManifest;
 const distPkg = buildDistManifest(rootPkg);
 writeFileSync(join(STAGING, "package.json"), `${JSON.stringify(distPkg, null, 2)}\n`, "utf8");
 
