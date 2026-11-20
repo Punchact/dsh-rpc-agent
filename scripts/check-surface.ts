@@ -62,15 +62,26 @@ function sliceBlock(source: string, header: string, footer: string): string {
   return source.slice(start, end < 0 ? source.length : end);
 }
 
-const methodsSource = readDist("lib/methods.mjs");
-const catalogBlock = sliceBlock(methodsSource, "const METHOD_CATALOG = [", "\n];");
-const codeRpc = [...catalogBlock.matchAll(/name:\s*"(dsh\.[a-zA-Z.]+)"/g)].map((m) => m[1]);
+// METHOD_CATALOG 可能仍在 `lib/methods.mjs`，也可能被拆到 `lib/methods/catalog.mjs`（0.9.5-i 的拆分）；
+// 两个位置都找，找到就切那一块，避免拆分本身把门禁弄红。
+const catalogSource = (() => {
+  const candidates = ["lib/methods.mjs", "lib/methods/catalog.mjs"];
+  for (const rel of candidates) {
+    const full = join(REPO, "dist", rel);
+    if (existsSync(full) && readDist(rel).includes("const METHOD_CATALOG = [")) return readDist(rel);
+  }
+  throw new Error("check-surface: 在 dist/lib/methods.mjs 与 dist/lib/methods/catalog.mjs 里都没找到 const METHOD_CATALOG = [");
+})();
+const catalogBlock = sliceBlock(catalogSource, "const METHOD_CATALOG = [", "\n];");
+const codeRpc = [...catalogBlock.matchAll(/name:\s*"(dsh\.[a-zA-Z.]+)"/g)].flatMap((m) =>
+  m[1] !== undefined ? [m[1]] : [],
+);
 
 const mcpSource = readDist("bin/dsh-rpc-mcp.mjs");
 const codeMcp = [
   ...sliceBlock(mcpSource, "const BASE_TOOLS = [", "\n];").matchAll(/name:\s*"(dsh_[a-z_]+)"/g),
   ...sliceBlock(mcpSource, "const TASK_TOOLS = [", "\n];").matchAll(/name:\s*"(dsh_[a-z_]+)"/g),
-].map((m) => m[1]);
+].flatMap((m) => (m[1] !== undefined ? [m[1]] : []));
 
 const cliSource = readDist("bin/dsh-rpc.mjs");
 const tasksCli = sliceBlock(cliSource, "async function runTasksCommand", "async function runAgentsCommand");
