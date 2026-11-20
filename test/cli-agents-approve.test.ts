@@ -3,7 +3,28 @@ import test from "node:test";
 
 import { UsageError, main, parseArgv } from "../dist/bin/dsh-rpc.mjs";
 
-function withMockCliRpc(responder, fn) {
+interface MockCliRpcRequest {
+  jsonrpc?: string;
+  id?: number | string;
+  method: string;
+  params: Record<string, unknown>;
+}
+
+interface MockCliRpcAnswer {
+  result?: Record<string, unknown>;
+  error?: { code: number; message: string };
+}
+
+interface MockCliRpcContext {
+  calls: MockCliRpcRequest[];
+  getStdout: () => string;
+  getStderr: () => string;
+}
+
+function withMockCliRpc(
+  responder: (req: MockCliRpcRequest) => MockCliRpcAnswer | Promise<MockCliRpcAnswer>,
+  fn: (ctx: MockCliRpcContext) => Promise<void>,
+) {
   const prevFetch = globalThis.fetch;
   const prevUrl = process.env.DSH_RPC_URL;
   const prevToken = process.env.DSH_RPC_TOKEN;
@@ -15,18 +36,18 @@ function withMockCliRpc(responder, fn) {
 
   let stdout = "";
   let stderr = "";
-  process.stdout.write = (chunk) => {
+  process.stdout.write = ((chunk: string | Uint8Array) => {
     stdout += String(chunk);
     return true;
-  };
-  process.stderr.write = (chunk) => {
+  }) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
     stderr += String(chunk);
     return true;
-  };
+  }) as typeof process.stderr.write;
 
-  const calls = [];
-  globalThis.fetch = async (_url, init) => {
-    const req = JSON.parse(init.body);
+  const calls: MockCliRpcRequest[] = [];
+  globalThis.fetch = (async (_url: string, init: RequestInit = {}) => {
+    const req = JSON.parse(String(init.body ?? "{}")) as MockCliRpcRequest;
     calls.push(req);
     const ans = await responder(req);
     const payload = ans.error
@@ -39,7 +60,7 @@ function withMockCliRpc(responder, fn) {
         return JSON.stringify(payload);
       },
     };
-  };
+  }) as unknown as typeof globalThis.fetch;
 
   return Promise.resolve()
     .then(() => fn({ calls, getStdout: () => stdout, getStderr: () => stderr }))
@@ -70,13 +91,14 @@ test("parseArgv parses tasks approve flags cleanly", () => {
     "safe",
     "--json",
   ]);
+  const flags = parsed.flags as unknown as Record<string, unknown>;
   assert.deepEqual(parsed.positional, ["tasks", "approve"]);
-  assert.equal(parsed.flags.task, "task_1");
-  assert.equal(parsed.flags.attempt, "att_1");
-  assert.equal(parsed.flags.approval, "apr_1");
-  assert.equal(parsed.flags.decision, "allow");
-  assert.equal(parsed.flags.reason, "safe");
-  assert.equal(parsed.flags.json, true);
+  assert.equal(flags.task, "task_1");
+  assert.equal(flags.attempt, "att_1");
+  assert.equal(flags.approval, "apr_1");
+  assert.equal(flags.decision, "allow");
+  assert.equal(flags.reason, "safe");
+  assert.equal(flags.json, true);
 });
 
 test("tasks approve rejects missing or invalid flags with UsageError (exit 2)", async () => {

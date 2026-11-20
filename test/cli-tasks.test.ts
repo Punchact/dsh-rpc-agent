@@ -19,7 +19,28 @@ import {
 const NEXT_HINT =
   "  next: this Harness plugin predates the task centre (0.9.0). Upgrade the plugin inside the DSH profile — the bridge and the plugin ship together.";
 
-function withMockCliRpc(responder, fn) {
+interface MockCliRpcRequest {
+  jsonrpc?: string;
+  id?: number | string;
+  method: string;
+  params: Record<string, unknown>;
+}
+
+interface MockCliRpcAnswer {
+  result?: Record<string, unknown>;
+  error?: { code: number; message: string };
+}
+
+interface MockCliRpcContext {
+  calls: MockCliRpcRequest[];
+  getStdout: () => string;
+  getStderr: () => string;
+}
+
+function withMockCliRpc(
+  responder: (req: MockCliRpcRequest) => MockCliRpcAnswer | Promise<MockCliRpcAnswer>,
+  fn: (ctx: MockCliRpcContext) => Promise<void>,
+) {
   const prevFetch = globalThis.fetch;
   const prevUrl = process.env.DSH_RPC_URL;
   const prevToken = process.env.DSH_RPC_TOKEN;
@@ -31,18 +52,18 @@ function withMockCliRpc(responder, fn) {
 
   let stdout = "";
   let stderr = "";
-  process.stdout.write = (chunk) => {
+  process.stdout.write = ((chunk: string | Uint8Array) => {
     stdout += String(chunk);
     return true;
-  };
-  process.stderr.write = (chunk) => {
+  }) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
     stderr += String(chunk);
     return true;
-  };
+  }) as typeof process.stderr.write;
 
-  const calls = [];
-  globalThis.fetch = async (_url, init) => {
-    const req = JSON.parse(init.body);
+  const calls: MockCliRpcRequest[] = [];
+  globalThis.fetch = (async (_url: string, init: RequestInit = {}) => {
+    const req = JSON.parse(String(init.body ?? "{}")) as MockCliRpcRequest;
     calls.push(req);
     const ans = await responder(req);
     const payload = ans.error
@@ -55,7 +76,7 @@ function withMockCliRpc(responder, fn) {
         return JSON.stringify(payload);
       },
     };
-  };
+  }) as unknown as typeof globalThis.fetch;
 
   return Promise.resolve()
     .then(() => fn({ calls, getStdout: () => stdout, getStderr: () => stderr }))
@@ -81,10 +102,11 @@ test("parseArgv parses tasks and agents flags cleanly and rejects unknown flags"
     "stop",
     "--json",
   ]);
+  const flags = parsed.flags as unknown as Record<string, unknown>;
   assert.deepEqual(parsed.positional, ["tasks", "cancel", "task_1"]);
-  assert.equal(parsed.flags["expected-version"], "2");
-  assert.equal(parsed.flags.reason, "stop");
-  assert.equal(parsed.flags.json, true);
+  assert.equal(flags["expected-version"], "2");
+  assert.equal(flags.reason, "stop");
+  assert.equal(flags.json, true);
 
   assert.throws(() => parseArgv(["tasks", "list", "--bogus-flag"]), UsageError);
 });
@@ -245,10 +267,10 @@ test("CLI probeHealth and failureExitCode distinguish EBADPORT without waiting o
 
   const prevErrWrite = process.stderr.write;
   let stderr = "";
-  process.stderr.write = (chunk) => {
+  process.stderr.write = ((chunk: string | Uint8Array) => {
     stderr += String(chunk);
     return true;
-  };
+  }) as typeof process.stderr.write;
   const startedAt = Date.now();
   try {
     const exitCode = await probeHealth("http://127.0.0.1:5060/dsh-rpc", 5_000);
@@ -375,7 +397,7 @@ void badCmd; void badSub; void badExit; void badLevel;
   };
 
   const program = ts.createProgram([validFile, badFile], options, host);
-  const collect = (rootFile) => {
+  const collect = (rootFile: string) => {
     const sf = program.getSourceFile(rootFile);
     if (!sf) throw new Error(`tsc did not load probe ${rootFile}`);
     return ts

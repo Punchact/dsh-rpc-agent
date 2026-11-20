@@ -10,12 +10,80 @@ import ts from "typescript";
 import { apply } from "../dist/index.mjs";
 import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
 
+interface FakeHttpReq {
+  method: string;
+  url: string;
+  headers: Record<string, string>;
+  socket: { remoteAddress: string };
+  on(event: string, cb: (chunk?: Buffer) => void): FakeHttpReq;
+}
+
+interface FakeHttpRes {
+  destroyed: boolean;
+  writableEnded: boolean;
+  writeHead(s: number): void;
+  end(chunk?: string | Buffer): void;
+}
+
+type FakeRouteHandler = (req: FakeHttpReq, res: FakeHttpRes) => Promise<void> | void;
+
+interface FakePluginCtx {
+  webServer: {
+    getOrigin(): string;
+    register(spec: { path: string; handler: FakeRouteHandler }): () => boolean;
+  };
+  sessionController: Record<string, unknown>;
+  logger: {
+    info(m: string): void;
+    warn(m: string): void;
+    error(): void;
+    debug(): void;
+  };
+  get(name?: unknown): unknown;
+  on(event: string, fn: () => void): void;
+  effect(fn: () => (() => void) | void): void;
+  taskAdapterFactories?: Record<string, () => unknown>;
+}
+
+interface JsonRpcResponseBody {
+  result?: {
+    agentId?: string;
+    items?: unknown[];
+    taskCentre?: {
+      ready: boolean;
+      mode: string;
+      seedError: unknown;
+      startError: unknown;
+    };
+  };
+  error?: {
+    data?: unknown;
+  };
+}
+
+interface ClientRegistryEntry {
+  id: string;
+  factory: (dep: (name: string) => unknown) => {
+    name: string;
+    inject: Iterable<string>;
+    apply(ctx: {
+      effect(fn: () => void, label?: string): void;
+      slots: {
+        inject(slot: string, create: () => { meta: { id: string } }): void;
+        register(meta: unknown, component: unknown): { meta: unknown; component: unknown };
+      };
+    }): void;
+  };
+}
+
+const applyPlugin = apply as unknown as (ctx: FakePluginCtx, config: Record<string, unknown>) => Promise<unknown>;
+
 function makeFakeCtx() {
-  const routes = new Map();
-  const disposers = [];
-  const warnings = [];
-  const infos = [];
-  const ctx = {
+  const routes = new Map<string, FakeRouteHandler>();
+  const disposers: Array<() => void> = [];
+  const warnings: string[] = [];
+  const infos: string[] = [];
+  const ctx: FakePluginCtx = {
     webServer: {
       getOrigin: () => "http://127.0.0.1:0",
       register({ path, handler }) {
@@ -48,11 +116,16 @@ function makeFakeCtx() {
   };
 }
 
-async function callJsonRpc(routeHandler, token, method, params = {}) {
+async function callJsonRpc(
+  routeHandler: FakeRouteHandler,
+  token: string,
+  method: string,
+  params: Record<string, unknown> = {},
+): Promise<{ status: number; body: JsonRpcResponseBody }> {
   const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method, params });
   let status = 0;
   let responseBody = "";
-  const req = {
+  const req: FakeHttpReq = {
     method: "POST",
     url: "/dsh-rpc",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
@@ -63,7 +136,7 @@ async function callJsonRpc(routeHandler, token, method, params = {}) {
       return this;
     },
   };
-  const res = {
+  const res: FakeHttpRes = {
     destroyed: false,
     writableEnded: false,
     writeHead(s) {
@@ -75,7 +148,7 @@ async function callJsonRpc(routeHandler, token, method, params = {}) {
     },
   };
   await routeHandler(req, res);
-  return { status, body: JSON.parse(responseBody) };
+  return { status, body: JSON.parse(responseBody) as JsonRpcResponseBody };
 }
 
 test("index.mjs leaves task DB untouched when tasksEnabled=false", async () => {
@@ -84,7 +157,7 @@ test("index.mjs leaves task DB untouched when tasksEnabled=false", async () => {
   process.env.DSH_HOME = home;
   const fake = makeFakeCtx();
   try {
-    await apply(fake.ctx, { token: "a".repeat(32), tasksEnabled: false });
+    await applyPlugin(fake.ctx, { token: "a".repeat(32), tasksEnabled: false });
     const defaultDb = join(home, "storages", "task-center", "tasks.db");
     assert.equal(existsSync(defaultDb), false);
   } finally {
@@ -109,7 +182,7 @@ test("index.mjs opens tasks.db, seeds baseline entities, wires dispatcher, and h
   };
 
   try {
-    await apply(fake.ctx, {
+    await applyPlugin(fake.ctx, {
       token,
       defaultCwd: home,
       tasksEnabled: true,
@@ -127,7 +200,7 @@ test("index.mjs opens tasks.db, seeds baseline entities, wires dispatcher, and h
     // Wait one microtask for async seedBaselineEntities
     await new Promise((r) => setTimeout(r, 20));
 
-    const rpcHandler = fake.routes.get("/dsh-rpc");
+    const rpcHandler = fake.routes.get("/dsh-rpc")!;
     assert.equal(typeof rpcHandler, "function");
 
     // Register an agent card referencing codex, then list agents + check baseline principal works in preview
@@ -146,11 +219,11 @@ test("index.mjs opens tasks.db, seeds baseline entities, wires dispatcher, and h
       },
     });
     assert.equal(reg.status, 200);
-    assert.equal(reg.body.result.agentId, "ag-codex");
+    assert.equal(reg.body.result!.agentId, "ag-codex");
 
     const listed = await callJsonRpc(rpcHandler, token, "dsh.tasks.list", {});
     assert.equal(listed.status, 200);
-    assert.deepEqual(listed.body.result.items, []);
+    assert.deepEqual(listed.body.result!.items, []);
 
     // Verify missing adapter surfaces as ADAPTER_UNAVAILABLE on dispatch (not startup crash)
     // First seed capability revision directly via a second call or verify error shape when dispatching unknown task
@@ -161,13 +234,13 @@ test("index.mjs opens tasks.db, seeds baseline entities, wires dispatcher, and h
     });
     assert.equal(resolveMissingVersion.status, 200);
     assert.ok(
-      isTaskError({ data: resolveMissingVersion.body.error.data }, TASK_ERROR.VALIDATION_FAILED),
+      isTaskError({ data: resolveMissingVersion.body.error!.data }, TASK_ERROR.VALIDATION_FAILED),
       "resolve must require expectedStateVersion rather than guess one",
     );
 
     const badDispatch = await callJsonRpc(rpcHandler, token, "dsh.tasks.dispatch", { taskId: "task_missing" });
     assert.equal(badDispatch.status, 200);
-    assert.ok(isTaskError({ data: badDispatch.body.error.data }, TASK_ERROR.NOT_FOUND));
+    assert.ok(isTaskError({ data: badDispatch.body.error!.data }, TASK_ERROR.NOT_FOUND));
   } finally {
     fake.dispose();
     if (prevHome === undefined) delete process.env.DSH_HOME;
@@ -185,20 +258,20 @@ test("index.mjs survives a strict Host whose ctx.get() throws for unknown servic
   process.env.DSH_HOME = home;
   const token = "c".repeat(32);
   const fake = makeFakeCtx();
-  const strictGet = (name) => {
+  const strictGet = (name: unknown) => {
     throw new Error(`service not found: ${String(name)}`);
   };
   fake.ctx.get = strictGet;
 
   try {
-    await apply(fake.ctx, { token, defaultCwd: home, tasksEnabled: true });
+    await applyPlugin(fake.ctx, { token, defaultCwd: home, tasksEnabled: true });
 
-    const rpcHandler = fake.routes.get("/dsh-rpc");
+    const rpcHandler = fake.routes.get("/dsh-rpc")!;
     assert.equal(typeof rpcHandler, "function");
 
     const ping = await callJsonRpc(rpcHandler, token, "dsh.ping", {});
     assert.equal(ping.status, 200);
-    const centre = ping.body.result.taskCentre;
+    const centre = ping.body.result!.taskCentre!;
     assert.equal(centre.ready, true, "the task centre must report itself ready");
     assert.equal(centre.mode, "file", "a ready task centre must be backed by the file store");
     assert.equal(centre.seedError, null, "baseline seeding must actually succeed");
@@ -215,8 +288,12 @@ test("index.mjs survives a strict Host whose ctx.get() throws for unknown servic
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(dbPath, { readOnly: true });
     try {
-      const principals = db.prepare("SELECT principal_id FROM principals").all().map((row) => row.principal_id);
-      const workspaces = db.prepare("SELECT workspace_id FROM workspaces").all().map((row) => row.workspace_id);
+      const principals = (db.prepare("SELECT principal_id FROM principals").all() as Array<{ principal_id: string }>).map(
+        (row) => row.principal_id,
+      );
+      const workspaces = (db.prepare("SELECT workspace_id FROM workspaces").all() as Array<{ workspace_id: string }>).map(
+        (row) => row.workspace_id,
+      );
       assert.deepEqual(principals, ["local-operator"]);
       assert.deepEqual(workspaces, ["local"]);
     } finally {
@@ -239,7 +316,7 @@ test("a Host that binds a fetch-blocked port is warned about at startup", async 
   const fake = makeFakeCtx();
   fake.ctx.webServer.getOrigin = () => "http://127.0.0.1:5060";
   try {
-    await apply(fake.ctx, { token: "c".repeat(32), defaultCwd: home, tasksEnabled: false });
+    await applyPlugin(fake.ctx, { token: "c".repeat(32), defaultCwd: home, tasksEnabled: false });
     assert.ok(
       fake.warnings.some((w) => /port 5060 is one fetch refuses/.test(w) && /EBADPORT/.test(w)),
       "a blocked Host port must be named at startup, because every out-of-process caller will fail",
@@ -263,7 +340,7 @@ test("an unparseable origin still lets the bridge start and publish", async () =
   const fake = makeFakeCtx();
   fake.ctx.webServer.getOrigin = () => "not-a-url";
   try {
-    await apply(fake.ctx, { token: "d".repeat(32), defaultCwd: home, tasksEnabled: false });
+    await applyPlugin(fake.ctx, { token: "d".repeat(32), defaultCwd: home, tasksEnabled: false });
     assert.equal(
       fake.warnings.some((w) => /bad port/.test(w)),
       false,
@@ -281,8 +358,8 @@ test("blocked-port startup warning deduplicates per port rather than silencing a
   const home = mkdtempSync(join(tmpdir(), "dsh-wire-rewarn-"));
   process.env.DSH_HOME = home;
   const fake = makeFakeCtx();
-  const readyHandlers = [];
-  let currentOrigin = null;
+  const readyHandlers: Array<() => void> = [];
+  let currentOrigin: string | null = null;
   fake.ctx.webServer.getOrigin = () => {
     if (!currentOrigin) throw new Error("not bound yet");
     return currentOrigin;
@@ -291,7 +368,7 @@ test("blocked-port startup warning deduplicates per port rather than silencing a
     if (event === "ready") readyHandlers.push(fn);
   };
   try {
-    await apply(fake.ctx, { token: "e".repeat(32), defaultCwd: home, tasksEnabled: false });
+    await applyPlugin(fake.ctx, { token: "e".repeat(32), defaultCwd: home, tasksEnabled: false });
     assert.equal(readyHandlers.length, 1);
 
     currentOrigin = "http://127.0.0.1:5060";
@@ -367,7 +444,7 @@ void badState;
   const cmd = ts.parseJsonConfigFileContent(parsed.config, ts.sys, repoRoot);
   const options = { ...cmd.options, noEmit: true };
 
-  const runProbe = (filePath, content) => {
+  const runProbe = (filePath: string, content: string) => {
     const virtualFiles = new Map([[resolve(filePath), content]]);
     const host = ts.createCompilerHost(options, true);
     const origGetSourceFile = host.getSourceFile.bind(host);
@@ -417,14 +494,14 @@ test("client.js passes strict tsc checkJs with 0 diagnostics and registers the W
     [],
   );
 
-  let loaded = null;
-  const registered = [];
-  const effects = [];
+  let loaded = null as ClientRegistryEntry | null;
+  const registered: Array<{ slot: string; entry: { meta: { id: string } } }> = [];
+  const effects: Array<{ fn: () => void; label?: string }> = [];
   const sandbox = {
     navigator: { language: "zh-CN" },
     window: {
       __ModuleLoader__: {
-        load(entry) {
+        load(entry: ClientRegistryEntry) {
           loaded = entry;
         },
       },
@@ -432,13 +509,13 @@ test("client.js passes strict tsc checkJs with 0 diagnostics and registers the W
   };
   vm.runInNewContext(clientSource, sandbox, { filename: "dist/client.js" });
   assert.equal(loaded?.id, "@punchact/dsh-rpc-agent");
-  const plugin = loaded.factory((dep) => {
+  const plugin = loaded!.factory((dep) => {
     assert.equal(dep, "react");
     return {
       createElement: () => null,
-      useState: (init) => [typeof init === "function" ? init() : init, () => {}],
+      useState: <T>(init: T | (() => T)) => [typeof init === "function" ? (init as () => T)() : init, () => {}],
       useEffect: () => {},
-      useRef: (v) => ({ current: v }),
+      useRef: <T>(v: T) => ({ current: v }),
     };
   });
   assert.equal(plugin.name, "dsh-rpc");
