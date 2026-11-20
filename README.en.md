@@ -76,7 +76,7 @@ Repository and package name are both `dsh-rpc-agent`; the commands (`dsh-rpc`, `
 - **Self-describing**: `dsh_capabilities` returns an eight-section snapshot (runtime, permission presets, callable tools, MCP prefixes, sessions, workspaces, plugins), so a planner does not have to guess what this machine offers.
 - **No pretend knowledge**: when an outer client caps tool calls below the bridge budget, the bridge says so and recommends polling in slices instead of letting a long job look like a failure.
 - **Managed external agent tasks (Task centre, `tasksEnabled: false` by default)**: a 15-table SQLite ledger, 11-state machine, and capability cards/read-only probes driving DSH itself, Antigravity, and Codex App Server; see [docs/task-center.md](./docs/task-center.md).
-- **Regression tests guard the sharp edges**: 50 test files (452 cases) + catalog smoke (452/452 pass locally, including the 15 `approvals` cases) + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
+- **Regression tests guard the sharp edges**: 51 test files (468 cases) + catalog smoke (468/468 pass locally, including the 15 `approvals` cases) + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
 
 ## Install and update
 
@@ -789,7 +789,7 @@ npm run verify                 # build + entry parity + npm test + check:package
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 50 test files, 452 cases, plus catalog smoke; no running Harness needed
+npm test                       # 51 test files, 468 cases, plus catalog smoke; no running Harness needed
 node test/host.test.ts        # 1 case: real WebServer integration (needs npm ci first)
 node test/e2e.mjs              # 14 cases: end to end against a real Harness (--cwd takes an absolute path only)
 node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a real Harness
@@ -812,7 +812,7 @@ npm run docs:surface    # re-extract the snapshot after editing the plan doc (ne
 `check:surface` looks both ways: everything the plan promised must exist, and any new task/agent-family interface in code must be either in the plan or recorded in the snapshot's `implementationOnly`. That is the check that would have caught 0.9.0's "plan promised `dsh.tasks.resolve`, implementation missed it".
 
 <details>
-<summary>What each of the 50 test files covers</summary>
+<summary>What each of the 51 test files covers</summary>
 
 | Suite | Cases | Covers |
 | --- | --- | --- |
@@ -855,6 +855,7 @@ npm run docs:surface    # re-extract the snapshot after editing the plan doc (ne
 | `mcp-tasks-tools` | 6 | 8 gated task MCP tools visibility, disabled rejections, `reconcile`/`decideApproval` exclusion, argument validation and prototype-key refusal |
 | `mcp-summary` | 3 | A text-only summary must say "unvalidated": the marker rides the `result` line and repeats in the meta line, and validated results stay clean |
 | `cli-tasks` | 5 | `tasks` / `agents` flag parsing, `UsageError` (exit 2), JSON-RPC calls, version-skew hint |
+| `mcp-base-tools` | 16 | Name-level contracts for the five read-only tools: `dsh_status`/`dsh_workspaces`/`dsh_capabilities`/`dsh_permissions`/`dsh_approvals_pending` method names, argument mapping (`wait_ms`→`waitMs`, `session_id`→`sessionId`), rendering, empty-result and error branches, and "a bad argument never reaches the plugin" |
 | `cli-agents-approve` | 3 | `tasks approve` flag checks, `dsh.tasks.decideApproval`, and `agents` CLI commands |
 | `registry` | 10 | Sticky-session I/O, concurrent updates, key isolation, rotation |
 | `pending` | 36 | Pending store, long polling, cancellation withdrawal, allowance pre-claim, transaction boundary |
@@ -869,7 +870,7 @@ npm run docs:surface    # re-extract the snapshot after editing the plan doc (ne
 
 </details>
 
-`npm test` runs these 50 test files plus the catalog smoke in a fixed order; `npm run test:host` runs the real-WebServer integration test; `npm run test:e2e` / `npm run test:edge` need a live Harness.
+`npm test` runs these 51 test files plus the catalog smoke in a fixed order; `npm run test:host` runs the real-WebServer integration test; `npm run test:e2e` / `npm run test:edge` need a live Harness.
 
 > [!TIP]
 > **If `node --test` hits `spawn EPERM` in a restricted sandbox**: run individual files via `node <file>` or pass `node --test --test-isolation=none <file>`.
@@ -881,7 +882,7 @@ A few worth calling out:
 - **Edge** probes the protocol layer: batches, notifications, id shapes, auth headers, oversized bodies (a genuine 413, not a dropped connection), parameter-injection defences, timeout clamping, concurrent asks, `limit` semantics.
 - **Port drift** (manual): point `endpoint.json` at a dead port and run `dsh-rpc ping`; expect exit code 3 and a readable error mentioning `nothing is listening`, `pid` and `health --wait`.
 
-Local verification (2026-11-19, 0.9.0, real repository): all 50 test files in the `npm test` chain pass (**452/452** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.ts` (`methods: 34` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`). Formatting (UTF-8 without BOM, LF) is a review convention here, not an automated gate.
+Local verification (2026-11-19, 0.9.0, real repository): all 51 test files in the `npm test` chain pass (**468/468** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.ts` (`methods: 34` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`). Formatting (UTF-8 without BOM, LF) is a review convention here, not an automated gate.
 
 ## License
 
