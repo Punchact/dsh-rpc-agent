@@ -136,9 +136,10 @@ test("per-type detail rendering, type column padding, callId resolution, and mis
 });
 
 test("detailChars cap and newline collapsing keep each record on a single line", () => {
-  const circular = {};
+  const circular: { self?: unknown; toString: () => string } = {
+    toString: () => "first\nsecond\rthird",
+  };
   circular.self = circular;
-  circular.toString = () => "first\nsecond\rthird";
 
   const out = formatHistory(
     {
@@ -244,7 +245,7 @@ test("a plugin that ignored since/kinds is reported instead of a fake delta", ()
 
   const out = formatHistory(unfiltered, { since: 18, kinds: ["tool/call", "tool/result", "turn/end"] });
   assert.equal(out.header, "session session-old · turn 1 · idle · window 4 events (hasMore: no) · cursor 20");
-  assert.match(out.note, /ignored since and kinds/);
+  assert.match(out.note ?? "", /ignored since and kinds/);
   assert.equal(out.structured.note, out.note);
   // The records are still shown: hiding them would be a lie in the other direction.
   assert.equal(out.shown, 4);
@@ -285,7 +286,7 @@ test("an ignored max_chars is detected from the payload itself", () => {
 
   // Requested 80 chars, got a payload far larger, no `truncated` flag → ignored.
   const ignoredCap = formatHistory(payload, { requestedMaxChars: 80 });
-  assert.match(ignoredCap.note, /max_chars/);
+  assert.match(ignoredCap.note ?? "", /max_chars/);
 
   // Same payload with the flag the RPC sets when it did bound the records.
   const bounded = formatHistory({ ...payload, truncated: true }, { requestedMaxChars: 80 });

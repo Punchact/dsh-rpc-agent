@@ -147,7 +147,7 @@ void badSection;
   const cmd = ts.parseJsonConfigFileContent(parsed.config, ts.sys, repoRoot);
   const options = { ...cmd.options, noEmit: true };
 
-  const runProbe = (filePath, content) => {
+  const runProbe = (filePath: string, content: string) => {
     const virtualFiles = new Map([[resolve(filePath), content]]);
     const host = ts.createCompilerHost(options, true);
     const origGetSourceFile = host.getSourceFile.bind(host);

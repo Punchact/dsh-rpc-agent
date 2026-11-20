@@ -7,7 +7,15 @@ import { buildDispatcher } from "../dist/lib/http.mjs";
 // registered, so a caller could submit work into an in-memory store that would
 // vanish on restart. A disabled feature has to look disabled.
 
-function fakeMethods(overrides = {}) {
+interface BreakerErrorLike {
+  code?: unknown;
+  message: string;
+  data?: {
+    reason?: unknown;
+  };
+}
+
+function fakeMethods(overrides: Record<string, unknown> = {}) {
   return {
     ping: () => ({ ok: true }),
     listTasks: () => ({ items: [] }),
@@ -22,7 +30,7 @@ test("a disabled task centre answers -32601 for the whole family", async () => {
   for (const method of ["dsh.tasks.list", "dsh.tasks.submit", "dsh.tasks.resolve", "dsh.agents.list"]) {
     await assert.rejects(
       () => dispatch(method, {}),
-      (error) => {
+      (error: BreakerErrorLike) => {
         assert.equal(error.code, -32601, method);
         assert.equal(error.data?.reason, "tasks_disabled", method);
         assert.match(error.message, /tasksEnabled=false/);

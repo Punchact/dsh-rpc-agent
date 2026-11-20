@@ -26,7 +26,7 @@ function walkMjs(absDir: string, relPrefix = ""): DiscoveredTestFile[] {
     const full = join(absDir, entry.name);
     if (entry.isDirectory()) {
       results.push(...walkMjs(full, rel));
-    } else if (entry.isFile() && entry.name.endsWith(".mjs")) {
+    } else if (entry.isFile() && (entry.name.endsWith(".mjs") || entry.name.endsWith(".ts"))) {
       results.push({ rel: posix.join("test", rel), full });
     }
   }

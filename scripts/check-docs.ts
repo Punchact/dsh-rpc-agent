@@ -94,8 +94,8 @@ const mcpTotal = mcpBase + mcpTask + mcpAgent;
 
 const pkg = JSON.parse(readDist("package.json")) as DistPackageJson;
 const chain = pkg.scripts.test.split("&&").map((s) => s.trim());
-const testChainFiles = chain.filter((s) => /^node test\/.+\.test\.mjs$/.test(s)).length;
-const testOnDisk = readdirSync(join(REPO, "test")).filter((f) => f.endsWith(".test.mjs")).length;
+const testChainFiles = chain.filter((s) => /^node test\/.+\.test\.(?:mjs|ts)$/.test(s)).length;
+const testOnDisk = readdirSync(join(REPO, "test")).filter((f) => f.endsWith(".test.mjs") || f.endsWith(".test.ts")).length;
 
 const countsPath = "docs/counts.json";
 const counts = JSON.parse(read(countsPath)) as CountsJson;

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { closeServer, listenSafe } from "./helpers/stub-server.mjs";
+import { closeServer, listenSafe } from "./helpers/stub-server.ts";
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 const token = "cli-mcp-regression-token-0123456789";

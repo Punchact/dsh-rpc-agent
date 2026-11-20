@@ -8,7 +8,17 @@ import { openStore } from "../dist/lib/tasks/store.mjs";
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {} };
 
-function cardOf(agentId) {
+type TestStore = ReturnType<typeof openStore>;
+type SeedEntitiesFn = (
+  store: TestStore,
+  opts: {
+    principal?: { principalId: string; kind?: string };
+    workspace?: { workspaceId: string; rootPath: string };
+  },
+) => Promise<unknown>;
+const seedBaseline = seedBaselineEntities as unknown as SeedEntitiesFn;
+
+function cardOf(agentId: string) {
   return {
     identity: { agentId, name: `${agentId} display`, kind: "dsh", version: "1.0.0" },
     capabilities: [
@@ -29,7 +39,7 @@ function cardOf(agentId) {
 
 async function makeWorld() {
   const store = openStore({ path: ":memory:" });
-  await seedBaselineEntities(store, {
+  await seedBaseline(store, {
     principal: { principalId: "local-operator" },
     workspace: { workspaceId: "local", rootPath: "C:\\work\\repo" },
   });
@@ -38,8 +48,8 @@ async function makeWorld() {
     {
       sessionController: { async create() { return { sessionId: "sess_1" }; } },
       webServer: { getOrigin: () => "http://127.0.0.1:1" },
-      taskStore: store,
-      taskEngine: engine,
+      taskStore: store as unknown as null,
+      taskEngine: engine as unknown as null,
     },
     { tasksEnabled: true, tasksMaxConcurrent: 2 },
     { logger: silentLogger, get: () => undefined },
@@ -59,7 +69,7 @@ test("agents.get returns the published card and its capability revisions", async
   assert.equal(agent.enabled, true);
   assert.equal(agent.card.identity.agentId, "ag-visible");
   assert.equal(agent.capabilityRevisions.length, 2);
-  const ids = agent.capabilityRevisions.map((revision) => revision.capability).sort();
+  const ids = agent.capabilityRevisions.map((revision: { capability: string }) => revision.capability).sort();
   assert.deepEqual(ids, ["code.patch", "review.diff"]);
   for (const revision of agent.capabilityRevisions) {
     assert.match(revision.revisionId, /^cap_[0-9a-f]{24}$/);
@@ -70,13 +80,13 @@ test("agents.get returns the published card and its capability revisions", async
 test("agents.get refuses a blank id and reports an unknown agent as not found", async () => {
   const { methods } = await makeWorld();
 
-  await assert.rejects(() => methods.getAgent({ agentId: "   " }), (error) => {
+  await assert.rejects(() => methods.getAgent({ agentId: "   " }), (error: Error) => {
     assert.ok(isTaskError(error), "expected a task error");
     assert.match(error.message, /agentId|required/i);
     return true;
   });
 
-  await assert.rejects(() => methods.getAgent({ agentId: "ag-ghost" }), (error) => {
+  await assert.rejects(() => methods.getAgent({ agentId: "ag-ghost" }), (error: Error) => {
     assert.ok(isTaskError(error), "expected a task error");
     assert.match(error.message, /not found/i);
     return true;

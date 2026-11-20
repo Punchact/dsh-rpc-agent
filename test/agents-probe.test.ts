@@ -3,6 +3,13 @@ import test from "node:test";
 
 import { createProber, probesFromAdapter } from "../dist/lib/agents/probe.mjs";
 
+type ProbeAdapterArg = Parameters<typeof probesFromAdapter>[0];
+
+interface ProbeUnknownItem {
+  control: string;
+  reason: string;
+}
+
 test("probeAll records fast boolean true probes in verified and isolates timeouts, throws, and non-true returns", async () => {
   const prober = createProber({
     timeoutMs: 40,
@@ -26,7 +33,7 @@ test("probeAll records fast boolean true probes in verified and isolates timeout
   assert.equal(typeof res.elapsedMs, "number");
   assert.ok(res.elapsedMs < 130, `expected parallel timeout around 40ms, got ${res.elapsedMs}ms`);
 
-  const byControl = new Map(res.unknown.map((u) => [u.control, u.reason]));
+  const byControl = new Map<string, string>((res.unknown as ProbeUnknownItem[]).map((u) => [u.control, u.reason]));
   assert.equal(byControl.get("steer"), "rejected");
   assert.equal(byControl.get("cancel"), "timeout");
   assert.equal(byControl.get("inspect"), "threw:socket closed");
@@ -48,14 +55,14 @@ test("probesFromAdapter turns one adapter answer into one probe per control, and
   const res = await prober.probeAll(["start", "steer", "cancel", "inspect", "events", "approval"]);
 
   assert.deepEqual(res.verified, { start: true, steer: true, inspect: true, events: true });
-  const byControl = new Map(res.unknown.map((u) => [u.control, u.reason]));
+  const byControl = new Map<string, string>((res.unknown as ProbeUnknownItem[]).map((u) => [u.control, u.reason]));
   assert.equal(byControl.get("cancel"), "rejected");
   assert.equal(byControl.get("approval"), "rejected");
   assert.equal(calls, 1, "one probe round must cost one adapter round-trip, not six");
 });
 
 test("probesFromAdapter reports unknown instead of throwing when the adapter is missing, fails, or answers ok:false", async () => {
-  const cases = [
+  const cases: Array<[string, ProbeAdapterArg]> = [
     ["no adapter", null],
     ["no probe method", { start: async () => true }],
     ["probe throws", { probe: async () => { throw new Error("language server gone"); } }],

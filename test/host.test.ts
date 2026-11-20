@@ -24,8 +24,24 @@ const { Context } = await import("@deepseek-ai/cordis");
 const { WebServer } = await import("@deepseek-ai/dsh-host-webserver");
 const { apply } = await import("../dist/index.mjs");
 
+interface OriginService {
+  getOrigin(): string;
+}
+
+interface HostContextWithWebServer {
+  webServer?: OriginService;
+}
+
+interface StatusResponseSnapshot {
+  ok: boolean;
+  origin: string;
+  calls: {
+    total: number;
+  };
+}
+
 /** Poll until the service is registered and the listener reports its bound origin. */
-async function waitForOrigin(ctx, budgetMs = 5000) {
+async function waitForOrigin(ctx: HostContextWithWebServer, budgetMs = 5000): Promise<{ webServer: OriginService; origin: string }> {
   const deadline = Date.now() + budgetMs;
   for (;;) {
     const webServer = ctx.webServer;
@@ -42,11 +58,11 @@ async function waitForOrigin(ctx, budgetMs = 5000) {
   }
 }
 
-function fakeCtx(services) {
-  const disposers = [];
+function fakeCtx(services: Record<string, unknown>) {
+  const disposers: Array<() => void> = [];
   return {
     ...services,
-    effect(fn) {
+    effect(fn: () => (() => void) | void) {
       const dispose = fn();
       if (typeof dispose === "function") disposers.push(dispose);
       return dispose;
@@ -54,7 +70,7 @@ function fakeCtx(services) {
     on() {
       return () => {};
     },
-    get(name) {
+    get(name: string) {
       return services[name];
     },
     logger: { info() {}, warn() {}, error() {}, debug() {} },
@@ -68,7 +84,7 @@ test("the bridge mounts on the real WebServer and unmounts cleanly", { timeout: 
   const ctx = new Context();
   const fork = ctx.plugin(WebServer, { host: "127.0.0.1", port: 0 });
   try {
-    const { webServer, origin } = await waitForOrigin(ctx);
+    const { webServer, origin } = await waitForOrigin(ctx as unknown as HostContextWithWebServer);
     assert.match(origin, /^http:\/\/127\.0\.0\.1:\d+$/, "the published origin must be a real bound address");
 
     const host = fakeCtx({ webServer, sessionController: {} });
@@ -76,7 +92,7 @@ test("the bridge mounts on the real WebServer and unmounts cleanly", { timeout: 
 
     const health = await fetch(`${origin}/dsh-rpc/health`);
     assert.equal(health.status, 200, "health is served without a token");
-    assert.equal((await health.json()).ok, true);
+    assert.equal(((await health.json()) as { ok: boolean }).ok, true);
 
     const anonymous = await fetch(`${origin}/dsh-rpc`, {
       method: "POST",
@@ -88,7 +104,7 @@ test("the bridge mounts on the real WebServer and unmounts cleanly", { timeout: 
 
     const status = await fetch(`${origin}/dsh-rpc/status`);
     assert.equal(status.status, 200);
-    const snapshot = await status.json();
+    const snapshot = (await status.json()) as StatusResponseSnapshot;
     assert.equal(snapshot.ok, true);
     assert.equal(snapshot.origin, origin, "the panel must see the same origin the server published");
     assert.equal(typeof snapshot.calls.total, "number");

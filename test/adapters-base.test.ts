@@ -16,8 +16,14 @@ import {
 } from "../dist/lib/adapters/base.mjs";
 import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
 
-function fullAdapter() {
-  const obj = {};
+interface AdapterErrorData {
+  data?: {
+    operation?: string;
+  };
+}
+
+function fullAdapter(): Record<string, unknown> {
+  const obj: Record<string, unknown> = {};
   for (const op of ADAPTER_OPERATIONS) obj[op] = async () => ({});
   return obj;
 }
@@ -38,21 +44,21 @@ test("validateAdapter accepts complete adapter and rejects each missing operatio
     delete missing[op];
     assert.throws(
       () => validateAdapter(missing),
-      (err) => isTaskError(err, TASK_ERROR.INVALID_ADAPTER) && err.data?.operation === op,
+      (err) => isTaskError(err, TASK_ERROR.INVALID_ADAPTER) && (err as AdapterErrorData).data?.operation === op,
     );
 
     const nonFn = fullAdapter();
     nonFn[op] = "not-a-fn";
     assert.throws(
       () => validateAdapter(nonFn),
-      (err) => isTaskError(err, TASK_ERROR.INVALID_ADAPTER) && err.data?.operation === op,
+      (err) => isTaskError(err, TASK_ERROR.INVALID_ADAPTER) && (err as AdapterErrorData).data?.operation === op,
     );
   }
 });
 
 test("reportOf accepts the six canonical states and rejects invalid states or non-object payloads", () => {
   for (const state of REPORT_STATES) {
-    const r = reportOf(state, { detail: "ok" });
+    const r = reportOf(state, { detail: "ok" }) as { state: string; detail?: string };
     assert.equal(r.state, state);
     assert.equal(r.detail, "ok");
   }
@@ -66,7 +72,7 @@ test("reportOf accepts the six canonical states and rejects invalid states or no
 
   for (const badPayload of [null, "text", []]) {
     assert.throws(
-      () => reportOf("progress", badPayload),
+      () => reportOf("progress", badPayload as unknown as Record<string, unknown>),
       (err) => isTaskError(err, TASK_ERROR.REPORT_INVALID),
     );
   }

@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import ts from "typescript";
 
-import { closeServer as close, deadSafePort as deadPort, listenSafe as listen } from "./helpers/stub-server.mjs";
+import { closeServer as close, deadSafePort as deadPort, listenSafe as listen } from "./helpers/stub-server.ts";
 
 const home = join(tmpdir(), `dsh-rpc-client-test-${process.pid}`);
 mkdirSync(join(home, "dsh-rpc"), { recursive: true });
