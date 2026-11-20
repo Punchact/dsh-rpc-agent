@@ -6,15 +6,20 @@ import { createTaskEngine, seedBaselineEntities } from "../dist/lib/tasks/engine
 import { consumePreview, createPreview } from "../dist/lib/tasks/preview.mjs";
 import { openStore } from "../dist/lib/tasks/store.mjs";
 
+const seedBaseline = seedBaselineEntities as unknown as (
+  store: unknown,
+  seed: Record<string, unknown>,
+) => Promise<void>;
+
 async function setup() {
   const store = openStore({ path: ":memory:" });
-  await seedBaselineEntities(store, {
+  await seedBaseline(store, {
     principal: { principalId: "p-owner" },
     workspace: { workspaceId: "ws-1", rootPath: "C:\\ws-1" },
     agent: { agentId: "ag-1", adapterKind: "codex" },
     capabilityRevision: { revisionId: "cap-1", capability: "review.diff@1" },
   });
-  await seedBaselineEntities(store, {
+  await seedBaseline(store, {
     principal: { principalId: "p-other" },
   });
   return { store, engine: createTaskEngine(store) };
@@ -23,7 +28,7 @@ async function setup() {
 test("preview carries degraded[] for a capability card that cannot cancel", async () => {
   const store = openStore({ path: ":memory:" });
   try {
-    await seedBaselineEntities(store, {
+    await seedBaseline(store, {
       principal: { principalId: "p-owner" },
       workspace: { workspaceId: "ws-card", rootPath: "C:\\ws-card" },
       capabilityRevision: { revisionId: "cap-card", capability: "review.diff@1" },
@@ -44,13 +49,13 @@ test("preview carries degraded[] for a capability card that cannot cancel", asyn
       },
     });
 
-    const preview = await createPreview(store, {
+    const preview = (await createPreview(store, {
       principalId: "p-owner",
       requestDigest: "digest-card",
       capabilityRevisionId: "cap-card",
       workspaceId: "ws-card",
       agentId: "ag-card",
-    });
+    })) as { degraded: Array<{ control: string; effect: string }> };
 
     // A preview that promised no degraded controls while the agent cannot stop a
     // task would let a caller believe a cancel is possible; the row must be read
@@ -59,7 +64,7 @@ test("preview carries degraded[] for a capability card that cannot cancel", asyn
       preview.degraded.map((d) => d.control).sort(),
       ["cancel", "steer"],
     );
-    assert.match(preview.degraded.find((d) => d.control === "cancel").effect, /needs_reconcile/);
+    assert.match(preview.degraded.find((d) => d.control === "cancel")!.effect, /needs_reconcile/);
   } finally {
     store.close();
   }
@@ -225,11 +230,11 @@ test("a numeric requestDigest is refused instead of being read as absent", async
           principalId: "p-owner",
           idempotencyKey: "digest-typed-bad",
           previewId: bad.previewId,
-          requestDigest: 123,
+          requestDigest: 123 as unknown as string,
         }),
-      (error) => {
+      (error: { message?: string }) => {
         assert.equal(isTaskError(error, TASK_ERROR.VALIDATION_FAILED), true);
-        assert.match(error.message, /requestDigest/);
+        assert.match(error.message ?? "", /requestDigest/);
         return true;
       },
     );

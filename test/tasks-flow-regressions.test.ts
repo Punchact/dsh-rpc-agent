@@ -10,13 +10,30 @@
 //   3. a stop the executor accepted but never confirmed left the task in
 //      `cancel_requested` forever.
 import assert from "node:assert/strict";
+import type { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { createDispatcher } from "../dist/lib/tasks/dispatch.mjs";
 import { createTaskEngine, seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
 import { openStore } from "../dist/lib/tasks/store.mjs";
 
-function makeAdapter(overrides = {}) {
+interface FakeFlowAdapterOverrides {
+  inspect?: { report: Record<string, unknown>; adapterEventId: string | null };
+  cancel?: { requestAccepted: boolean; confirmedStopped?: boolean };
+  events?: (ctx: unknown, locator: unknown, cursor: unknown) => { events: unknown[]; nextCursor: unknown };
+}
+
+const seedBaseline = seedBaselineEntities as unknown as (
+  store: unknown,
+  seed: Record<string, unknown>,
+) => Promise<void>;
+const buildDispatcher = createDispatcher as unknown as (opts: Record<string, unknown>) => {
+  startTask(opts: { taskId: string }): Promise<unknown>;
+  pump(opts: { taskId: string; maxSteps: number }): Promise<unknown>;
+  drainEffects(opts: { limit: number }): Promise<unknown>;
+};
+
+function makeAdapter(overrides: FakeFlowAdapterOverrides = {}) {
   return {
     async probe() {
       return { ok: true };
@@ -33,7 +50,7 @@ function makeAdapter(overrides = {}) {
     async cancel() {
       return overrides.cancel ?? { requestAccepted: true };
     },
-    async events(ctx, locator, cursor) {
+    async events(ctx: unknown, locator: unknown, cursor: unknown) {
       return overrides.events ? overrides.events(ctx, locator, cursor) : { events: [], nextCursor: cursor ?? 0 };
     },
     async decideApproval() {
@@ -42,16 +59,20 @@ function makeAdapter(overrides = {}) {
   };
 }
 
-async function setup(adapter) {
+async function setup(adapter: ReturnType<typeof makeAdapter>) {
   const store = openStore({ path: ":memory:" });
-  await seedBaselineEntities(store, {
+  await seedBaseline(store, {
     principal: { principalId: "local-operator" },
     workspace: { workspaceId: "ws-1", rootPath: "C:\\ws-1" },
     agent: { agentId: "ag-1", adapterKind: "fake", capabilities: { cancel: "supported" } },
     capabilityRevision: { revisionId: "cap-1", capability: "review.diff@1" },
   });
-  const engine = createTaskEngine(store);
-  const dispatcher = createDispatcher({ store, engine, adapters: { fake: adapter } });
+  const engine = createTaskEngine(store) as unknown as {
+    submit(p: Record<string, unknown>): Promise<{ taskId: string }>;
+    get(p: { taskId: string }): Promise<{ status: string; stateVersion: number }>;
+    cancel(p: Record<string, unknown>): Promise<{ status: string }>;
+  };
+  const dispatcher = buildDispatcher({ store, engine, adapters: { fake: adapter } });
   const task = await engine.submit({
     idempotencyKey: "flow-1",
     capabilityRevisionId: "cap-1",
@@ -64,17 +85,19 @@ async function setup(adapter) {
   return { store, engine, dispatcher, taskId: task.taskId };
 }
 
-function countAttention(store, taskId) {
-  return store.read((db) =>
-    db.prepare("SELECT COUNT(*) AS n FROM attention WHERE task_id = ?").get(taskId),
+function countAttention(store: ReturnType<typeof openStore>, taskId: string): number {
+  return (
+    store.read((db: DatabaseSync) => db.prepare("SELECT COUNT(*) AS n FROM attention WHERE task_id = ?").get(taskId)) as {
+      n: number;
+    }
   ).n;
 }
 
-function eventTypes(store, taskId, type) {
-  return store.read((db) =>
-    db
-      .prepare("SELECT COUNT(*) AS n FROM events WHERE task_id = ? AND type = ?")
-      .get(taskId, type),
+function eventTypes(store: ReturnType<typeof openStore>, taskId: string, type: string): number {
+  return (
+    store.read((db: DatabaseSync) =>
+      db.prepare("SELECT COUNT(*) AS n FROM events WHERE task_id = ? AND type = ?").get(taskId, type),
+    ) as { n: number }
   ).n;
 }
 
@@ -131,9 +154,9 @@ test("two reports carrying the same question reuse one open attention row", asyn
   const detail = await engine.get({ taskId });
   assert.equal(detail.status, "waiting_input");
   assert.equal(countAttention(store, taskId), 1, "one question, not one per report");
-  const open = store.read((db) =>
+  const open = store.read((db: DatabaseSync) =>
     db.prepare("SELECT prompt FROM attention WHERE task_id = ? AND status = 'open'").all(taskId),
-  );
+  ) as Array<{ prompt: string }>;
   assert.deepEqual(open.map((row) => row.prompt), ["which environment should I use?"]);
 });
 

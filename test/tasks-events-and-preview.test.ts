@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import type { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { createMethods } from "../dist/lib/methods.mjs";
@@ -6,7 +7,47 @@ import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
 import { createTaskEngine, seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
 import { openStore } from "../dist/lib/tasks/store.mjs";
 
-function card(agentId, extra = {}) {
+interface PreviewCandidate {
+  agentId: string;
+  included: boolean;
+  reason: string;
+}
+
+interface EventsPreviewMethodsView {
+  registerAgent(params: Record<string, unknown>): Promise<{
+    capabilityRevisions: Array<{ revisionId: string }>;
+  }>;
+  previewTask(params: Record<string, unknown>): Promise<{
+    previewId: string;
+    requestDigest: string;
+    selectionReason: string;
+    candidates: PreviewCandidate[];
+  }>;
+  submitTask(params: Record<string, unknown>): Promise<{ taskId: string }>;
+  taskEvents(params: Record<string, unknown>): Promise<{
+    taskId: string;
+    hasMore: boolean;
+    events: Array<{ type: string; seq: number }>;
+  }>;
+}
+
+interface TaskErrorLike {
+  message?: string;
+  data?: { reason?: string };
+}
+
+const seedBaseline = seedBaselineEntities as unknown as (
+  store: unknown,
+  seed: Record<string, unknown>,
+) => Promise<void>;
+const buildMethods = createMethods as unknown as (
+  deps: Record<string, unknown>,
+  config: Record<string, unknown>,
+  services: Record<string, unknown>,
+  extra: Record<string, unknown>,
+) => EventsPreviewMethodsView;
+
+function card(agentId: string, extra: Record<string, unknown> = {}) {
   return {
     identity: { agentId, name: agentId, kind: "dsh", version: "1.0.0" },
     capabilities: [{ capabilityId: "review.diff", version: 1 }],
@@ -26,11 +67,11 @@ function card(agentId, extra = {}) {
 async function makeWorld() {
   const store = openStore({ path: ":memory:" });
   const engine = createTaskEngine(store);
-  await seedBaselineEntities(store, {
+  await seedBaseline(store, {
     principal: { principalId: "local-operator" },
     workspace: { workspaceId: "local", rootPath: "C:\\work\\repo" },
   });
-  const methods = createMethods(
+  const methods = buildMethods(
     {
       sessionController: { async create() { return { sessionId: "sess_1" }; } },
       webServer: { getOrigin: () => "http://127.0.0.1:1" },
@@ -91,8 +132,8 @@ test("preview refuses a capability revision the selected agent never declared", 
           agentId: "ag_b",
           input: { prompt: "hi" },
         }),
-      (err) => {
-        assert.match(err.message, /does not declare capability revision/);
+      (err: TaskErrorLike) => {
+        assert.match(err.message ?? "", /does not declare capability revision/);
         assert.equal(err.data?.reason, "CAPABILITY_VERSION_MISSING");
         return true;
       },
@@ -107,7 +148,7 @@ test("preview refuses an agent whose probe evidence has expired", async () => {
   try {
     const a = await methods.registerAgent({ card: card("ag_stale") });
     const revisionId = a.capabilityRevisions[0].revisionId;
-    await store.withWriteTx((db) => {
+    await store.withWriteTx((db: DatabaseSync) => {
       db.prepare("UPDATE agents SET probe_expires_at = ? WHERE agent_id = ?").run(
         new Date(Date.now() - 60_000).toISOString(),
         "ag_stale",
@@ -123,8 +164,8 @@ test("preview refuses an agent whose probe evidence has expired", async () => {
           agentId: "ag_stale",
           input: { prompt: "hi" },
         }),
-      (err) => {
-        assert.match(err.message, /expired/);
+      (err: TaskErrorLike) => {
+        assert.match(err.message ?? "", /expired/);
         assert.equal(err.data?.reason, "PROBE_STALE");
         return true;
       },
@@ -148,8 +189,8 @@ test("preview reports why a peer that declares the same capability was excluded"
       agentId: "ag_chosen",
       input: { prompt: "hi" },
     });
-    const selected = preview.candidates.find((item) => item.agentId === "ag_chosen");
-    const excluded = preview.candidates.find((item) => item.agentId === "ag_disabled");
+    const selected = preview.candidates.find((item) => item.agentId === "ag_chosen")!;
+    const excluded = preview.candidates.find((item) => item.agentId === "ag_disabled")!;
     assert.equal(selected.included, true);
     assert.equal(selected.reason, "SELECTED");
     assert.equal(excluded.included, false);
@@ -179,9 +220,9 @@ test("a caller-supplied digest must be a string, not silently replaced", async (
     // caller tried to make about the request disappeared (quality review, 0.9.4).
     await assert.rejects(
       () => methods.previewTask({ ...base, requestDigest: 123 }),
-      (error) => {
+      (error: TaskErrorLike) => {
         assert.equal(isTaskError(error, TASK_ERROR.VALIDATION_FAILED), true);
-        assert.match(error.message, /requestDigest/);
+        assert.match(error.message ?? "", /requestDigest/);
         return true;
       },
     );

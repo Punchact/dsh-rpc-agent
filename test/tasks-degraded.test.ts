@@ -4,18 +4,23 @@ import test from "node:test";
 import { createTaskEngine, degradedFromCapabilities, seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
 import { openStore } from "../dist/lib/tasks/store.mjs";
 
+const seedBaseline = seedBaselineEntities as unknown as (
+  store: unknown,
+  seed: Record<string, unknown>,
+) => Promise<void>;
+
 // Plan §4.2 rule 4 (2026-11-18 "降级许可"): a control the agent declares
 // optional-and-unsupported does not disqualify it, but the task detail must show the
 // semantic consequence instead of silently pretending the control exists.
 async function setup() {
   const store = openStore({ path: ":memory:" });
-  await seedBaselineEntities(store, {
+  await seedBaseline(store, {
     principal: { principalId: "local-operator" },
     workspace: { workspaceId: "ws-lab", rootPath: "C:\\ws-lab" },
     agent: { agentId: "ag-degraded", adapterKind: "legacy", capabilities: { cancel: "unsupported", inspect: false } },
     capabilityRevision: { revisionId: "rev-review-1", capability: "review.diff@1" },
   });
-  await seedBaselineEntities(store, {
+  await seedBaseline(store, {
     agent: { agentId: "ag-full", adapterKind: "dsh", capabilities: { cancel: "supported", inspect: "supported" } },
   });
   const engine = createTaskEngine(store);
@@ -48,12 +53,14 @@ test("task detail exposes degraded[] for an agent that cannot be cancelled", asy
       agentId: "ag-degraded",
       input: { base: "a", head: "b" },
     });
-    const detail = await engine.get({ taskId: task.taskId });
+    const detail = (await engine.get({ taskId: task.taskId })) as {
+      degraded: Array<{ control: string; effect: string }>;
+    };
     assert.deepEqual(
       detail.degraded.map((d) => d.control).sort(),
       ["cancel", "inspect"],
     );
-    assert.match(detail.degraded.find((d) => d.control === "cancel").effect, /needs_reconcile/);
+    assert.match(detail.degraded.find((d) => d.control === "cancel")!.effect, /needs_reconcile/);
 
     const full = await engine.submit({
       idempotencyKey: "k-full",
@@ -62,10 +69,12 @@ test("task detail exposes degraded[] for an agent that cannot be cancelled", asy
       agentId: "ag-full",
       input: { base: "a", head: "b" },
     });
-    const fullDetail = await engine.get({ taskId: full.taskId });
+    const fullDetail = (await engine.get({ taskId: full.taskId })) as {
+      degraded: Array<{ control: string; effect: string }>;
+    };
     assert.deepEqual(fullDetail.degraded, [], "a fully capable agent must report no degraded controls");
 
-    const listed = await engine.list({ limit: 10 });
+    const listed = (await engine.list({ limit: 10 })) as { items: Array<{ degraded: unknown }> };
     for (const row of listed.items) {
       assert.ok(Array.isArray(row.degraded), "list rows carry degraded[] too");
     }
@@ -120,7 +129,7 @@ test("degradedFromCapabilities reads the capability-card shape that registerAgen
 test("a seeded capability card keeps degraded[] visible on the detail path", async () => {
   const store = openStore({ path: ":memory:" });
   try {
-    await seedBaselineEntities(store, {
+    await seedBaseline(store, {
       principal: { principalId: "local-operator" },
       workspace: { workspaceId: "ws-card", rootPath: "C:\\ws-card" },
       capabilityRevision: { revisionId: "rev-card", capability: "review.diff@1" },
@@ -149,7 +158,9 @@ test("a seeded capability card keeps degraded[] visible on the detail path", asy
       agentId: "ag-card-e2e",
       input: { base: "a", head: "b" },
     });
-    const detail = await engine.get({ taskId: task.taskId });
+    const detail = (await engine.get({ taskId: task.taskId })) as {
+      degraded: Array<{ control: string; effect: string }>;
+    };
     assert.deepEqual(
       detail.degraded.map((d) => d.control).sort(),
       ["approval", "cancel", "events", "inspect", "steer"],
