@@ -61,8 +61,8 @@ export type VerifyArtifactClaimResult =
 
 export interface ReadArtifactWindowParams {
   sourcePath: string;
-  offset?: number;
-  length?: number;
+  offset?: number | undefined;
+  length?: number | undefined;
 }
 
 export type ReadArtifactWindowResult =

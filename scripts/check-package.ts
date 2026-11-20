@@ -149,6 +149,10 @@ if (!packed || packed.length !== 1) {
 }
 
 const manifest = packed[0];
+if (!manifest) {
+  console.error("check-package: FAIL\n  - empty npm pack --dry-run output");
+  process.exit(1);
+}
 const shipped = new Set(manifest.files.map((entry) => entry.path.split("\\").join("/")));
 
 if (manifest.entryCount !== EXPECTED_FILE_COUNT) {
@@ -200,7 +204,7 @@ for (const path of shipped) {
   const source = readFileSync(resolve(distRoot, path), "utf8");
   for (const match of source.matchAll(IMPORT)) {
     const specifier = match[1];
-    if (!specifier.startsWith(".")) continue;
+    if (!specifier || !specifier.startsWith(".")) continue;
     const target = posix.normalize(posix.join(posix.dirname(path), specifier));
     if (!shipped.has(target)) fail(`${path} imports "${specifier}" which is not published (${target})`);
     else if (!existsSync(resolve(distRoot, target))) fail(`${path} imports ${target} but that file is missing on disk`);

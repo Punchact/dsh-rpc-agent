@@ -46,7 +46,7 @@ let distRefCount = 0;
 for (const file of files) {
   const lines = readFileSync(file.full, "utf8").split(/\r?\n/);
   for (let idx = 0; idx < lines.length; idx += 1) {
-    const line = lines[idx];
+    const line = lines[idx] ?? "";
     const lineNo = idx + 1;
     for (const m of line.matchAll(SOURCE_IMPORT_RE)) {
       violations.push(`${file.rel}:${lineNo}: 禁止指向源码路径 ${m[0].slice(1)}`);

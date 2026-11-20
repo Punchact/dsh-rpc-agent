@@ -8,7 +8,7 @@
 // `lib/**` (compiled), `locale/`, `docs/`, plus the metadata files named in
 // `package.json.files`. Compiled from `src/`, so the number moves when a source module
 // is added or removed.
-export const EXPECTED_DIST_FILES = 59;
+export const EXPECTED_DIST_FILES = 63;
 
 /** How to fix this when a build reports `dist 文件数不匹配`. */
 export const PUBLISH_ENTRY_COUNT_HINT =

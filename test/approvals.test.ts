@@ -188,7 +188,9 @@ test("an escalation from a bridge-owned session is refused before it becomes a p
     { sessionId: "session-owned", toolName: "bash", callId: "call-1", escalation: "danger-full-access" },
   ]);
   assert.equal(lines.length, 1);
-  assert.match(lines[0], /refused a sandbox escalation to danger-full-access for bash in session-owned/);
+  const line0 = lines[0];
+  if (line0 === undefined) throw new Error("missing lines[0]");
+  assert.match(line0, /refused a sandbox escalation to danger-full-access for bash in session-owned/);
 });
 
 test("an ordinary call from a bridge-owned session runs untouched", async () => {

@@ -31,6 +31,11 @@ after(() => clearInterval(SUITE_KEEPALIVE));
 
 const ORIGIN = { getOrigin: () => "http://127.0.0.1:0" };
 
+function req<T>(value: T | undefined, what = "item"): T {
+  if (value === undefined) throw new Error(`missing ${what}`);
+  return value;
+}
+
 interface FakeScriptStep {
   kind: "start" | "foreign" | "text" | "reasoning" | "tool" | "toolResult" | "end" | "rawEnd";
   turn?: number;
@@ -54,7 +59,7 @@ interface FakeEvent {
 interface TimelineEntry {
   kind: "model" | "prompt" | "permission";
   request?: Record<string, unknown>;
-  sessionId?: string;
+  sessionId?: string | undefined;
   name?: string;
 }
 
@@ -284,7 +289,7 @@ function fakeController({
   const cancelled: Array<Record<string, unknown>> = [];
   const inspected: string[] = [];
   const selections: Array<Record<string, unknown>> = [];
-  let seq = events.length > 0 ? events[events.length - 1].seq : 0;
+  let seq = events.length > 0 ? req(events[events.length - 1], "last event").seq : 0;
 
   // The real SessionController dereferences the caller signal unconditionally
   // (`signal.throwIfAborted()`), so tolerating an undefined signal here would
@@ -369,7 +374,7 @@ function fakeController({
       void (async () => {
         // Steering joins a turn that is already running, so the Host appends the
         // message without a fresh `turn/start`; model that explicitly.
-        if (steps.length > 0 && steps[0].kind !== "start") {
+        if (steps.length > 0 && req(steps[0], "step 0").kind !== "start") {
           append("user/message", {
             role: "user",
             content: [{ type: "text", text: "…" }],
@@ -559,7 +564,7 @@ test("ask creates a session, prompts it, and returns the turn's text", async () 
   assert.equal(result.timedOut, false);
   assert.equal(result.cwd, "/tmp/work");
   assert.equal(result.tools.length, 1);
-  assert.equal(result.tools[0].name, "bash");
+  assert.equal(req(result.tools[0], "tools[0]").name, "bash");
   assert.deepEqual(result.usage, {
     inputTokens: 10,
     outputTokens: 5,
@@ -569,9 +574,10 @@ test("ask creates a session, prompts it, and returns the turn's text", async () 
     reasoningTokens: undefined,
   });
   assert.equal(controller.prompts.length, 1);
-  assert.deepEqual(controller.prompts[0].content, [{ type: "text", text: "ping" }]);
-  assert.equal(controller.prompts[0].mode, "queue");
-  assert.equal(controller.created[0].cwd, "/tmp/work");
+  const p0 = req(controller.prompts[0], "prompts[0]");
+  assert.deepEqual(p0.content, [{ type: "text", text: "ping" }]);
+  assert.equal(p0.mode, "queue");
+  assert.equal(req(controller.created[0], "created[0]").cwd, "/tmp/work");
 });
 
 test("ask reports the turn-end reason when the turn was aborted", async () => {
@@ -654,7 +660,7 @@ test("steer into a running turn targets that same turn", async () => {
   const result = await build(controller).ask({ text: "hurry", sessionId: "session-test", mode: "steer" });
   assert.equal(result.turn, 4);
   assert.equal(result.text, "steered");
-  assert.equal(controller.prompts[0].mode, "steer");
+  assert.equal(req(controller.prompts[0], "prompts[0]").mode, "steer");
 });
 
 test("ask times out without cancelling the turn", async () => {
@@ -743,7 +749,7 @@ test("history returns the snapshot window without prompting", async () => {
   assert.equal(result.turn, 1);
   assert.equal(result.messageCount, 2);
   assert.equal(result.records.length, 2);
-  assert.equal(result.records[1].type, "turn/end");
+  assert.equal(req(result.records[1], "records[1]").type, "turn/end");
   assert.equal(controller.prompts.length, 0);
 });
 
@@ -979,7 +985,7 @@ test("a queued run is visible while waiting, and its own deadline ends the wait"
 test("creating a session leaves cwd to the Host when the caller names none", async () => {
   const controller = fakeController();
   const result = await build(controller).createSession({});
-  assert.equal("cwd" in controller.created[0], false, "create must not override the Host default cwd");
+  assert.equal("cwd" in req(controller.created[0], "created[0]"), false, "create must not override the Host default cwd");
   assert.equal(result.cwd, "/host/resolved", "the resolved cwd is read back from inspect");
   assert.deepEqual(controller.inspected, ["session-test"]);
 });
@@ -987,7 +993,7 @@ test("creating a session leaves cwd to the Host when the caller names none", asy
 test("an explicit cwd is forwarded verbatim", async () => {
   const controller = fakeController({ hostCwd: "/tmp/work" });
   const result = await build(controller).createSession({ cwd: "/tmp/work" });
-  assert.equal(controller.created[0].cwd, "/tmp/work");
+  assert.equal(req(controller.created[0], "created[0]").cwd, "/tmp/work");
   assert.equal(result.cwd, "/tmp/work", "the echoed cwd is the one the Host attached");
   assert.deepEqual(controller.inspected, ["session-test"]);
 });
@@ -997,8 +1003,9 @@ test("an explicit cwd is forwarded verbatim", async () => {
 test("a workspace is forwarded instead of a cwd, never both", async () => {
   const controller = fakeController({ hostCwd: "/home/dev/work" });
   const result = await build(controller).createSession({ workspaceId: "ws-1" });
-  assert.equal(controller.created[0].workspaceId, "ws-1");
-  assert.equal("cwd" in controller.created[0], false, "the Host derives the directory from the workspace");
+  const c0 = req(controller.created[0], "created[0]");
+  assert.equal(c0.workspaceId, "ws-1");
+  assert.equal("cwd" in c0, false, "the Host derives the directory from the workspace");
   assert.equal(result.cwd, "/home/dev/work");
 });
 
@@ -1043,7 +1050,7 @@ test("a model switch reaches the Host with the resolved provider", async () => {
 test("a bare model id resolves when only one provider offers it", async () => {
   const controller = fakeController({ models: twoProviderModels });
   await build(controller).configure({ sessionId: "session-test", model: "one" });
-  assert.equal(controller.selections[0].provider, "alpha");
+  assert.equal(req(controller.selections[0], "selections[0]").provider, "alpha");
 });
 
 test("a bare model id offered twice names both spellings instead of guessing", async () => {
@@ -1142,8 +1149,9 @@ test("a sandbox refusal is reported as a fact, and the preset stays the caller's
   assert.doesNotMatch(JSON.stringify(result.next), /danger-full-access/);
   assert.equal(result.next!.tool, "dsh_ask");
   // The refusal is not an error: the turn ran and the tool error keeps its own flag.
-  assert.equal(result.tools[0].isError, true);
-  assert.match(result.tools[0].output ?? "", /sandbox: file access denied/);
+  const t0 = req(result.tools[0], "tools[0]");
+  assert.equal(t0.isError, true);
+  assert.match(t0.output ?? "", /sandbox: file access denied/);
 });
 
 test("a refusal only the agent mentions is reported, but flagged as the weaker source", async () => {
@@ -1203,9 +1211,9 @@ test("permission presets carry a cost sentence even when the deployment declared
   const catalog = await build(fakeController(), {}, { permissionPresets: permissions }).permissionCatalog();
 
   assert.equal(catalog.defaultPreset, "workspace-write");
-  assert.match(catalog.options[0].cost ?? "", /writes inside the session workspace/);
-  assert.match(catalog.options[1].cost ?? "", /approvals disabled/);
-  assert.equal(catalog.options[2].cost, null); // unknown preset: no invented wording
+  assert.match(req(catalog.options[0], "options[0]").cost ?? "", /writes inside the session workspace/);
+  assert.match(req(catalog.options[1], "options[1]").cost ?? "", /approvals disabled/);
+  assert.equal(req(catalog.options[2], "options[2]").cost, null); // unknown preset: no invented wording
 });
 
 test("workspaces are listed with their directory status", async () => {
@@ -1244,7 +1252,7 @@ test("workspaces are listed with their directory status", async () => {
     createdAt: 1,
     updatedAt: 2,
   });
-  assert.equal(result.items[1].status, "unknown", "a failing status probe must not fail the whole listing");
+  assert.equal(req(result.items[1], "items[1]").status, "unknown", "a failing status probe must not fail the whole listing");
 });
 
 test("a workspace can be registered by path", async () => {
@@ -1380,8 +1388,9 @@ test("a delta answer still reports the whole turn's tool calls", async () => {
 
   assert.equal(result.text, "", "earlier text must not be replayed");
   assert.equal(result.tools.length, 1, "a delta must not hide the tool call it excluded");
-  assert.equal(result.tools[0].name, "bash");
-  assert.equal(result.tools[0].output, "a.txt");
+  const t0 = req(result.tools[0], "tools[0]");
+  assert.equal(t0.name, "bash");
+  assert.equal(t0.output, "a.txt");
 });
 
 test("wait without since still replays the whole turn", async () => {
@@ -1500,7 +1509,7 @@ test("concurrent default-turn asks for one sticky key queue on one active sessio
   let secondPromise: Promise<TurnResult> | undefined;
   try {
     await waitFor(() => controller.prompts.length === 1, "the first prompt is active before starting the second ask");
-    const hostSession = (await controller.list({}, new AbortController().signal)).items[0];
+    const hostSession = req((await controller.list({}, new AbortController().signal)).items[0], "hostSession");
     assert.equal(hostSession.blank, false, "the Host reports the reserved session as nonblank");
     assert.equal(hostSession.running, true, "the first turn is still active in the Host");
 
@@ -1585,7 +1594,7 @@ test("a sticky queued ask does not change options when the previous ask times ou
 
     const first = await firstPromise;
     assert.equal(first.status, "timeout");
-    assert.equal((await controller.list({}, new AbortController().signal)).items[0].running, true);
+    assert.equal(req((await controller.list({}, new AbortController().signal)).items[0], "hostSession").running, true);
     assert.equal(controller.events.some((event) => event.type === "turn/end"), false);
     await assert.rejects(secondPromise, (error: RpcErrorLike) => {
       assert.equal(error.code, -32004);
@@ -1826,7 +1835,7 @@ test("a finished call lets go of the caller's abort signal", async () => {
   const result = await methods.ask({ sessionId: "session-test", text: "go" }, { signal });
   assert.equal(result.status, "completed");
   assert.equal(added.length, 1, "the run must subscribe to the caller's signal");
-  assert.ok(removed.includes(added[0]), "and let go of it when the call ends");
+  assert.ok(removed.includes(req(added[0], "added[0]")), "and let go of it when the call ends");
 });
 
 
@@ -1967,7 +1976,8 @@ test("collectTurn records seq, at, endedAt and ok while preserving legacy fields
   const collected = collectTurn(events, 1) as unknown as CollectTurnResultLike;
   assert.equal(collected.tools.length, 2);
 
-  const [first, second] = collected.tools;
+  const first = req(collected.tools[0], "first tool");
+  const second = req(collected.tools[1], "second tool");
   assert.equal(first.callId, "c1");
   assert.equal(first.name, "read");
   assert.deepEqual(first.arguments, { path: "a.txt" });
@@ -2008,7 +2018,8 @@ test("ask carries seq/at/endedAt/ok and retains error alongside legacy tool fiel
   });
   const result = await build(controller).ask({ text: "run tools" });
   assert.equal(result.tools.length, 2);
-  const [t1, t2] = result.tools;
+  const t1 = req(result.tools[0], "t1");
+  const t2 = req(result.tools[1], "t2");
   assert.ok(Number.isInteger(t1.seq) && Number.isInteger(t2.seq) && t2.seq > t1.seq);
   assert.ok(typeof t1.at === "number" && typeof t2.at === "number" && t2.at >= t1.at);
   assert.ok(typeof t1.endedAt === "number" && t1.endedAt >= t1.at);
@@ -2046,7 +2057,7 @@ test("history filters by kinds and since while keeping omission backward compati
 
   const baseline = await methods.history({ sessionId: "session-test" });
   assert.equal(baseline.records.length, 5);
-  assert.equal(baseline.records[0].seq, 0);
+  assert.equal(req(baseline.records[0], "records[0]").seq, 0);
   assert.equal("truncated" in baseline, false);
 
   const byKinds = await methods.history({ sessionId: "session-test", kinds: ["tool/call", "tool/result"] });
@@ -2151,9 +2162,11 @@ test("METHOD_CATALOG is single source of truth for createMethods().handlers and 
     assert.equal(typeof methods.handlers[name], "function", `missing handler for ${name}`);
   }
 
-  const discovered = (await methods.handlers["dsh.discover"]()) as { methods: unknown[] };
+  const discoverHandler = req(methods.handlers["dsh.discover"], "dsh.discover");
+  const discovered = (await discoverHandler()) as { methods: unknown[] };
   assert.equal(discovered.methods.length, 34);
-  const ping = (await methods.handlers["dsh.ping"]()) as {
+  const pingHandler = req(methods.handlers["dsh.ping"], "dsh.ping");
+  const ping = (await pingHandler()) as {
     taskCentre: { autopilot: unknown; autopilotStats: unknown };
   };
   assert.deepEqual(ping.taskCentre.autopilot, autopilot);

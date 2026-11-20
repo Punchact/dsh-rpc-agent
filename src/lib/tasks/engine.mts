@@ -315,13 +315,13 @@ export interface CancelTaskResult {
 }
 
 export interface DecideApprovalParams {
-  taskId?: string;
-  attemptId?: string;
-  approvalId?: string;
-  idempotencyKey?: string;
-  decision?: "allow-once" | "reject" | string;
-  decidedBy?: string;
-  note?: string;
+  taskId?: string | undefined;
+  attemptId?: string | undefined;
+  approvalId?: string | undefined;
+  idempotencyKey?: string | undefined;
+  decision?: "allow-once" | "reject" | string | undefined;
+  decidedBy?: string | undefined;
+  note?: string | undefined;
   [key: string]: unknown;
 }
 
@@ -1301,7 +1301,8 @@ export function createTaskEngine(store: TaskStore, options: TaskEngineOptions = 
           evidence: parseJson<unknown>(r.evidence_json, null),
           createdAt: r.created_at,
         }));
-        const nextAfterSeq = items.length > 0 ? items[items.length - 1].seq : afterSeq;
+        // items.length > 0 guarantees items[items.length - 1] is a TaskEventProjection.
+        const nextAfterSeq = items.length > 0 ? (items[items.length - 1] as TaskEventProjection).seq : afterSeq;
         return { taskId, events: items, nextAfterSeq, hasMore };
       });
     },

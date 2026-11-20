@@ -149,13 +149,13 @@ export interface CliErrorFormat {
 }
 
 export interface CliTurnResult {
-  sessionId?: string | null;
-  turn?: number | null;
-  status?: string | null;
-  text?: string | null;
-  durationMs?: number;
-  tools?: unknown[];
-  timedOut?: boolean;
+  sessionId?: string | null | undefined;
+  turn?: number | null | undefined;
+  status?: string | null | undefined;
+  text?: string | null | undefined;
+  durationMs?: number | undefined;
+  tools?: unknown[] | undefined;
+  timedOut?: boolean | undefined;
   reason?: unknown;
   [key: string]: unknown;
 }
@@ -275,7 +275,8 @@ function parseArgv(argv: readonly string[]): ParsedArgv {
   const flags: CliFlags = {};
   const positional: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
-    const token = argv[index];
+    // Loop condition guarantees 0 <= index < argv.length.
+    const token = argv[index] as string;
     if (token === "--") {
       positional.push(...argv.slice(index + 1));
       break;
@@ -603,7 +604,7 @@ const HEALTH_PROBE_TIMEOUT_MS = 5000;
 async function probeHealth(explicitUrl: string | undefined | null, budgetMs: number): Promise<CliExitCode> {
   const startedAt = Date.now();
   const deadline = startedAt + budgetMs;
-  let failure: { kind: "transport" | "http"; code?: string; message: string } = {
+  let failure: { kind: "transport" | "http"; code?: string | undefined; message: string } = {
     kind: "transport",
     message: "the plugin has not published an endpoint yet",
   };

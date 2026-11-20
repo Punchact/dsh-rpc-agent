@@ -89,7 +89,9 @@ test("dsh.tasks.events reads a task's own log and validates its cursor window", 
   const { store, methods } = await makeWorld();
   try {
     const reg = await methods.registerAgent({ card: card("ag_events") });
-    const revisionId = reg.capabilityRevisions[0].revisionId;
+    const rev0 = reg.capabilityRevisions[0];
+    if (!rev0) throw new Error("missing capabilityRevisions[0]");
+    const revisionId = rev0.revisionId;
     const preview = await methods.previewTask({
       principalId: "local-operator",
       capabilityRevisionId: revisionId,
@@ -105,8 +107,10 @@ test("dsh.tasks.events reads a task's own log and validates its cursor window", 
     const events = await methods.taskEvents({ taskId: submitted.taskId });
     assert.equal(events.taskId, submitted.taskId);
     assert.ok(events.events.length >= 1);
-    assert.equal(events.events[0].type, "task.accepted");
-    assert.equal(events.events[0].seq, 1);
+    const evt0 = events.events[0];
+    if (!evt0) throw new Error("missing events[0]");
+    assert.equal(evt0.type, "task.accepted");
+    assert.equal(evt0.seq, 1);
     assert.equal(events.hasMore, false);
 
     await assert.rejects(() => methods.taskEvents({ taskId: submitted.taskId, limit: 0 }), /limit/);
@@ -121,7 +125,9 @@ test("preview refuses a capability revision the selected agent never declared", 
   try {
     const a = await methods.registerAgent({ card: card("ag_a") });
     await methods.registerAgent({ card: card("ag_b") });
-    const revisionOfA = a.capabilityRevisions[0].revisionId;
+    const rev0 = a.capabilityRevisions[0];
+    if (!rev0) throw new Error("missing capabilityRevisions[0]");
+    const revisionOfA = rev0.revisionId;
 
     await assert.rejects(
       () =>
@@ -147,7 +153,9 @@ test("preview refuses an agent whose probe evidence has expired", async () => {
   const { store, methods } = await makeWorld();
   try {
     const a = await methods.registerAgent({ card: card("ag_stale") });
-    const revisionId = a.capabilityRevisions[0].revisionId;
+    const rev0 = a.capabilityRevisions[0];
+    if (!rev0) throw new Error("missing capabilityRevisions[0]");
+    const revisionId = rev0.revisionId;
     await store.withWriteTx((db: DatabaseSync) => {
       db.prepare("UPDATE agents SET probe_expires_at = ? WHERE agent_id = ?").run(
         new Date(Date.now() - 60_000).toISOString(),
@@ -180,7 +188,9 @@ test("preview reports why a peer that declares the same capability was excluded"
   try {
     const chosen = await methods.registerAgent({ card: card("ag_chosen") });
     await methods.registerAgent({ card: card("ag_disabled"), enabled: false });
-    const revisionId = chosen.capabilityRevisions[0].revisionId;
+    const rev0 = chosen.capabilityRevisions[0];
+    if (!rev0) throw new Error("missing capabilityRevisions[0]");
+    const revisionId = rev0.revisionId;
 
     const preview = await methods.previewTask({
       principalId: "local-operator",
@@ -204,7 +214,9 @@ test("a caller-supplied digest must be a string, not silently replaced", async (
   const { store, methods } = await makeWorld();
   try {
     const reg = await methods.registerAgent({ card: card("ag_digest") });
-    const revisionId = reg.capabilityRevisions[0].revisionId;
+    const rev0 = reg.capabilityRevisions[0];
+    if (!rev0) throw new Error("missing capabilityRevisions[0]");
+    const revisionId = rev0.revisionId;
     const base = {
       principalId: "local-operator",
       capabilityRevisionId: revisionId,

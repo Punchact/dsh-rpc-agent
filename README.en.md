@@ -92,7 +92,7 @@ Or say it inside DSH:
 plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent" })
 ```
 
-For a non-default profile add `--profile <name>`; pin a version by writing `@punchact/dsh-rpc-agent@0.9.4` (omitting it means `latest`). The latest published release on npm is [`0.9.3`](https://www.npmjs.com/package/@punchact/dsh-rpc-agent); this file describes **the code in the repository (`0.9.3`)**, and differences are listed at the top of the [CHANGELOG](./CHANGELOG.md).
+For a non-default profile add `--profile <name>`; pin a version by writing `@punchact/dsh-rpc-agent@0.9.4` (omitting it means `latest`). The latest published release on npm is [`0.9.4`](https://www.npmjs.com/package/@punchact/dsh-rpc-agent); this file describes **the code in the repository (`0.9.5`, locked internally and not published yet)**, and differences are listed at the top of the [CHANGELOG](./CHANGELOG.md).
 
 Three things that bite on the npm route:
 
@@ -790,9 +790,14 @@ npm run verify                 # build + entry parity + npm test + check:package
 ```powershell
 cd dsh-rpc-plugin
 npm test                       # 51 test files, 468 cases, plus catalog smoke; no running Harness needed
-node test/host.test.ts        # 1 case: real WebServer integration (needs npm ci first)
-node test/e2e.mjs              # 14 cases: end to end against a real Harness (--cwd takes an absolute path only)
-node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a real Harness
+node test/host.test.ts         # 1 case: real WebServer integration (needs npm ci first)
+npm run test:e2e               # 14 cases: end to end against a real Harness (--cwd takes an absolute path only)
+npm run test:edge              # 24 cases: protocol/edge adversarial, against a real Harness
+```
+
+`test/e2e.ts` and `test/edge.ts` need a live Harness (plugin mounted, Host running), so they are **not part of the PR gate**. Run them by triggering [`.github/workflows/acceptance.yml`](.github/workflows/acceptance.yml) manually: the matrix has a `phase` of `e2e` or `edge`, it probes the host with `dsh.ping` first, and when nothing answers it records a `::notice` skip (set `require_live` to make that a failure). Point it at a host either through an existing `~/.dsh/dsh-rpc/endpoint.json` on a self-hosted runner, or with `DSH_RPC_URL` + `DSH_RPC_TOKEN` in the repository.
+
+```powershell
 ```
 
 ### Two reconciliation gates

@@ -112,9 +112,9 @@ export interface WebServerLike {
 
 export interface HttpConfigLike {
   path: string;
-  allowRemote?: boolean;
+  allowRemote?: boolean | undefined;
   maxBodyBytes: number;
-  logRequests?: boolean;
+  logRequests?: boolean | undefined;
 }
 
 export interface HttpStateLike {

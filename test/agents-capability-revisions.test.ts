@@ -8,6 +8,11 @@ import { openStore } from "../dist/lib/tasks/store.mjs";
 
 type TestStore = ReturnType<typeof openStore>;
 type TestEngine = ReturnType<typeof createTaskEngine>;
+
+function req<T>(value: T | undefined, what = "item"): T {
+  if (value === undefined) throw new Error(`missing ${what}`);
+  return value;
+}
 interface SqliteDbLike {
   prepare(sql: string): {
     all(...args: unknown[]): unknown[];
@@ -86,7 +91,7 @@ test("declared capabilities are normalised with read-only defaults", () => {
     schema: { type: "object" },
   });
   // §4.2 rule 4: a write capability must require cancellation.
-  assert.equal(card.capabilities[1].cancelPolicy, "required");
+  assert.equal(req(card.capabilities[1], "capabilities[1]").cancelPolicy, "required");
 });
 
 test("a write capability may not opt out of requiring cancellation", () => {
@@ -116,19 +121,20 @@ test("registering an agent publishes one immutable revision per declared capabil
 
     const first = await methods.registerAgent({ card });
     assert.equal(first.capabilityRevisions.length, 1);
-    const revisionId = first.capabilityRevisions[0].revisionId;
+    const revisionId = req(first.capabilityRevisions[0], "capabilityRevisions[0]").revisionId;
     assert.match(revisionId, /^cap_[0-9a-f]{24}$/);
 
     let rows = store.read((db: SqliteDbLike) => db.prepare("SELECT * FROM capability_revisions").all()) as CapabilityRevisionRow[];
     assert.equal(rows.length, 1);
-    assert.equal(rows[0].revision_id, revisionId);
-    assert.equal(rows[0].capability, "review.diff");
-    assert.equal(rows[0].side_effect_kind, "read");
-    assert.equal(rows[0].cancel_policy, "optional");
+    const row0 = req(rows[0], "rows[0]");
+    assert.equal(row0.revision_id, revisionId);
+    assert.equal(row0.capability, "review.diff");
+    assert.equal(row0.side_effect_kind, "read");
+    assert.equal(row0.cancel_policy, "optional");
 
     // Re-registering the unchanged card is idempotent: same revision, one row.
     const again = await methods.registerAgent({ card });
-    assert.equal(again.capabilityRevisions[0].revisionId, revisionId);
+    assert.equal(req(again.capabilityRevisions[0], "capabilityRevisions[0]").revisionId, revisionId);
     rows = store.read((db: SqliteDbLike) => db.prepare("SELECT * FROM capability_revisions").all()) as CapabilityRevisionRow[];
     assert.equal(rows.length, 1);
 

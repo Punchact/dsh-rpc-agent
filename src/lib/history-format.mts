@@ -30,12 +30,12 @@ export interface HistoryPayloadInput {
 }
 
 export interface FormatHistoryOptions {
-  maxLines?: number;
-  maxChars?: number;
-  detailChars?: number;
-  since?: number | null;
-  kinds?: string[] | "*" | null;
-  requestedMaxChars?: number;
+  maxLines?: number | undefined;
+  maxChars?: number | undefined;
+  detailChars?: number | undefined;
+  since?: number | null | undefined;
+  kinds?: string[] | "*" | null | undefined;
+  requestedMaxChars?: number | undefined;
 }
 
 export interface FormattedHistoryStructured {

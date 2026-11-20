@@ -26,6 +26,11 @@ interface CapabilitiesResultView {
 
 const runCollectFacts = collectFacts as unknown as (opts: Record<string, unknown>) => Promise<SectionFact[]>;
 
+function req<T>(value: T | undefined, what = "item"): T {
+  if (value === undefined) throw new Error(`missing ${what}`);
+  return value;
+}
+
 function fullServices(): Record<string, unknown> {
   return {
     permissionPresets: {
@@ -122,23 +127,31 @@ test("collectFacts degrades missing and throwing ctx.get services to unavailable
 
   const facts = await runCollectFacts({ ctx, config: {}, state: { tokenSource: "env" } });
   const byId = Object.fromEntries(facts.map((s) => [s.id, s]));
+  const identity = req(byId.identity, "identity");
+  const runtime = req(byId.runtime, "runtime");
+  const permissions = req(byId.permissions, "permissions");
+  const plugins = req(byId.plugins, "plugins");
+  const tools = req(byId.tools, "tools");
+  const mcp = req(byId.mcp, "mcp");
+  const sessions = req(byId.sessions, "sessions");
+  const workspace = req(byId.workspace, "workspace");
 
-  assert.equal(byId.identity.status, "ok");
-  assert.equal(byId.runtime.status, "ok");
+  assert.equal(identity.status, "ok");
+  assert.equal(runtime.status, "ok");
 
-  assert.equal(byId.permissions.status, "unavailable");
-  assert.equal(byId.permissions.reason, "permissionPresets is not a service in this host");
+  assert.equal(permissions.status, "unavailable");
+  assert.equal(permissions.reason, "permissionPresets is not a service in this host");
 
-  assert.equal(byId.plugins.status, "unavailable");
-  assert.equal(byId.plugins.reason, "loader is not a service in this host");
+  assert.equal(plugins.status, "unavailable");
+  assert.equal(plugins.reason, "loader is not a service in this host");
 
-  assert.equal(byId.tools.status, "unavailable");
-  assert.match(byId.tools.reason ?? "", /tools failed: tools exploded/);
-  assert.ok(!(byId.tools.reason ?? "").includes("\n"), "unavailable reason must stay single-line");
+  assert.equal(tools.status, "unavailable");
+  assert.match(tools.reason ?? "", /tools failed: tools exploded/);
+  assert.ok(!(tools.reason ?? "").includes("\n"), "unavailable reason must stay single-line");
 
-  assert.equal(byId.mcp.status, "unavailable");
-  assert.equal(byId.sessions.status, "unavailable");
-  assert.equal(byId.workspace.status, "unavailable");
+  assert.equal(mcp.status, "unavailable");
+  assert.equal(sessions.status, "unavailable");
+  assert.equal(workspace.status, "unavailable");
 });
 
 test("mcp section groups mcp__ tools by prefix and excludes non-mcp tools", async () => {
@@ -160,16 +173,18 @@ test("mcp section groups mcp__ tools by prefix and excludes non-mcp tools", asyn
 
   const facts = await runCollectFacts({ ctx, sections: ["tools", "mcp"] });
   const byId = Object.fromEntries(facts.map((s) => [s.id, s]));
+  const tools = req(byId.tools, "tools");
+  const mcp = req(byId.mcp, "mcp");
 
-  assert.equal(byId.tools.status, "ok");
-  assert.equal(byId.mcp.status, "ok");
-  assert.equal(byId.mcp.source, "tools(mcp__)");
-  assert.deepEqual(byId.mcp.data.servers, {
+  assert.equal(tools.status, "ok");
+  assert.equal(mcp.status, "ok");
+  assert.equal(mcp.source, "tools(mcp__)");
+  assert.deepEqual(mcp.data.servers, {
     github: ["mcp__github__get_me"],
     xerj: ["mcp__xerj__xerj_search"],
     my_srv: ["mcp__my_srv__run_task"],
   });
-  const text = byId.mcp.lines.join("\n");
+  const text = mcp.lines.join("\n");
   assert.match(text, /these are the MCP tools exposed to this agent, not the servers in the profile/);
   assert.match(text, /github \(1\): get_me/);
   assert.match(text, /xerj \(1\): xerj_search/);
@@ -186,11 +201,13 @@ test("tools names-only becomes partial and mcp with zero mcp__ tools becomes una
   };
   const facts = await runCollectFacts({ ctx, sections: ["tools", "mcp"] });
   const byId = Object.fromEntries(facts.map((s) => [s.id, s]));
+  const tools = req(byId.tools, "tools");
+  const mcp = req(byId.mcp, "mcp");
 
-  assert.equal(byId.tools.status, "partial");
-  assert.match(byId.tools.lines[0], /3 tools · names only/);
-  assert.equal(byId.mcp.status, "unavailable");
-  assert.match(byId.mcp.reason ?? "", /these are the MCP tools exposed to this agent, not the servers in the profile/);
+  assert.equal(tools.status, "partial");
+  assert.match(req(tools.lines[0], "tools.lines[0]"), /3 tools · names only/);
+  assert.equal(mcp.status, "unavailable");
+  assert.match(mcp.reason ?? "", /these are the MCP tools exposed to this agent, not the servers in the profile/);
 });
 
 test("sections subset only collects requested sections and only queries needed services", async () => {
@@ -209,7 +226,7 @@ test("sections subset only collects requested sections and only queries needed s
     ["identity", "plugins"],
   );
   assert.deepEqual(asked, ["loader"]);
-  assert.equal(facts[1].status, "ok");
+  assert.equal(req(facts[1], "facts[1]").status, "ok");
 });
 
 test("methods.capabilities works with no live session and does not touch sessionController", async () => {
@@ -252,5 +269,5 @@ test("methods.capabilities works with no live session and does not touch session
   ) => Promise<CapabilitiesResultView>;
   const dispatched = await dispatch("dsh.capabilities", { sections: ["identity"] });
   assert.equal(dispatched.sections.length, 1);
-  assert.equal(dispatched.sections[0].id, "identity");
+  assert.equal(req(dispatched.sections[0], "sections[0]").id, "identity");
 });

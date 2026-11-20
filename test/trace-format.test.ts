@@ -293,8 +293,10 @@ test("since filters lines and structured while keeping whole-turn total and erro
   assert.equal(fullRes.errors, 1);
   const structured = fullRes.structured!;
   assert.equal(structured.length, 1);
-  assert.equal(structured[0].callId, "c3");
-  assert.equal(structured[0].index, 2);
+  const s0 = structured[0];
+  if (!s0) throw new Error("missing structured[0]");
+  assert.equal(s0.callId, "c3");
+  assert.equal(s0.index, 2);
 
   // errors level does not re-emit pre-cursor errors when delta has none
   const errRes = describeTrace(tools, { level: "errors", since: 4 });

@@ -24,8 +24,8 @@ interface ValidCardFixture {
   cardVersion?: string;
   declared?: boolean;
   verified?: boolean;
-  identity?: Record<string, unknown>;
-  controls?: Record<string, ControlSpec>;
+  identity?: Record<string, unknown> | undefined;
+  controls?: Record<string, ControlSpec> | undefined;
   limits?: Record<string, unknown>;
   limitations?: unknown;
   capabilities?: string[];

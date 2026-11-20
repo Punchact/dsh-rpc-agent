@@ -23,6 +23,11 @@ after(() => clearInterval(SUITE_KEEPALIVE));
 
 import { createApprovalGate, describeArgs, MAX_ARGV_CHARS } from "../dist/lib/approvals.mjs";
 
+function req<T>(value: T | undefined, what = "item"): T {
+  if (value === undefined) throw new Error(`missing ${what}`);
+  return value;
+}
+
 interface ApprovalGateInstance {
   pre(exec: Record<string, unknown>, next?: () => Promise<Record<string, unknown>>): Promise<{ kind: string; reason?: string }>;
   post(exec: Record<string, unknown>, result: unknown, next?: () => Promise<Record<string, unknown>>): Promise<Record<string, unknown>>;
@@ -141,7 +146,7 @@ test("the store keeps a bounded number of pending requests", async () => {
   for (let i = 0; i < MAX_PENDING + 3; i += 1) opened.push(store.open({ sessionId: `s${i}`, toolName: "bash" }));
   assert.equal(store.size(), MAX_PENDING);
   // The oldest ones were dropped, which reads as an expiry to whoever holds them.
-  assert.equal((await opened[0].promise).decision, "expired");
+  assert.equal((await req(opened[0], "opened[0]").promise).decision, "expired");
   assert.equal((await (opened.at(-1) as (typeof opened)[number]).promise).decision, "expired");
 });
 
@@ -175,14 +180,14 @@ test("an allowed escalation widens the preset and lets the call run", async () =
   });
   await tick();
   assert.equal(store.size(), 1);
-  store.resolve(store.list()[0].approvalId, "allow-once");
+  store.resolve(req(store.list()[0], "pending[0]").approvalId, "allow-once");
 
   const decision = await pending;
   assert.deepEqual(decision, { kind: "allow" });
   assert.equal(passed, 1);
   assert.deepEqual(widened, [["session-mine", "danger-full-access"]]);
   assert.equal(allowed.length, 1);
-  assert.equal(allowed[0].escalation, "danger-full-access");
+  assert.equal(req(allowed[0], "allowed[0]").escalation, "danger-full-access");
 });
 
 test("a rejected escalation never reaches the tool", async () => {
@@ -195,7 +200,7 @@ test("a rejected escalation never reaches the tool", async () => {
     return Promise.resolve({ kind: "allow" });
   });
   await tick();
-  store.resolve(store.list()[0].approvalId, "reject", "too broad");
+  store.resolve(req(store.list()[0], "pending[0]").approvalId, "reject", "too broad");
   const decision = await pending;
 
   assert.equal(decision.kind, "deny");
@@ -227,7 +232,7 @@ test("a session stops being asked after its allowance budget is spent", async ()
   const runOnce = async () => {
     const pending = gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }));
     await tick();
-    store.resolve(store.list()[0].approvalId, "allow-once");
+    store.resolve(req(store.list()[0], "pending[0]").approvalId, "allow-once");
     assert.deepEqual(await pending, { kind: "allow" });
     // The call finishes: the gate puts the preset back and clears `widened`.
     await gate.post(escalation(), ACCEPTED_RESULT, () => Promise.resolve({ kind: "accept" }));
@@ -396,7 +401,7 @@ test("allow-once widens the session only while the approved call runs", async ()
   const { store, widened, gate } = harness();
   const held = gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }));
   await tick();
-  store.resolve(store.list()[0].approvalId, "allow-once");
+  store.resolve(req(store.list()[0], "pending[0]").approvalId, "allow-once");
   assert.deepEqual(await held, { kind: "allow" });
   assert.deepEqual(widened, [["session-mine", "danger-full-access"]]);
   assert.deepEqual(gate.widenedSessions(), ["session-mine"]);
@@ -413,7 +418,7 @@ test("a downstream refusal never leaves the session widened", async () => {
   const { store, widened, gate } = harness();
   const held = gate.pre(escalation(), () => Promise.resolve({ kind: "deny", reason: "blocked downstream" }));
   await tick();
-  store.resolve(store.list()[0].approvalId, "allow-once");
+  store.resolve(req(store.list()[0], "pending[0]").approvalId, "allow-once");
   assert.equal((await held).kind, "deny");
   assert.deepEqual(widened, [
     ["session-mine", "danger-full-access"],
@@ -432,7 +437,7 @@ test("escalations racing in one tick spend one allowance and ask once", async ()
   const decisions = await Promise.all(
     calls.map(async (call, index) => {
       if (index === 0) {
-        store.resolve(store.list()[0].approvalId, "allow-once");
+        store.resolve(req(store.list()[0], "pending[0]").approvalId, "allow-once");
       }
       return call;
     }),
@@ -466,7 +471,7 @@ test("the packet carries the whole call, not just one field", async () => {
     () => new Promise(() => {}),
   );
   await tick();
-  const packet = store.list()[0];
+  const packet = req(store.list()[0], "packet");
   assert.equal(packet.argv, "safe.txt");
   assert.match(packet.args ?? "", /EXFIL/, "content is part of what the caller judges");
   assert.doesNotMatch(packet.args ?? "", /SUPERSECRET/, "credential-shaped values are masked");
@@ -510,7 +515,7 @@ test("a downstream listener that throws still puts the preset back", async () =>
 
   const held = gate.pre(escalation(), () => Promise.reject(new Error("a later listener exploded")));
   await tick();
-  store.resolve(store.list()[0].approvalId, "allow-once");
+  store.resolve(req(store.list()[0], "pending[0]").approvalId, "allow-once");
 
   await assert.rejects(held, /a later listener exploded/);
   assert.deepEqual(applied, ["danger-full-access", "workspace-write"], "the preset went back before the error escaped");
@@ -532,7 +537,7 @@ test("a result handler that throws cannot keep the session wide", async () => {
 
   const held = gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }));
   await tick();
-  store.resolve(store.list()[0].approvalId, "allow-once");
+  store.resolve(req(store.list()[0], "pending[0]").approvalId, "allow-once");
   assert.equal((await held).kind, "allow");
   assert.deepEqual(gate.widenedSessions(), ["session-mine"], "the call is running wide");
 

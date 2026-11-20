@@ -172,7 +172,8 @@ export function createAntigravityAdapter({
     }
 
     candidates.sort((a, b) => b.mtimeMs - a.mtimeMs || b.pid - a.pid);
-    return candidates[0];
+    // candidates.length === 0 throws immediately above, so candidates[0] is guaranteed present.
+    return candidates[0] as DaemonDescriptor;
   }
 
   async function callRpc(descriptor: DaemonDescriptor, method: string, bodyObj?: Record<string, unknown>): Promise<any> {

@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createDshAdapter } from "../dist/lib/adapters/dsh.mjs";
+
+function req<T>(value: T | undefined, what = "item"): T {
+  if (value === undefined) throw new Error(`missing ${what}`);
+  return value;
+}
 import { createDispatcher } from "../dist/lib/tasks/dispatch.mjs";
 import { createTaskEngine, seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
 import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
@@ -200,12 +205,14 @@ test("dsh adapter start creates session, triggers ask, and returns secret-free l
 
   assert.equal(started.accepted, true);
   assert.deepEqual(started.locator, { kind: "dsh", sessionId: "sess_dsh_1" });
-  assert.equal(calls[0][0], "createSession");
-  assert.equal(calls[0][1]?.cwd, "C:\\work\\repo");
-  assert.equal(calls[0][1]?.agentPreset, "coder");
-  assert.equal(calls[1][0], "askSession");
-  assert.equal(calls[1][1]?.sessionId, "sess_dsh_1");
-  assert.equal(calls[1][1]?.prompt, "summarize diff");
+  const c0 = req(calls[0], "calls[0]");
+  const c1 = req(calls[1], "calls[1]");
+  assert.equal(c0[0], "createSession");
+  assert.equal(c0[1]?.cwd, "C:\\work\\repo");
+  assert.equal(c0[1]?.agentPreset, "coder");
+  assert.equal(c1[0], "askSession");
+  assert.equal(c1[1]?.sessionId, "sess_dsh_1");
+  assert.equal(c1[1]?.prompt, "summarize diff");
 });
 
 test("dsh adapter inspect maps all session statuses to honest 6-state reports", async () => {
@@ -282,24 +289,28 @@ test("dsh adapter events preserves exact cursor, adapterEventId, and maps turn/e
   const adapter = buildDshAdapter({ ops });
   const res = await adapter.events({ kind: "dsh", sessionId: "sess_ev_1" }, 9);
 
-  assert.equal(calls[0][1]?.afterSeq, 9);
+  assert.equal(req(calls[0], "calls[0]")[1]?.afterSeq, 9);
   assert.equal(res.nextCursor, 42);
   assert.equal(res.events.length, 4);
 
-  assert.equal(res.events[0].adapterEventId, "sess_ev_1:10:tool/result");
-  assert.equal(res.events[0].report.state, "progress");
-  assert.equal(res.events[0].report.evidence.isError, true);
+  const ev0 = req(res.events[0], "events[0]");
+  assert.equal(ev0.adapterEventId, "sess_ev_1:10:tool/result");
+  assert.equal(ev0.report.state, "progress");
+  assert.equal(ev0.report.evidence.isError, true);
 
-  assert.equal(res.events[1].adapterEventId, "sess_ev_1:11:approval/requested");
-  assert.equal(res.events[1].report.state, "blocked");
-  assert.equal(res.events[1].report.attention!.kind, "approval");
+  const ev1 = req(res.events[1], "events[1]");
+  assert.equal(ev1.adapterEventId, "sess_ev_1:11:approval/requested");
+  assert.equal(ev1.report.state, "blocked");
+  assert.equal(ev1.report.attention!.kind, "approval");
 
-  assert.equal(res.events[2].adapterEventId, "sess_ev_1:12:turn/end");
-  assert.equal(res.events[2].report.state, "ready");
-  assert.equal(res.events[2].report.resultValid, false);
+  const ev2 = req(res.events[2], "events[2]");
+  assert.equal(ev2.adapterEventId, "sess_ev_1:12:turn/end");
+  assert.equal(ev2.report.state, "ready");
+  assert.equal(ev2.report.resultValid, false);
 
-  assert.equal(res.events[3].adapterEventId, "sess_ev_1:13:turn/end");
-  assert.equal(res.events[3].report.state, "failed");
+  const ev3 = req(res.events[3], "events[3]");
+  assert.equal(ev3.adapterEventId, "sess_ev_1:13:turn/end");
+  assert.equal(ev3.report.state, "failed");
 });
 
 test("dsh adapter sendInput uses steer mode, cancel stays honest about stopped, decideApproval validates approvalId", async () => {
@@ -420,6 +431,6 @@ test("approval records that need no decision never block a task (0.9.0 live: app
     assert.equal(evt.report.state, "progress", `${evt.adapterEventId} must not block`);
     assert.equal(evt.report.attention, undefined, `${evt.adapterEventId} must not open an attention`);
   }
-  assert.equal(res.events[0].report.evidence.policy, "ask");
-  assert.equal(res.events[2].report.state, "ready");
+  assert.equal(req(res.events[0], "events[0]").report.evidence.policy, "ask");
+  assert.equal(req(res.events[2], "events[2]").report.state, "ready");
 });

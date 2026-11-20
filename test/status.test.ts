@@ -203,15 +203,20 @@ test("stats count what the bridge served, without recording arguments", async ()
   assert.equal(snapshot.total, 2);
   assert.equal(snapshot.errors, 1);
   assert.deepEqual(Object.keys(snapshot.byMethod).sort(), ["ask", "dsh.sessions.ask"]);
-  assert.equal(snapshot.byMethod["dsh.sessions.ask"].count, 1);
-  assert.equal(snapshot.byMethod.ask.errors, 1);
+  const dshAsk = snapshot.byMethod["dsh.sessions.ask"];
+  const bareAsk = snapshot.byMethod.ask;
+  if (!dshAsk || !bareAsk) throw new Error("missing method stats");
+  assert.equal(dshAsk.count, 1);
+  assert.equal(bareAsk.errors, 1);
   assert.equal(snapshot.recent.length, 2);
   // Only these five fields — a record must never grow a `params` field.
   for (const entry of snapshot.recent) {
     assert.deepEqual(Object.keys(entry).sort(), ["at", "code", "method", "ms", "ok"]);
   }
-  assert.equal(snapshot.lastCallAt, snapshot.recent[0].at);
-  assert.equal(snapshot.lastErrorAt, snapshot.recent[0].at);
+  const recent0 = snapshot.recent[0];
+  if (!recent0) throw new Error("missing recent[0]");
+  assert.equal(snapshot.lastCallAt, recent0.at);
+  assert.equal(snapshot.lastErrorAt, recent0.at);
 });
 
 test("a remote address is refused", async () => {

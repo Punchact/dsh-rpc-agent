@@ -70,7 +70,7 @@ test("ALLOWED_TRANSITIONS is frozen and matches all 11 states", () => {
 
 test("every legal transition succeeds, increments state_version, and records an event", async () => {
   for (const from of TASK_STATES) {
-    for (const to of ALLOWED_MAP[from]) {
+    for (const to of ALLOWED_MAP[from] ?? []) {
       assert.equal(canTransition(from, to), true);
       const { store, taskId } = await createSeededStoreWithTask(from);
       try {

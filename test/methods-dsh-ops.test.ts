@@ -127,7 +127,7 @@ function validCard(agentId = "ag_1", kind = "dsh") {
 
 test("createDshAdapterOps wraps sessionController + approvals without throwing", async () => {
   const { sessionController, calls } = makeFakeSessionController();
-  const resolvedCalls: Array<{ id: string; decision: string; note?: string }> = [];
+  const resolvedCalls: Array<{ id: string; decision: string; note?: string | undefined }> = [];
   const approvals = {
     async waitForAny({ sessionId }: { sessionId: string }) {
       return sessionId === "sess_wait_apr"
@@ -182,7 +182,9 @@ test("createDshAdapterOps wraps sessionController + approvals without throwing",
   const aprOk = await ops.resolveApproval({ approvalId: "apr_7", decision: "allow", reason: "ok" });
   assert.equal(aprOk.ok, true);
   assert.equal(aprOk.decision, "allow-once");
-  assert.equal(resolvedCalls[0].decision, "allow-once");
+  const resolved0 = resolvedCalls[0];
+  if (!resolved0) throw new Error("missing resolvedCalls[0]");
+  assert.equal(resolved0.decision, "allow-once");
 
   const aprMiss = await ops.resolveApproval({ approvalId: "missing", decision: "deny" });
   assert.equal(aprMiss.ok, false);
@@ -243,10 +245,12 @@ test("createMethods auto-wires dsh adapter when tasksEnabled=true and validates 
     assert.equal(reg.agentId, "ag_dsh");
     assert.equal(reg.projectId, "proj_alpha");
 
+    const rev0 = reg.capabilityRevisions[0];
+    if (!rev0) throw new Error("missing capabilityRevisions[0]");
     const preview = await createPreview(store, {
       principalId: "local-operator",
       requestDigest: "dig_m_1",
-      capabilityRevisionId: reg.capabilityRevisions[0].revisionId,
+      capabilityRevisionId: rev0.revisionId,
       workspaceId: "local",
       agentId: "ag_dsh",
     });
@@ -254,7 +258,7 @@ test("createMethods auto-wires dsh adapter when tasksEnabled=true and validates 
       previewId: preview.previewId,
       idempotencyKey: "idem_m_1",
       principalId: "local-operator",
-      capabilityRevisionId: reg.capabilityRevisions[0].revisionId,
+      capabilityRevisionId: rev0.revisionId,
       workspaceId: "local",
       agentId: "ag_dsh",
       input: { prompt: "run dsh baseline" },

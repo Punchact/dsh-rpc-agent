@@ -13,7 +13,8 @@ import { rpcCall, rpcStream } from "../dist/lib/client.mjs";
 const argv = process.argv.slice(2);
 const flag = (name: string, fallback = ""): string => {
   const at = argv.indexOf(`--${name}`);
-  return at >= 0 && argv[at + 1] ? argv[at + 1] : fallback;
+  const val = at >= 0 ? argv[at + 1] : undefined;
+  return val ? val : fallback;
 };
 
 const cwd = flag("cwd", process.cwd());

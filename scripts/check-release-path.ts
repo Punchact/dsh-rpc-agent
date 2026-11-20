@@ -152,7 +152,7 @@ function artifactName(block: string, verb: string): string | null {
   for (const line of block.slice(at).split("\n").slice(1)) {
     if (/^\s{0,6}-\s/.test(line)) return null;
     const match = /^name:\s*([A-Za-z0-9._-]+)$/.exec(line.trim());
-    if (match) return match[1];
+    if (match) return match[1] ?? null;
   }
   return null;
 }
@@ -160,7 +160,9 @@ function artifactName(block: string, verb: string): string | null {
 function checkWildcardInPack(baseDir: string, shippedSet: Set<string>, pattern: string): boolean {  const relPattern = pattern.replace(/^\.\//, "");
   const dirRel = posix.dirname(relPattern);
   const basePattern = posix.basename(relPattern);
-  const [prefix, suffix] = basePattern.split("*");
+  const parts = basePattern.split("*");
+  const prefix = parts[0] ?? "";
+  const suffix = parts[1] ?? "";
   const absDir = resolve(baseDir, dirRel);
   if (!existsSync(absDir)) return false;
   const matches = readdirSync(absDir).filter((f) => f.startsWith(prefix) && f.endsWith(suffix));
@@ -281,13 +283,13 @@ if (!existsSync(RELEASE_WORKFLOW)) {
       problems.push("release.yml publish job 没有把发布目标指向下载到的 tarball（应 publish $TARBALL 或 ./artifacts/*.tgz）");
     }
     const strayPublish = nonTarballPublishLines(publishBlock);
-    if (strayPublish.length > 0) {
+    if (strayPublish[0] !== undefined) {
       problems.push(
         `release.yml publish job 有 ${strayPublish.length} 处 publish 没有指向 tarball：${strayPublish[0].slice(0, 120)}`,
       );
     }
     const tarAssign = [...publishBlock.matchAll(/TARBALL=(?<value>.*)/g)].map((m) =>
-      (m.groups as Record<string, string>).value.trim(),
+      (m.groups?.value ?? "").trim(),
     );
     if (tarAssign.length === 0) {
       problems.push("release.yml publish job 没有从下载到的 tarball 推出路径变量（应有 TARBALL=$(ls artifacts/*.tgz)）");
@@ -297,7 +299,7 @@ if (!existsSync(RELEASE_WORKFLOW)) {
       );
     }
     const bareRootPublish = findRootPublishLines(publishBlock);
-    if (bareRootPublish.length > 0) {
+    if (bareRootPublish[0] !== undefined) {
       problems.push(
         `release.yml publish job 有 ${bareRootPublish.length} 处在仓库根执行 npm publish：${bareRootPublish[0].slice(0, 120)}`,
       );
