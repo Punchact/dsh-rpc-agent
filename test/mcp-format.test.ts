@@ -11,7 +11,23 @@ import test from "node:test";
 
 import { capText, describeEnd, formatToolError, formatToolResult } from "../dist/lib/mcp-format.mjs";
 
-const textOf = (result) => result.content.map((part) => part.text).join("\n");
+interface McpContentPart {
+  type?: string;
+  text: string;
+}
+
+interface McpToolResponse {
+  content: McpContentPart[];
+  isError: boolean;
+  structuredContent?: Record<string, unknown>;
+}
+
+const formatResult = formatToolResult as (
+  payload: Record<string, unknown>,
+  options?: Record<string, unknown>,
+) => McpToolResponse;
+
+const textOf = (result: McpToolResponse): string => result.content.map((part) => part.text).join("\n");
 
 test("a completed turn is plain text, not an error", () => {
   const result = formatToolResult({
@@ -349,7 +365,7 @@ test("default errors trace adds (M errors) suffix and trace block before note/re
   assert.equal(defaultResult.isError, false);
   assert.equal("structuredContent" in defaultResult, false);
   assert.deepEqual(
-    defaultResult.content.map((part) => part.text),
+    defaultResult.content.map((part: McpContentPart) => part.text),
     [
       "session session-t",
       "partial answer",
@@ -404,11 +420,11 @@ test("structuredContent is emitted only for trace: full and omits undefined/unkn
     ],
   };
 
-  const summary = formatToolResult(resultInput, { trace: "summary" });
+  const summary = formatResult(resultInput, { trace: "summary" });
   assert.equal("structuredContent" in summary, false);
   assert.match(textOf(summary), /trace:\n✓ read "README\.md" 3ms/);
 
-  const full = formatToolResult(resultInput, { trace: "full" });
+  const full = formatResult(resultInput, { trace: "full" });
   assert.deepEqual(full.structuredContent, {
     sessionId: "session-full",
     turn: 2,
@@ -432,9 +448,9 @@ test("structuredContent is emitted only for trace: full and omits undefined/unkn
       },
     ],
   });
-  assert.equal("sliceMs" in full.structuredContent, false);
-  assert.equal("requestedMs" in full.structuredContent, false);
-  assert.equal("extraField" in full.structuredContent, false);
+  assert.equal("sliceMs" in (full.structuredContent as Record<string, unknown>), false);
+  assert.equal("requestedMs" in (full.structuredContent as Record<string, unknown>), false);
+  assert.equal("extraField" in (full.structuredContent as Record<string, unknown>), false);
 });
 
 test("maxResultChars leaves prose under the cap or when disabled (0) untouched", () => {
@@ -465,7 +481,7 @@ test("maxResultChars caps only the turn text block and preserves session, meta, 
     },
     { maxResultChars: 120 },
   );
-  const blocks = result.content.map((b) => b.text);
+  const blocks = result.content.map((b: McpContentPart) => b.text);
   assert.equal(blocks[0], "session session-cap");
   assert.match(blocks[1], /^x+\n… \(turn text truncated at 120 chars; raise config\.maxResultChars to lift the cap\)$/);
   const keptPrefix = blocks[1].split("\n… ")[0];
@@ -560,11 +576,11 @@ test("advice option appends one final advice block after every other block and i
     { sessionId: "session-adv", turn: 1, status: "completed", text: "ok" },
     { advice: null },
   );
-  assert.equal(noAdviceNull.content.some((b) => b.text.startsWith("advice:")), false);
+  assert.equal(noAdviceNull.content.some((b: McpContentPart) => b.text.startsWith("advice:")), false);
 
   const noAdviceEmpty = formatToolResult(
     { sessionId: "session-adv", turn: 1, status: "completed", text: "ok" },
     { advice: "" },
   );
-  assert.equal(noAdviceEmpty.content.some((b) => b.text.startsWith("advice:")), false);
+  assert.equal(noAdviceEmpty.content.some((b: McpContentPart) => b.text.startsWith("advice:")), false);
 });

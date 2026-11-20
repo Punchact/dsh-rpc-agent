@@ -9,19 +9,83 @@ import { createDispatcher } from "../dist/lib/tasks/dispatch.mjs";
 import { createTaskEngine, seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
 import { openStore } from "../dist/lib/tasks/store.mjs";
 
-function makeFakeAdapter(overrides = {}) {
+type TestStore = ReturnType<typeof openStore>;
+type TestEngine = ReturnType<typeof createTaskEngine>;
+type SeedEntitiesFn = (
+  store: TestStore,
+  opts: {
+    principal?: { principalId: string; kind?: string };
+    workspace?: { workspaceId: string; rootPath: string };
+    agent?: { agentId: string; adapterKind: string; capabilities?: Record<string, string> };
+    capabilityRevision?: { revisionId: string; capability: string };
+  },
+) => Promise<unknown>;
+interface FakeAdapterOverrides {
+  onStart?: (ctx: unknown) => unknown;
+  onInspect?: (ctx: unknown) => unknown;
+  onCancel?: (ctx: unknown) => unknown;
+  onEvents?: (ctx: unknown, locator: unknown, cursor?: number) => unknown;
+}
+interface TaskDispatchResult {
+  status: string;
+  stateVersion: number;
+  dispatchFailed?: boolean;
+  error?: string;
+  locator?: Record<string, unknown>;
+  orphan?: boolean;
+  attemptId?: string;
+}
+interface DispatcherInstance {
+  startTask(params: { taskId: string }): Promise<TaskDispatchResult>;
+  pump(params: { taskId: string; maxSteps?: number; cursor?: number }): Promise<{
+    stepsProcessed: number;
+    hitMaxSteps: boolean;
+    status: string;
+    nextCursor?: number;
+    awaitingStart?: boolean;
+    orphaned?: boolean;
+  }>;
+  drainEffects(params: { limit?: number }): Promise<{ processed: number; completed: number; failed: number }>;
+}
+interface AutopilotInstance {
+  step(): Promise<{
+    started: Array<{ taskId: string }>;
+    pumped: Array<{ taskId: string }>;
+    failed: Array<{ taskId: string; message: string }>;
+  }>;
+}
+interface SqliteDbLike {
+  prepare(sql: string): {
+    all(...args: unknown[]): Array<Record<string, unknown>>;
+    get(...args: unknown[]): Record<string, unknown> | undefined;
+    run(...args: unknown[]): unknown;
+  };
+}
+interface TaskEventItem {
+  type: string;
+  evidence?: {
+    runtimeLocator?: Record<string, unknown>;
+    attemptRecorded?: boolean;
+  };
+}
+
+const seedBaseline = seedBaselineEntities as unknown as SeedEntitiesFn;
+const openDispatcher = createDispatcher as (opts: Record<string, unknown>) => DispatcherInstance;
+const openAutopilot = createAutopilot as (opts: Record<string, unknown>) => AutopilotInstance;
+
+function makeFakeAdapter(overrides: FakeAdapterOverrides = {}) {
   const calls = { start: 0, inspect: 0, cancel: 0, events: 0, decideApproval: 0 };
   const adapter = {
     calls,
     async probe() {
       return { ok: true };
     },
-    async start(ctx) {
+    async start(ctx: unknown) {
       calls.start += 1;
       if (overrides.onStart) return overrides.onStart(ctx);
       return { accepted: true, locator: { kind: "fake", remoteId: "rem-1" } };
     },
-    async inspect(ctx) {
+    async inspect(ctx: unknown) {
       calls.inspect += 1;
       if (overrides.onInspect) return overrides.onInspect(ctx);
       return { state: "progress", message: "working" };
@@ -29,12 +93,12 @@ function makeFakeAdapter(overrides = {}) {
     async sendInput() {
       return { accepted: true };
     },
-    async cancel(ctx) {
+    async cancel(ctx: unknown) {
       calls.cancel += 1;
       if (overrides.onCancel) return overrides.onCancel(ctx);
       return { requestAccepted: true };
     },
-    async events(ctx, locator, cursor) {
+    async events(ctx: unknown, locator: unknown, cursor?: number) {
       calls.events += 1;
       if (overrides.onEvents) return overrides.onEvents(ctx, locator, cursor);
       return { events: [], nextCursor: cursor ?? 0 };
@@ -47,16 +111,16 @@ function makeFakeAdapter(overrides = {}) {
   return adapter;
 }
 
-async function setupWithAdapter(adapter) {
+async function setupWithAdapter(adapter: ReturnType<typeof makeFakeAdapter>) {
   const store = openStore({ path: ":memory:" });
-  await seedBaselineEntities(store, {
+  await seedBaseline(store, {
     principal: { principalId: "local-operator" },
     workspace: { workspaceId: "ws-1", rootPath: "C:\\ws-1" },
     agent: { agentId: "ag-1", adapterKind: "fake", capabilities: { cancel: "supported" } },
     capabilityRevision: { revisionId: "cap-1", capability: "review.diff@1" },
   });
   const engine = createTaskEngine(store);
-  const dispatcher = createDispatcher({ store, engine, adapters: { fake: adapter } });
+  const dispatcher = openDispatcher({ store, engine, adapters: { fake: adapter } });
   return { store, engine, dispatcher };
 }
 
@@ -99,7 +163,7 @@ test("startTask transitions queued -> dispatching -> running, and adapter throw 
     assert.equal(res.dispatchFailed, true);
 
     const evts = await s2.engine.events({ taskId: t.taskId, afterSeq: 0 });
-    assert.ok(evts.events.some((e) => e.type === "dispatch.failed"));
+    assert.ok(evts.events.some((e: TaskEventItem) => e.type === "dispatch.failed"));
   } finally {
     s2.store.close();
   }
@@ -163,7 +227,7 @@ test("pump forwards reports through engine, moves unknown/blocked to needs_recon
     const p = await sBlocked.dispatcher.pump({ taskId: t.taskId });
     assert.equal(p.status, "needs_reconcile");
     const evts = await sBlocked.engine.events({ taskId: t.taskId, afterSeq: 0 });
-    assert.ok(evts.events.some((e) => e.type === "inspect.unknown"));
+    assert.ok(evts.events.some((e: TaskEventItem) => e.type === "inspect.unknown"));
   } finally {
     sBlocked.store.close();
   }
@@ -219,7 +283,7 @@ test("drainEffects reclaims an in-flight effect whose lease expired", async () =
 
     // Simulate a drain that died after claiming: in_flight with an expired lease.
     const expired = new Date(Date.now() - 60_000).toISOString();
-    store.withWriteTx((db) => {
+    store.withWriteTx((db: SqliteDbLike) => {
       db.prepare(
         "UPDATE effects SET status = 'in_flight', lease_expires_at = ?, updated_at = ? WHERE task_id = ?",
       ).run(expired, expired, t.taskId);
@@ -261,7 +325,7 @@ test("a cancel the runtime refuses becomes needs_reconcile instead of a silent h
     const got = await engine.get({ taskId: t.taskId });
     assert.equal(got.status, "needs_reconcile");
     const evts = await engine.events({ taskId: t.taskId, afterSeq: 0 });
-    assert.ok(evts.events.some((e) => e.type === "cancel.failed"));
+    assert.ok(evts.events.some((e: TaskEventItem) => e.type === "cancel.failed"));
   } finally {
     store.close();
   }
@@ -280,7 +344,7 @@ test("startTask keeps the runtime locator when the ledger refuses the attempt", 
     // A cancel lands while the adapter is starting: the attempt can no longer be
     // recorded, but the run exists and its locator must survive.
     adapter.start = async () => {
-      const row = store.read((db) => db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(t.taskId));
+      const row = store.read((db: SqliteDbLike) => db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(t.taskId)) as { state_version: number };
       await engine.cancel({
         taskId: t.taskId,
         expectedStateVersion: row.state_version,
@@ -296,7 +360,7 @@ test("startTask keeps the runtime locator when the ledger refuses the attempt", 
     assert.equal(res.status, "needs_reconcile");
 
     const evts = await engine.events({ taskId: t.taskId, afterSeq: 0 });
-    const orphan = evts.events.find((e) => e.type === "dispatch.orphaned");
+    const orphan = (evts.events as TaskEventItem[]).find((e) => e.type === "dispatch.orphaned");
     assert.ok(orphan);
     assert.deepEqual(orphan.evidence?.runtimeLocator, { kind: "fake", remoteId: "rem-orphan" });
   } finally {
@@ -324,9 +388,9 @@ test("RPC wiring exposes dsh.tasks.dispatch/pump and config validates tasksAdapt
       {
         sessionController: {},
         webServer: { getOrigin: () => "http://127.0.0.1:0" },
-        taskStore: store,
-        taskEngine: engine,
-        adapters: { fake: adapter },
+        taskStore: store as unknown as null,
+        taskEngine: engine as unknown as null,
+        adapters: { fake: adapter } as unknown as null,
       },
       cfg,
       { get: () => undefined },
@@ -353,7 +417,7 @@ test("startTask enforces the maxConcurrent gate without leaving tasks in dispatc
   const adapter = makeFakeAdapter();
   const s1 = await setupWithAdapter(adapter);
   try {
-    const capped = createDispatcher({
+    const capped = openDispatcher({
       store: s1.store,
       engine: s1.engine,
       adapters: { fake: adapter },
@@ -375,7 +439,7 @@ test("startTask enforces the maxConcurrent gate without leaving tasks in dispatc
     await capped.startTask({ taskId: t1.taskId });
     await assert.rejects(
       () => capped.startTask({ taskId: t2.taskId }),
-      (err) => err?.data?.reason === "max_concurrent" && err?.data?.maxConcurrent === 1,
+      (err: { data?: { reason?: string; maxConcurrent?: number } }) => err?.data?.reason === "max_concurrent" && err?.data?.maxConcurrent === 1,
     );
 
     const t2Detail = await s1.engine.get({ taskId: t2.taskId });
@@ -383,7 +447,7 @@ test("startTask enforces the maxConcurrent gate without leaving tasks in dispatc
     assert.equal(t2Detail.stateVersion, 1);
     assert.equal(adapter.calls.start, 1);
 
-    const wider = createDispatcher({
+    const wider = openDispatcher({
       store: s1.store,
       engine: s1.engine,
       adapters: { fake: adapter },
@@ -399,19 +463,19 @@ test("startTask enforces the maxConcurrent gate without leaving tasks in dispatc
 
 test("dispatch, pump, and drainEffects sanitize raw adapter exceptions out of ledger/results while logging to debug", async () => {
   const secretRaw = "connect ECONNREFUSED http://127.0.0.1:4035 token=csrf_top_secret_99 C:\\Users\\Andy\\priv.key";
-  const debugLogs = [];
-  const logger = { debug: (msg, meta) => debugLogs.push({ msg, meta }) };
+  const debugLogs: Array<{ msg: string; meta: Record<string, unknown> }> = [];
+  const logger = { debug: (msg: string, meta: Record<string, unknown>) => debugLogs.push({ msg, meta }) };
 
   const failStartAdapter = makeFakeAdapter({
     onStart() {
-      const err = new Error(secretRaw);
+      const err = new Error(secretRaw) as Error & { code?: string };
       err.code = "ECONNREFUSED";
       throw err;
     },
   });
   const s1 = await setupWithAdapter(failStartAdapter);
   try {
-    const disp = createDispatcher({
+    const disp = openDispatcher({
       store: s1.store,
       engine: s1.engine,
       adapters: { fake: failStartAdapter },
@@ -448,7 +512,7 @@ test("dispatch, pump, and drainEffects sanitize raw adapter exceptions out of le
   });
   const s2 = await setupWithAdapter(failPumpCancelAdapter);
   try {
-    const disp = createDispatcher({
+    const disp = openDispatcher({
       store: s2.store,
       engine: s2.engine,
       adapters: { fake: failPumpCancelAdapter },
@@ -463,7 +527,7 @@ test("dispatch, pump, and drainEffects sanitize raw adapter exceptions out of le
     const started = await disp.startTask({ taskId: t.taskId });
     await assert.rejects(
       () => disp.pump({ taskId: t.taskId }),
-      (err) => !err.message.includes("127.0.0.1:4035") && !err.message.includes("csrf_top_secret_99"),
+      (err: Error) => !err.message.includes("127.0.0.1:4035") && !err.message.includes("csrf_top_secret_99"),
     );
 
     await s2.engine.cancel({
@@ -474,7 +538,7 @@ test("dispatch, pump, and drainEffects sanitize raw adapter exceptions out of le
     const d = await disp.drainEffects({ limit: 10 });
     assert.equal(d.failed, 1);
 
-    const effRows = s2.store.read((db) => db.prepare("SELECT * FROM effects WHERE task_id = ?").all(t.taskId));
+    const effRows = s2.store.read((db: SqliteDbLike) => db.prepare("SELECT * FROM effects WHERE task_id = ?").all(t.taskId));
     assert.doesNotMatch(JSON.stringify(effRows), /127\.0\.0\.1:4035|csrf_top_secret_99|priv\.key/);
   } finally {
     s2.store.close();
@@ -486,7 +550,7 @@ test("dispatch logger omits raw exception text by default, logs redacted [raw] o
   const makeFailAdapter = () =>
     makeFakeAdapter({
       onStart() {
-        const err = new Error(secretMsg);
+        const err = new Error(secretMsg) as Error & { code?: string };
         err.code = "ECONNREFUSED";
         Object.defineProperty(err, "internalDetail", { value: secretMsg, enumerable: false });
         throw err;
@@ -495,13 +559,13 @@ test("dispatch logger omits raw exception text by default, logs redacted [raw] o
 
   // 1. Default debugRawAdapterErrors=false: logger receives safe fields only, zero raw message
   const sDefault = await setupWithAdapter(makeFailAdapter());
-  const defaultLogs = [];
+  const defaultLogs: Array<{ msg: string; meta: Record<string, unknown> }> = [];
   try {
-    const disp = createDispatcher({
+    const disp = openDispatcher({
       store: sDefault.store,
       engine: sDefault.engine,
       adapters: { fake: makeFailAdapter() },
-      logger: { debug: (msg, meta) => defaultLogs.push({ msg, meta }) },
+      logger: { debug: (msg: string, meta: Record<string, unknown>) => defaultLogs.push({ msg, meta }) },
     });
     const t = await sDefault.engine.submit({
       idempotencyKey: "w7-log-default",
@@ -527,13 +591,13 @@ test("dispatch logger omits raw exception text by default, logs redacted [raw] o
   assert.throws(() => resolveConfig({ tasksAdapterDebugDetail: "yes" }), ConfigError);
 
   const sRaw = await setupWithAdapter(makeFailAdapter());
-  const rawLogs = [];
+  const rawLogs: Array<{ msg: string; meta: Record<string, unknown> }> = [];
   try {
-    const disp = createDispatcher({
+    const disp = openDispatcher({
       store: sRaw.store,
       engine: sRaw.engine,
       adapters: { fake: makeFailAdapter() },
-      logger: { debug: (msg, meta) => rawLogs.push({ msg, meta }) },
+      logger: { debug: (msg: string, meta: Record<string, unknown>) => rawLogs.push({ msg, meta }) },
       debugRawAdapterErrors: true,
     });
     const t = await sRaw.engine.submit({
@@ -585,8 +649,8 @@ test("dispatch logger omits raw exception text by default, logs redacted [raw] o
         },
       },
     });
-    const evRows = sEng.store.read((db) => db.prepare("SELECT payload_json FROM events WHERE task_id = ?").all(t.taskId));
-    const attRows = sEng.store.read((db) => db.prepare("SELECT prompt FROM attention WHERE task_id = ?").all(t.taskId));
+    const evRows = sEng.store.read((db: SqliteDbLike) => db.prepare("SELECT payload_json FROM events WHERE task_id = ?").all(t.taskId));
+    const attRows = sEng.store.read((db: SqliteDbLike) => db.prepare("SELECT prompt FROM attention WHERE task_id = ?").all(t.taskId)) as Array<{ prompt: string }>;
     assert.doesNotMatch(JSON.stringify(evRows), /tok_leak_1|ghp_1234/);
     assert.doesNotMatch(JSON.stringify(attRows), /sk-1234|csrf-secret-xyz/);
     assert.ok(attRows[0].prompt.includes("[redacted]"));
@@ -613,7 +677,7 @@ test("pump hands an interrupted start to a person instead of retrying forever", 
       agentId: "ag-1",
     });
     // Reproduce the ledger shape a crash mid-start leaves behind: dispatching, no attempt row.
-    await store.withWriteTx((db) => {
+    await store.withWriteTx((db: SqliteDbLike) => {
       db.prepare("UPDATE tasks SET status = 'dispatching' WHERE task_id = ?").run(t.taskId);
     });
 
@@ -624,7 +688,7 @@ test("pump hands an interrupted start to a person instead of retrying forever", 
     assert.equal(adapter.calls.events, 0);
 
     // Past the grace window it becomes a person's job, with an event that says why.
-    const late = createDispatcher({
+    const late = openDispatcher({
       store,
       engine,
       adapters: { fake: adapter },
@@ -640,7 +704,7 @@ test("pump hands an interrupted start to a person instead of retrying forever", 
     assert.equal(detail.phase, "person/reconcile");
     const events = await engine.events({ taskId: t.taskId });
     assert.ok(
-      events.events.some((event) => event.type === "dispatch.orphaned"),
+      (events.events as TaskEventItem[]).some((event) => event.type === "dispatch.orphaned"),
       "the interrupted start must leave a dispatch.orphaned event",
     );
   } finally {
@@ -667,7 +731,7 @@ test("pump also refuses a start that recorded an attempt but no locator", async 
       agentId: "ag-1",
     });
     const nowIso = new Date().toISOString();
-    await store.withWriteTx((db) => {
+    await store.withWriteTx((db: SqliteDbLike) => {
       db.prepare("UPDATE tasks SET status = 'dispatching' WHERE task_id = ?").run(t.taskId);
       db.prepare(
         `INSERT INTO attempts (
@@ -682,7 +746,7 @@ test("pump also refuses a start that recorded an attempt but no locator", async 
     assert.equal(fresh.awaitingStart, true);
     assert.equal(adapter.calls.events, 0);
 
-    const late = createDispatcher({
+    const late = openDispatcher({
       store,
       engine,
       adapters: { fake: adapter },
@@ -696,7 +760,7 @@ test("pump also refuses a start that recorded an attempt but no locator", async 
     const detail = await engine.get({ taskId: t.taskId });
     assert.equal(detail.phase, "person/reconcile");
     const events = await engine.events({ taskId: t.taskId });
-    const orphaned = events.events.find((event) => event.type === "dispatch.orphaned");
+    const orphaned = (events.events as TaskEventItem[]).find((event) => event.type === "dispatch.orphaned");
     assert.ok(orphaned, "an unlocatable start must leave a dispatch.orphaned event");
     assert.equal(orphaned.evidence?.attemptRecorded, true);
   } finally {
@@ -710,7 +774,7 @@ test("the autopilot pass frees the only slot an orphaned start was holding", asy
   const adapter = makeFakeAdapter();
   const { store, engine } = await setupWithAdapter(adapter);
   try {
-    const dispatcher = createDispatcher({
+    const dispatcher = openDispatcher({
       store,
       engine,
       adapters: { fake: adapter },
@@ -729,11 +793,11 @@ test("the autopilot pass frees the only slot an orphaned start was holding", asy
       workspaceId: "ws-1",
       agentId: "ag-1",
     });
-    await store.withWriteTx((db) => {
+    await store.withWriteTx((db: SqliteDbLike) => {
       db.prepare("UPDATE tasks SET status = 'dispatching' WHERE task_id = ?").run(orphan.taskId);
     });
 
-    const autopilot = createAutopilot({ engine, dispatcher, maxStart: 2, maxPump: 4 });
+    const autopilot = openAutopilot({ engine, dispatcher, maxStart: 2, maxPump: 4 });
 
     // 第一遍：队列里的任务先撞上被占的槽，同遍的 pump 才把孤儿升成核对期。
     const first = await autopilot.step();

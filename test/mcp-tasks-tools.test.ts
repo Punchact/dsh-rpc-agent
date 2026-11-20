@@ -13,16 +13,38 @@ import {
   validateToolArgs,
 } from "../dist/bin/dsh-rpc-mcp.mjs";
 
-function withMockRpc(responder, fn) {
+interface MockRpcRequest {
+  id?: unknown;
+  method: string;
+  params?: Record<string, unknown>;
+}
+
+interface MockRpcReply {
+  result?: unknown;
+  error?: { code: number | string; message: string; data?: Record<string, unknown> };
+}
+
+interface McpCallOutcome {
+  isError: boolean;
+  content: Array<{ text: string }>;
+  structuredContent?: Record<string, unknown>;
+}
+
+const invokeTool = callTool as (name: string, args: Record<string, unknown>) => Promise<McpCallOutcome>;
+
+function withMockRpc(
+  responder: (req: MockRpcRequest) => MockRpcReply | Promise<MockRpcReply>,
+  fn: (calls: MockRpcRequest[]) => Promise<void>,
+) {
   const prevFetch = globalThis.fetch;
   const prevUrl = process.env.DSH_RPC_URL;
   const prevToken = process.env.DSH_RPC_TOKEN;
   process.env.DSH_RPC_URL = "http://127.0.0.1:1/dsh-rpc";
   process.env.DSH_RPC_TOKEN = "mcp-test-token-0123456789abcdef";
 
-  const calls = [];
-  globalThis.fetch = async (_url, init) => {
-    const req = JSON.parse(init.body);
+  const calls: MockRpcRequest[] = [];
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    const req = JSON.parse(String(init?.body ?? "{}")) as MockRpcRequest;
     calls.push(req);
     const ans = await responder(req);
     const payload = ans.error
@@ -35,7 +57,7 @@ function withMockRpc(responder, fn) {
         return JSON.stringify(payload);
       },
     };
-  };
+  }) as unknown as typeof fetch;
 
   return Promise.resolve()
     .then(() => fn(calls))
@@ -119,7 +141,7 @@ test("MCP exposes task tools when tasksEnabled=true, never exposes reconcile/dec
       }
       assert.equal(names.some((n) => /reconcile|decideApproval|decide_approval/i.test(n)), false);
 
-      const res = await callTool("dsh_task_submit", {
+      const res = await invokeTool("dsh_task_submit", {
         workspace_id: "local",
         agent_id: "ag-1",
         capability_revision_id: "cap-1",
@@ -127,7 +149,7 @@ test("MCP exposes task tools when tasksEnabled=true, never exposes reconcile/dec
       });
       assert.equal(res.isError, false);
       assert.equal(res.content[0].text, "task task_abc · queued · machine/queued");
-      assert.equal(res.structuredContent.taskId, "task_abc");
+      assert.equal(res.structuredContent?.taskId, "task_abc");
     },
   );
 });
@@ -264,7 +286,7 @@ test("MCP tells a 0.8.x plugin apart from a disabled 0.9.0 one instead of sugges
 
       const res = await callTool("dsh_task_list", {});
       assert.equal(res.isError, true);
-      const body = res.content.map((parts) => parts.text).join("\n");
+      const body = res.content.map((parts: { text: string }) => parts.text).join("\n");
       assert.match(body, /does not implement the task centre/i);
       assert.match(body, /upgrade the plugin inside the DSH profile to 0\.9\.0/i);
       assert.doesNotMatch(
@@ -374,10 +396,11 @@ test("MCP dsh_task_preview and dsh_task_list surface preview headers, degraded, 
 });
 
 test("MCP task tools pass client transport errors (EBADPORT, ECONNREFUSED) through verbatim instead of adapter-sanitizing them", async () => {
-  for (const [cause, expectPattern] of [
+  const cases: Array<[Error, RegExp]> = [
     [new Error("bad port"), /EBADPORT/],
     [Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:9"), { code: "ECONNREFUSED" }), /ECONNREFUSED/],
-  ]) {
+  ];
+  for (const [cause, expectPattern] of cases) {
     resetBridgeDefaults();
     const prevFetch = globalThis.fetch;
     const prevUrl = process.env.DSH_RPC_URL;
@@ -385,8 +408,8 @@ test("MCP task tools pass client transport errors (EBADPORT, ECONNREFUSED) throu
     process.env.DSH_RPC_URL = "http://127.0.0.1:1/dsh-rpc";
     process.env.DSH_RPC_TOKEN = "mcp-test-token-0123456789abcdef";
 
-    globalThis.fetch = async (_url, init) => {
-      const req = JSON.parse(init.body);
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const req = JSON.parse(String(init?.body ?? "{}")) as MockRpcRequest;
       if (req.method === "dsh.discover") {
         return {
           ok: true,
@@ -401,12 +424,12 @@ test("MCP task tools pass client transport errors (EBADPORT, ECONNREFUSED) throu
         };
       }
       throw new TypeError("fetch failed", { cause });
-    };
+    }) as unknown as typeof fetch;
 
     try {
       const res = await callTool("dsh_task_list", {});
       assert.equal(res.isError, true);
-      const text = res.content.map((p) => p.text).join("\n");
+      const text = res.content.map((p: { text: string }) => p.text).join("\n");
       assert.match(text, expectPattern);
       assert.doesNotMatch(text, /request rejected by adapter|executor is currently unavailable/);
     } finally {
@@ -535,7 +558,7 @@ void badTool; void badEntry; void badTransport;
   };
 
   const program = ts.createProgram([validFile, badFile], options, host);
-  const collect = (rootFile) => {
+  const collect = (rootFile: string) => {
     const sf = program.getSourceFile(rootFile);
     if (!sf) throw new Error(`tsc did not load probe ${rootFile}`);
     return ts

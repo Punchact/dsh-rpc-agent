@@ -23,18 +23,51 @@ after(() => clearInterval(SUITE_KEEPALIVE));
 
 import { createApprovalGate, describeArgs, MAX_ARGV_CHARS } from "../dist/lib/approvals.mjs";
 
+interface ApprovalGateInstance {
+  pre(exec: Record<string, unknown>, next?: () => Promise<Record<string, unknown>>): Promise<{ kind: string; reason?: string }>;
+  post(exec: Record<string, unknown>, result: unknown, next?: () => Promise<Record<string, unknown>>): Promise<Record<string, unknown>>;
+  widenedSessions(): string[];
+}
+
+interface PendingPacket {
+  approvalId: string;
+  sessionId: string;
+  toolName: string;
+  createdAt: number;
+  expiresAt: number;
+  preset?: string;
+  argv?: string;
+  args?: string;
+  untrusted?: boolean;
+}
+
+interface PendingStoreInstance {
+  open(packet: Record<string, unknown>, opts?: { signal?: AbortSignal }): {
+    approvalId: string;
+    packet: PendingPacket;
+    promise: Promise<{ decision: string; note?: string }>;
+  };
+  resolve(approvalId: string, decision: string, note?: string | null): Record<string, unknown>;
+  list(sessionId?: string): PendingPacket[];
+  size(): number;
+  waitForAny(opts?: { sessionId?: string; waitMs?: number }): Promise<{ timedOut: boolean; pending: PendingPacket[] }>;
+}
+
+const openApprovalGate = createApprovalGate as (opts: Record<string, unknown>) => ApprovalGateInstance;
+const openPendingStore = createPendingStore as (opts: { deadlineMs?: number; log?: unknown }) => PendingStoreInstance;
+
 // Every gate in this file needs a readable current preset: without one the gate
 // refuses up front (it cannot promise to put the preset back), which most of the
 // cases below are not about. The default reader keeps them focused.
-function makeGate(options = {}) {
-  return createApprovalGate({ mode: "delegate", isOwned: () => true, currentPreset: () => "workspace-write", ...options });
+function makeGate(options: Record<string, unknown> = {}): ApprovalGateInstance {
+  return openApprovalGate({ mode: "delegate", isOwned: () => true, currentPreset: () => "workspace-write", ...options });
 }
 
 import { resolveConfig } from "../dist/lib/config.mjs";
 import { createMethods } from "../dist/lib/methods.mjs";
 import { createPendingStore, MAX_PENDING } from "../dist/lib/pending.mjs";
 
-const exec = (sessionId, args = {}) => ({
+const exec = (sessionId: string, args: Record<string, unknown> = {}) => ({
   agent: { session: { id: sessionId, header: { cwd: "C:/work" } } },
   name: "bash",
   callId: "call-1",
@@ -52,7 +85,7 @@ const tick = () => new Promise((r) => setImmediate(r));
 const ACCEPTED_RESULT = Object.freeze({ content: [{ type: "text", text: "ok" }] });
 
 test("a pending request can be listed, answered, and is then gone", async () => {
-  const store = createPendingStore({ deadlineMs: 5_000 });
+  const store = openPendingStore({ deadlineMs: 5_000 });
   const { approvalId, packet, promise } = store.open({ sessionId: "s1", toolName: "bash" });
 
   assert.match(approvalId, /^apv-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, "ids are unguessable, not a counter");
@@ -86,7 +119,7 @@ test("resolving an unknown id reports it instead of inventing a decision", () =>
 });
 
 test("waitForAny returns as soon as something is pending", async () => {
-  const store = createPendingStore({ deadlineMs: 5_000 });
+  const store = openPendingStore({ deadlineMs: 5_000 });
   const waiting = store.waitForAny({ sessionId: "s1", waitMs: 2_000 });
   await tick();
   store.open({ sessionId: "s1", toolName: "bash" });
@@ -96,20 +129,20 @@ test("waitForAny returns as soon as something is pending", async () => {
 });
 
 test("waitForAny gives up when the wait expires", async () => {
-  const store = createPendingStore({ deadlineMs: 5_000 });
+  const store = openPendingStore({ deadlineMs: 5_000 });
   const answer = await store.waitForAny({ sessionId: "s1", waitMs: 30 });
   assert.equal(answer.timedOut, true);
   assert.deepEqual(answer.pending, []);
 });
 
 test("the store keeps a bounded number of pending requests", async () => {
-  const store = createPendingStore({ deadlineMs: 50 });
+  const store = openPendingStore({ deadlineMs: 50 });
   const opened = [];
   for (let i = 0; i < MAX_PENDING + 3; i += 1) opened.push(store.open({ sessionId: `s${i}`, toolName: "bash" }));
   assert.equal(store.size(), MAX_PENDING);
   // The oldest ones were dropped, which reads as an expiry to whoever holds them.
   assert.equal((await opened[0].promise).decision, "expired");
-  assert.equal((await opened.at(-1).promise).decision, "expired");
+  assert.equal((await (opened.at(-1) as (typeof opened)[number]).promise).decision, "expired");
 });
 
 test("delegate without a store or a preset applier degrades to deny", () => {
@@ -121,18 +154,18 @@ test("delegate without a store or a preset applier degrades to deny", () => {
 });
 
 test("an allowed escalation widens the preset and lets the call run", async () => {
-  const store = createPendingStore({ deadlineMs: 5_000 });
-  const widened = [];
-  const allowed = [];
+  const store = openPendingStore({ deadlineMs: 5_000 });
+  const widened: Array<[string, string]> = [];
+  const allowed: Array<{ escalation?: string }> = [];
   const gate = makeGate({
     mode: "delegate",
     isOwned: () => true,
     store,
-    applyPreset: async (sessionId, name) => {
+    applyPreset: async (sessionId: string, name: string) => {
       widened.push([sessionId, name]);
       return name;
     },
-    onAllow: (event) => allowed.push(event),
+    onAllow: (event: { escalation?: string }) => allowed.push(event),
   });
 
   let passed = 0;
@@ -153,7 +186,7 @@ test("an allowed escalation widens the preset and lets the call run", async () =
 });
 
 test("a rejected escalation never reaches the tool", async () => {
-  const store = createPendingStore({ deadlineMs: 5_000 });
+  const store = openPendingStore({ deadlineMs: 5_000 });
   const gate = makeGate({ mode: "delegate", isOwned: () => true, store, applyPreset: async () => {} });
 
   let passed = 0;
@@ -166,29 +199,29 @@ test("a rejected escalation never reaches the tool", async () => {
   const decision = await pending;
 
   assert.equal(decision.kind, "deny");
-  assert.match(decision.reason, /The caller answered "reject": too broad/);
+  assert.match(decision.reason ?? "", /The caller answered "reject": too broad/);
   assert.equal(passed, 0);
 });
 
 test("an expired escalation is refused with its own reason", async () => {
-  const store = createPendingStore({ deadlineMs: 10 });
+  const store = openPendingStore({ deadlineMs: 10 });
   const gate = makeGate({ mode: "delegate", isOwned: () => true, store, applyPreset: async () => {} });
   const decision = await gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }));
   assert.equal(decision.kind, "deny");
-  assert.match(decision.reason, /did not answer within the deadline/);
+  assert.match(decision.reason ?? "", /did not answer within the deadline/);
 });
 
 test("an escalation outside the documented ladder is refused without asking", async () => {
-  const store = createPendingStore({ deadlineMs: 5_000 });
+  const store = openPendingStore({ deadlineMs: 5_000 });
   const gate = makeGate({ mode: "delegate", isOwned: () => true, store, applyPreset: async () => {} });
   const decision = await gate.pre(escalation("root"), () => Promise.resolve({ kind: "allow" }));
   assert.equal(decision.kind, "deny");
-  assert.match(decision.reason, /Only workspace-write and danger-full-access may be requested/);
+  assert.match(decision.reason ?? "", /Only workspace-write and danger-full-access may be requested/);
   assert.equal(store.size(), 0);
 });
 
 test("a session stops being asked after its allowance budget is spent", async () => {
-  const store = createPendingStore({ deadlineMs: 5_000 });
+  const store = openPendingStore({ deadlineMs: 5_000 });
   const gate = makeGate({ mode: "delegate", isOwned: () => true, store, applyPreset: async () => {} });
 
   const runOnce = async () => {
@@ -204,12 +237,12 @@ test("a session stops being asked after its allowance budget is spent", async ()
 
   const fourth = await gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }));
   assert.equal(fourth.kind, "deny");
-  assert.match(fourth.reason, /already used its 3 delegated escalations/);
+  assert.match(fourth.reason ?? "", /already used its 3 delegated escalations/);
   assert.equal(store.size(), 0);
 });
 
 test("a session this bridge did not create keeps its own answerer", async () => {
-  const store = createPendingStore({ deadlineMs: 5_000 });
+  const store = openPendingStore({ deadlineMs: 5_000 });
   const gate = makeGate({ mode: "delegate", isOwned: () => false, store, applyPreset: async () => {} });
   const decision = await gate.pre(escalation(), () => Promise.resolve({ kind: "allowed-once" }));
   assert.deepEqual(decision, { kind: "allowed-once" });
@@ -219,11 +252,16 @@ test("a session this bridge did not create keeps its own answerer", async () => 
 // The two RPC methods are thin, but they are the part a dispatcher actually
 // calls: a wrong shape here would make the whole feature unreachable.
 
-const methodsWith = (store) =>
-  createMethods({ sessionController: null, webServer: null, approvals: store }, resolveConfig({ tasksEnabled: true }), {}, {});
+const methodsWith = (store: PendingStoreInstance | null) =>
+  createMethods(
+    { sessionController: null as unknown as Record<string, unknown>, webServer: null as unknown as Record<string, unknown>, approvals: store as unknown as null },
+    resolveConfig({ tasksEnabled: true }),
+    {},
+    {},
+  );
 
 test("the pending method lists what is waiting and reports the mode", async () => {
-  const store = createPendingStore({ deadlineMs: 5_000 });
+  const store = openPendingStore({ deadlineMs: 5_000 });
   store.open({ sessionId: "s1", toolName: "bash", escalation: "danger-full-access", argv: "rm -rf build" });
   const answer = await methodsWith(store).approvalsPending({}, {});
   assert.equal(answer.count, 1);
@@ -233,14 +271,14 @@ test("the pending method lists what is waiting and reports the mode", async () =
 });
 
 test("the pending method waits, then reports that nothing arrived", async () => {
-  const store = createPendingStore({ deadlineMs: 5_000 });
+  const store = openPendingStore({ deadlineMs: 5_000 });
   const answer = await methodsWith(store).approvalsPending({ waitMs: 30 }, {});
   assert.equal(answer.count, 0);
   assert.equal(answer.timedOut, true);
 });
 
 test("resolving answers the request, and an unknown id is a not-found error", async () => {
-  const store = createPendingStore({ deadlineMs: 5_000 });
+  const store = openPendingStore({ deadlineMs: 5_000 });
   const methods = methodsWith(store);
   const { approvalId, promise } = store.open({ sessionId: "s1", toolName: "bash" });
 
@@ -250,11 +288,11 @@ test("resolving answers the request, and an unknown id is a not-found error", as
 
   await assert.rejects(
     () => methods.approvalsResolve({ approvalId: "apv-404", decision: "reject" }),
-    (error) => error.code === -32003,
+    (error: { code?: number }) => error.code === -32003,
   );
   await assert.rejects(
     () => methods.approvalsResolve({ approvalId, decision: "maybe" }),
-    (error) => error.code === -32602,
+    (error: { code?: number }) => error.code === -32602,
   );
 });
 
@@ -262,7 +300,7 @@ test("without a store the approval methods say so instead of pretending", async 
   const methods = methodsWith(null);
   await assert.rejects(
     () => methods.approvalsPending({}, {}),
-    (error) => error.code === -32000 && /approvals.mode/.test(error.message),
+    (error: { code?: number; message: string }) => error.code === -32000 && /approvals.mode/.test(error.message),
   );
 });
 
@@ -293,7 +331,7 @@ test("the gate refuses as soon as the held call is cancelled", async () => {
   controller.abort();
   const decision = await held;
   assert.equal(decision.kind, "deny", "a cancelled call is a refusal, not an allowance");
-  assert.match(decision.reason, /cancelled/);
+  assert.match(decision.reason ?? "", /cancelled/);
   assert.equal(store.size(), 0);
 });
 
@@ -315,13 +353,13 @@ test("the decision packet carries the session's live preset", async () => {
 });
 
 test("a preset reader that throws refuses the call instead of guessing", async () => {
-  const store = createPendingStore({ deadlineMs: 5_000 });
-  const widened = [];
+  const store = openPendingStore({ deadlineMs: 5_000 });
+  const widened: Array<[string, string]> = [];
   const gate = makeGate({
     mode: "delegate",
     isOwned: () => true,
     store,
-    applyPreset: async (sessionId, name) => {
+    applyPreset: async (sessionId: string, name: string) => {
       widened.push([sessionId, name]);
     },
     currentPreset: () => {
@@ -338,14 +376,14 @@ test("a preset reader that throws refuses the call instead of guessing", async (
 
 // ------------------------------------------------- one call, not a session ----
 
-const harness = (overrides = {}) => {
-  const store = createPendingStore({ deadlineMs: 5_000 });
-  const widened = [];
+const harness = (overrides: Record<string, unknown> = {}) => {
+  const store = openPendingStore({ deadlineMs: 5_000 });
+  const widened: Array<[string, string]> = [];
   const gate = makeGate({
     mode: "delegate",
     isOwned: () => true,
     store,
-    applyPreset: async (sessionId, name) => {
+    applyPreset: async (sessionId: string, name: string) => {
       widened.push([sessionId, name]);
     },
     currentPreset: () => "workspace-write",
@@ -401,7 +439,7 @@ test("escalations racing in one tick spend one allowance and ask once", async ()
   );
   const denied = decisions.filter((decision) => decision.kind === "deny");
   assert.equal(denied.length, 4);
-  for (const decision of denied) assert.match(decision.reason, /Another escalated call is already running/);
+  for (const decision of denied) assert.match(decision.reason ?? "", /Another escalated call is already running/);
 });
 
 test("a call that is already cancelled never becomes a question", async () => {
@@ -412,7 +450,7 @@ test("a call that is already cancelled never becomes a question", async () => {
     Promise.resolve({ kind: "allow" }),
   );
   assert.equal(decision.kind, "deny");
-  assert.match(decision.reason, /cancelled/);
+  assert.match(decision.reason ?? "", /cancelled/);
   assert.equal(store.size(), 0);
 });
 
@@ -430,8 +468,8 @@ test("the packet carries the whole call, not just one field", async () => {
   await tick();
   const packet = store.list()[0];
   assert.equal(packet.argv, "safe.txt");
-  assert.match(packet.args, /EXFIL/, "content is part of what the caller judges");
-  assert.doesNotMatch(packet.args, /SUPERSECRET/, "credential-shaped values are masked");
+  assert.match(packet.args ?? "", /EXFIL/, "content is part of what the caller judges");
+  assert.doesNotMatch(packet.args ?? "", /SUPERSECRET/, "credential-shaped values are masked");
   assert.equal(packet.untrusted, true);
   store.resolve(packet.approvalId, "reject");
   await held;
@@ -439,9 +477,9 @@ test("the packet carries the whole call, not just one field", async () => {
 });
 
 test("waitMs is validated instead of quietly clamped", async () => {
-  const store = createPendingStore({ deadlineMs: 5_000 });
+  const store = openPendingStore({ deadlineMs: 5_000 });
   const methods = createMethods(
-    { sessionController: null, webServer: null, approvals: store },
+    { sessionController: null as unknown as Record<string, unknown>, webServer: null as unknown as Record<string, unknown>, approvals: store as unknown as null },
     resolveConfig({ approvals: { mode: "delegate" } }),
     {},
     {},
@@ -449,7 +487,7 @@ test("waitMs is validated instead of quietly clamped", async () => {
   for (const bad of [1.5, -1, 200_000, "100"]) {
     await assert.rejects(
       () => methods.approvalsPending({ waitMs: bad }),
-      (error) => error.code === -32602 && /waitMs/.test(error.message),
+      (error: { code?: number; message: string }) => error.code === -32602 && /waitMs/.test(error.message),
       `${JSON.stringify(bad)} is not a duration`,
     );
   }
@@ -458,13 +496,13 @@ test("waitMs is validated instead of quietly clamped", async () => {
 });
 
 test("a downstream listener that throws still puts the preset back", async () => {
-  const store = createPendingStore({ deadlineMs: 5_000 });
-  const applied = [];
+  const store = openPendingStore({ deadlineMs: 5_000 });
+  const applied: string[] = [];
   const gate = makeGate({
     mode: "delegate",
     isOwned: () => true,
     store,
-    applyPreset: async (sessionId, preset) => {
+    applyPreset: async (_sessionId: string, preset: string) => {
       applied.push(preset);
     },
     currentPreset: () => "workspace-write",
@@ -480,13 +518,13 @@ test("a downstream listener that throws still puts the preset back", async () =>
 });
 
 test("a result handler that throws cannot keep the session wide", async () => {
-  const store = createPendingStore({ deadlineMs: 5_000 });
-  const applied = [];
+  const store = openPendingStore({ deadlineMs: 5_000 });
+  const applied: string[] = [];
   const gate = makeGate({
     mode: "delegate",
     isOwned: () => true,
     store,
-    applyPreset: async (sessionId, preset) => {
+    applyPreset: async (_sessionId: string, preset: string) => {
       applied.push(preset);
     },
     currentPreset: () => "workspace-write",
@@ -504,13 +542,13 @@ test("a result handler that throws cannot keep the session wide", async () => {
 });
 
 test("a call without a call id is refused before anybody is asked", async () => {
-  const store = createPendingStore({ deadlineMs: 5_000 });
-  const applied = [];
+  const store = openPendingStore({ deadlineMs: 5_000 });
+  const applied: string[] = [];
   const gate = makeGate({
     mode: "delegate",
     isOwned: () => true,
     store,
-    applyPreset: async (sessionId, preset) => {
+    applyPreset: async (_sessionId: string, preset: string) => {
       applied.push(preset);
     },
     currentPreset: () => "workspace-write",
@@ -518,7 +556,7 @@ test("a call without a call id is refused before anybody is asked", async () => 
 
   const decision = await gate.pre({ ...escalation(), callId: "" }, () => Promise.resolve({ kind: "allow" }));
   assert.equal(decision.kind, "deny");
-  assert.match(decision.reason, /no call id/);
+  assert.match(decision.reason ?? "", /no call id/);
   assert.deepEqual(applied, [], "nothing was widened, so nothing had to be put back");
   assert.equal(store.size(), 0, "no approval was ever offered");
 });
@@ -539,7 +577,7 @@ test("a call that asks for nothing is held while the session is widened", async 
     () => Promise.resolve({ kind: "allow" }),
   );
   assert.equal(plain.kind, "deny");
-  assert.match(plain.reason, /temporarily widened/);
+  assert.match(plain.reason ?? "", /temporarily widened/);
 
   store.resolve(packet.approvalId, "allow-once");
   assert.equal((await held).kind, "allow");
@@ -548,8 +586,8 @@ test("a call that asks for nothing is held while the session is widened", async 
 test("the gate stays silent when it cannot tell whose session it is", async () => {
   // A missing ownership test is not a licence to answer for everybody: without a
   // way to tell our sessions from a human's, silence is the only safe answer.
-  const store = createPendingStore({ deadlineMs: 5_000 });
-  const gate = createApprovalGate({ mode: "delegate", store, applyPreset: async () => {}, currentPreset: () => "workspace-write" });
+  const store = openPendingStore({ deadlineMs: 5_000 });
+  const gate = openApprovalGate({ mode: "delegate", store, applyPreset: async () => {}, currentPreset: () => "workspace-write" });
   const outcome = await gate.pre(escalation(), () => Promise.resolve({ kind: "allow" }));
   assert.equal(outcome.kind, "allow");
   assert.equal(store.size(), 0);

@@ -13,15 +13,39 @@ import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
 import { applyReport, createTaskEngine, derivePhase, seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
 import { openStore } from "../dist/lib/tasks/store.mjs";
 
+type TestStore = ReturnType<typeof openStore>;
+type SeedEntitiesFn = (
+  store: TestStore,
+  opts: {
+    principal?: { principalId: string; kind?: string };
+    workspace?: { workspaceId: string; rootPath: string };
+    agent?: { agentId: string; adapterKind: string; capabilities?: Record<string, string> };
+    capabilityRevision?: { revisionId: string; capability: string };
+  },
+) => Promise<unknown>;
+type DerivePhaseFn = (
+  task: Record<string, unknown>,
+  attentionRows?: Array<Record<string, unknown>>,
+  lastEvent?: { type: string } | null,
+  options?: { nowMs?: number },
+) => { phase: string; label: string };
+interface TaskEventItem {
+  type: string;
+  seq: number;
+  payload: Record<string, unknown>;
+}
+const seedBaseline = seedBaselineEntities as unknown as SeedEntitiesFn;
+const deriveTaskPhase = derivePhase as unknown as DerivePhaseFn;
+
 async function setupEngine(dbPath = ":memory:") {
   const store = openStore({ path: dbPath });
-  await seedBaselineEntities(store, {
+  await seedBaseline(store, {
     principal: { principalId: "local-operator" },
     workspace: { workspaceId: "ws-lab", rootPath: "C:\\ws-lab" },
     agent: { agentId: "ag-cancel-ok", adapterKind: "antigravity", capabilities: { cancel: "supported" } },
     capabilityRevision: { revisionId: "rev-review-1", capability: "review.diff@1" },
   });
-  await seedBaselineEntities(store, {
+  await seedBaseline(store, {
     principal: { principalId: "other-caller" },
     agent: { agentId: "ag-no-cancel", adapterKind: "legacy", capabilities: { cancel: "unsupported" } },
   });
@@ -34,7 +58,7 @@ test("a stop nobody confirmed is reconcile-due even while the dispatch lease is 
   // dispatch lease, and the phase read `machine/working` — the operator was told a machine was
   // working while nobody could vouch for the stop. The signal outranks the lease.
   const now = Date.parse("2026-11-18T12:00:00Z");
-  const phase = derivePhase(
+  const phase = deriveTaskPhase(
     { status: "needs_reconcile", leaseExpiresAt: "2026-11-18T12:05:00Z" },
     [],
     { type: "cancel.unconfirmed" },
@@ -79,7 +103,7 @@ test("two ready reports for one task ask one review question", async () => {
 
     const events = await engine.events({ taskId: t.taskId, afterSeq: 0 });
     assert.equal(
-      events.events.filter((evt) => evt.type === "report.invalid").length,
+      events.events.filter((evt: TaskEventItem) => evt.type === "report.invalid").length,
       2,
       "both reports stay on the record even though the question is reused",
     );
@@ -279,7 +303,7 @@ test("cancel on executor without cancel support enters needs_reconcile with canc
     assert.match(detail.notice, /无法停止/);
 
     const evts = await engine.events({ taskId: t.taskId, afterSeq: 0 });
-    assert.ok(evts.events.some((e) => e.type === "cancel.unsupported"));
+    assert.ok(evts.events.some((e: TaskEventItem) => e.type === "cancel.unsupported"));
   } finally {
     store.close();
   }
@@ -317,7 +341,7 @@ test("ready with failed schema validation keeps running, writes report.invalid, 
     assert.equal(detail.pending.attention[0].kind, "review");
 
     const evts = await engine.events({ taskId: t.taskId, afterSeq: 0 });
-    assert.ok(evts.events.some((e) => e.type === "report.invalid"));
+    assert.ok(evts.events.some((e: TaskEventItem) => e.type === "report.invalid"));
   } finally {
     store.close();
   }
@@ -337,7 +361,7 @@ test("derivePhase covers all §5.4 rules and enforces top-to-bottom precedence",
     "person/delivery",
   );
   assert.equal(
-    derivePhase({ status: "running" }, [], { type: "input.queued" }, { nowMs: now }).phase,
+    deriveTaskPhase({ status: "running" }, [], { type: "input.queued" }, { nowMs: now }).phase,
     "person/delivery",
   );
 
@@ -359,7 +383,7 @@ test("derivePhase covers all §5.4 rules and enforces top-to-bottom precedence",
   //    `needs_reconcile` + open `input` attention + lastEvent `cancel.unconfirmed` reported
   //    `person/answer`, hiding the reconcile duty).
   assert.equal(
-    derivePhase(
+    deriveTaskPhase(
       { status: "needs_reconcile" },
       [{ kind: "input", status: "open" }],
       { type: "cancel.unconfirmed" },
@@ -452,7 +476,7 @@ test("reopening the same SQLite file preserves task state, state_version, and mo
     assert.equal(finished.stateVersion, stateVersionAfterCancel + 1);
 
     const evts = await reopenedEngine.events({ taskId, afterSeq: 0 });
-    const seqs = evts.events.map((e) => e.seq);
+    const seqs = evts.events.map((e: TaskEventItem) => e.seq);
     assert.deepEqual(seqs, [1, 2, 3, 4, 5]);
   } finally {
     reopenedStore.close();
@@ -467,7 +491,7 @@ test("RPC dispatcher wires dsh.tasks.submit/get/list/cancel and updates METHOD_C
     // methods — so a test of the wiring has to enable it, exactly like a real
     // deployment would.
     const methods = createMethods(
-      { sessionController: {}, webServer: { getOrigin: () => "http://127.0.0.1:0" }, taskStore: store, taskEngine: engine },
+      { sessionController: {}, webServer: { getOrigin: () => "http://127.0.0.1:0" }, taskStore: store as unknown as null, taskEngine: engine as unknown as null },
       resolveConfig({ tasksEnabled: true }),
       { get: () => undefined },
       {},
@@ -475,7 +499,7 @@ test("RPC dispatcher wires dsh.tasks.submit/get/list/cancel and updates METHOD_C
     const dispatch = buildDispatcher(methods);
 
     const info = await dispatch("dsh.discover", {});
-    const catalogNames = info.methods.map((m) => m.name);
+    const catalogNames = info.methods.map((m: { name: string }) => m.name);
     for (const name of ["dsh.tasks.submit", "dsh.tasks.get", "dsh.tasks.list", "dsh.tasks.cancel"]) {
       assert.ok(catalogNames.includes(name), `METHOD_CATALOG missing ${name}`);
     }
@@ -538,7 +562,7 @@ test("withdrawing a queued task that was never dispatched is final immediately (
     assert.equal(after.cancelReason, "changed my mind");
 
     const events = await engine.events({ taskId: task.taskId, afterSeq: 0 });
-    const confirmed = events.events.find((evt) => evt.type === "cancel.confirmed");
+    const confirmed = events.events.find((evt: TaskEventItem) => evt.type === "cancel.confirmed");
     assert.ok(confirmed, "cancel.confirmed event must be recorded");
     assert.equal(confirmed.payload.withdrawnBeforeDispatch, true);
 
@@ -593,7 +617,7 @@ test("resolve adjudicates an unvalidated ready result through review.promoted", 
     assert.equal(resolved.pending.attention.length, 0);
 
     const evts = await engine.events({ taskId: t.taskId, afterSeq: 0 });
-    const types = evts.events.map((e) => e.type);
+    const types = evts.events.map((e: TaskEventItem) => e.type);
     const promotedAt = types.indexOf("review.promoted");
     const resolvedAt = types.indexOf("task.resolved");
     assert.ok(promotedAt >= 0, "review.promoted must be recorded");
@@ -650,14 +674,14 @@ test("needs_reconcile always reports person/reconcile, whatever produced it", ()
   ];
   for (const type of reasons) {
     assert.equal(
-      derivePhase({ status: "needs_reconcile" }, [], type ? { type } : null, { nowMs: now }).phase,
+      deriveTaskPhase({ status: "needs_reconcile" }, [], type ? { type } : null, { nowMs: now }).phase,
       "person/reconcile",
       `${type ?? "no last event"} must route to person/reconcile`,
     );
   }
   // A lease still in the future must not hide the duty either (0.9.0 acceptance run 10).
   assert.equal(
-    derivePhase(
+    deriveTaskPhase(
       { status: "needs_reconcile", leaseExpiresAt: "2099-01-01T00:00:00Z" },
       [],
       { type: "cancel.unconfirmed" },
@@ -725,7 +749,7 @@ test("the same question from a different option set is a different question", as
       agentId: "ag-cancel-ok",
     });
     const att = await engine.recordAttemptStart({ taskId: t.taskId, expectedStateVersion: 1 });
-    const blocked = (options, adapterEventId) =>
+    const blocked = (options: string[], adapterEventId: string) =>
       applyReport(store, {
         taskId: t.taskId,
         attemptId: att.attemptId,
@@ -741,7 +765,7 @@ test("the same question from a different option set is a different question", as
     assert.notEqual(wider.questionId, first.questionId, "different options are a different question");
 
     // `repeated` 是事件里的话术，不是返回值上的字段：要么标真的重复，要么别标。
-    const opened = (await engine.events({ taskId: t.taskId })).events.filter((e) => e.type === "attention.opened");
+    const opened = ((await engine.events({ taskId: t.taskId })).events as TaskEventItem[]).filter((e) => e.type === "attention.opened");
     const repeatEvent = opened.find((e) => e.payload?.questionId === first.questionId && e.payload?.repeated === true);
     const freshEvent = opened.find((e) => e.payload?.questionId === wider.questionId);
     assert.ok(repeatEvent, "the same question again is marked repeated on its follow-up event");
@@ -834,7 +858,7 @@ void badEngineCalls;
   const cmd = ts.parseJsonConfigFileContent(parsed.config, ts.sys, repoRoot);
   const options = { ...cmd.options, noEmit: true };
 
-  const runProbe = (filePath, content) => {
+  const runProbe = (filePath: string, content: string) => {
     const virtualFiles = new Map([[resolve(filePath), content]]);
     const host = ts.createCompilerHost(options, true);
     const origGetSourceFile = host.getSourceFile.bind(host);
