@@ -8,7 +8,25 @@ import { createMethods } from "../dist/lib/methods.mjs";
 import { resolveConfig } from "../dist/lib/config.mjs";
 import { PLUGIN_VERSION } from "../dist/lib/version.mjs";
 
-function fullServices() {
+interface SectionFact {
+  id: string;
+  status: string;
+  reason?: string;
+  source?: string;
+  lines: string[];
+  data: { servers?: Record<string, string[]>; [key: string]: unknown };
+}
+
+interface CapabilitiesResultView {
+  missing: string[];
+  truncated: boolean;
+  sections: Array<{ id: string }>;
+  text: string;
+}
+
+const runCollectFacts = collectFacts as unknown as (opts: Record<string, unknown>) => Promise<SectionFact[]>;
+
+function fullServices(): Record<string, unknown> {
   return {
     permissionPresets: {
       async catalog() {
@@ -21,7 +39,7 @@ function fullServices() {
           ],
         };
       },
-      current(session) {
+      current(session: { preset?: string } | undefined) {
         return session?.preset ?? null;
       },
     },
@@ -57,9 +75,9 @@ function fullServices() {
 
 test("collectFacts returns ok for stubbed services across all 8 sections", async () => {
   const services = fullServices();
-  const asked = [];
+  const asked: string[] = [];
   const ctx = {
-    get(name) {
+    get(name: string) {
       asked.push(name);
       return services[name];
     },
@@ -70,7 +88,7 @@ test("collectFacts returns ok for stubbed services across all 8 sections", async
     startedAt: Date.now() - 41 * 60_000,
   };
 
-  const facts = await collectFacts({ ctx, config: {}, state, sessionId: "s-caller" });
+  const facts = await runCollectFacts({ ctx, config: {}, state, sessionId: "s-caller" });
   assert.deepEqual(
     facts.map((s) => s.id),
     [...SECTION_IDS],
@@ -86,14 +104,14 @@ test("collectFacts returns ok for stubbed services across all 8 sections", async
     );
   }
 
-  const formatted = formatCapabilities(facts);
+  const formatted = formatCapabilities(facts as never);
   assert.doesNotMatch(formatted.text, /DO_NOT_LEAK_THIS_PROMPT/);
   assert.doesNotMatch(formatted.text, /SECRET_PROMPT_OTHER/);
 });
 
 test("collectFacts degrades missing and throwing ctx.get services to unavailable without throwing", async () => {
   const ctx = {
-    get(name) {
+    get(name: string) {
       if (name === "permissionPresets" || name === "loader") return undefined;
       if (name === "tools" || name === "sessions" || name === "workspaceRegistry") {
         throw new Error(`${name} exploded\nwith stack`);
@@ -102,7 +120,7 @@ test("collectFacts degrades missing and throwing ctx.get services to unavailable
     },
   };
 
-  const facts = await collectFacts({ ctx, config: {}, state: { tokenSource: "env" } });
+  const facts = await runCollectFacts({ ctx, config: {}, state: { tokenSource: "env" } });
   const byId = Object.fromEntries(facts.map((s) => [s.id, s]));
 
   assert.equal(byId.identity.status, "ok");
@@ -115,8 +133,8 @@ test("collectFacts degrades missing and throwing ctx.get services to unavailable
   assert.equal(byId.plugins.reason, "loader is not a service in this host");
 
   assert.equal(byId.tools.status, "unavailable");
-  assert.match(byId.tools.reason, /tools failed: tools exploded/);
-  assert.ok(!byId.tools.reason.includes("\n"), "unavailable reason must stay single-line");
+  assert.match(byId.tools.reason ?? "", /tools failed: tools exploded/);
+  assert.ok(!(byId.tools.reason ?? "").includes("\n"), "unavailable reason must stay single-line");
 
   assert.equal(byId.mcp.status, "unavailable");
   assert.equal(byId.sessions.status, "unavailable");
@@ -125,7 +143,7 @@ test("collectFacts degrades missing and throwing ctx.get services to unavailable
 
 test("mcp section groups mcp__ tools by prefix and excludes non-mcp tools", async () => {
   const ctx = {
-    get(name) {
+    get(name: string) {
       if (name !== "tools") return undefined;
       return {
         schemas() {
@@ -140,7 +158,7 @@ test("mcp section groups mcp__ tools by prefix and excludes non-mcp tools", asyn
     },
   };
 
-  const facts = await collectFacts({ ctx, sections: ["tools", "mcp"] });
+  const facts = await runCollectFacts({ ctx, sections: ["tools", "mcp"] });
   const byId = Object.fromEntries(facts.map((s) => [s.id, s]));
 
   assert.equal(byId.tools.status, "ok");
@@ -161,31 +179,31 @@ test("mcp section groups mcp__ tools by prefix and excludes non-mcp tools", asyn
 
 test("tools names-only becomes partial and mcp with zero mcp__ tools becomes unavailable", async () => {
   const ctx = {
-    get(name) {
+    get(name: string) {
       if (name === "tools") return { names: () => ["pwsh", "read", "write"] };
       return undefined;
     },
   };
-  const facts = await collectFacts({ ctx, sections: ["tools", "mcp"] });
+  const facts = await runCollectFacts({ ctx, sections: ["tools", "mcp"] });
   const byId = Object.fromEntries(facts.map((s) => [s.id, s]));
 
   assert.equal(byId.tools.status, "partial");
   assert.match(byId.tools.lines[0], /3 tools · names only/);
   assert.equal(byId.mcp.status, "unavailable");
-  assert.match(byId.mcp.reason, /these are the MCP tools exposed to this agent, not the servers in the profile/);
+  assert.match(byId.mcp.reason ?? "", /these are the MCP tools exposed to this agent, not the servers in the profile/);
 });
 
 test("sections subset only collects requested sections and only queries needed services", async () => {
-  const asked = [];
+  const asked: string[] = [];
   const ctx = {
-    get(name) {
+    get(name: string) {
       asked.push(name);
       if (name === "loader") return { entries: () => [["a", { name: "plugin-a" }]] };
       throw new Error(`should not have been queried: ${name}`);
     },
   };
 
-  const facts = await collectFacts({ ctx, sections: ["identity", "plugins"] });
+  const facts = await runCollectFacts({ ctx, sections: ["identity", "plugins"] });
   assert.deepEqual(
     facts.map((s) => s.id),
     ["identity", "plugins"],
@@ -205,11 +223,11 @@ test("methods.capabilities works with no live session and does not touch session
   );
   const services = fullServices();
   const methods = createMethods(
-    { sessionController, webServer: { getOrigin: () => "http://127.0.0.1:9663" } },
+    { sessionController: sessionController as never, webServer: { getOrigin: () => "http://127.0.0.1:9663" } as never },
     resolveConfig({ tasksEnabled: true }),
-    { get: (name) => services[name] },
+    { get: (name: string) => services[name] },
     { tokenSource: "file", endpointUrl: "http://127.0.0.1:9663/dsh-rpc", startedAt: Date.now() },
-  );
+  ) as unknown as { capabilities(params: Record<string, unknown>): Promise<CapabilitiesResultView> };
 
   const result = await methods.capabilities({ sections: ["identity", "mcp", "nope"] });
   assert.deepEqual(result.missing, ["nope"]);
@@ -225,10 +243,13 @@ test("methods.capabilities works with no live session and does not touch session
 
   await assert.rejects(
     () => methods.capabilities({ max_chars: 50000 }),
-    (error) => error.code === -32602,
+    (error: { code?: number }) => error.code === -32602,
   );
 
-  const dispatch = buildDispatcher(methods);
+  const dispatch = buildDispatcher(methods as never) as (
+    method: string,
+    params: Record<string, unknown>,
+  ) => Promise<CapabilitiesResultView>;
   const dispatched = await dispatch("dsh.capabilities", { sections: ["identity"] });
   assert.equal(dispatched.sections.length, 1);
   assert.equal(dispatched.sections[0].id, "identity");
