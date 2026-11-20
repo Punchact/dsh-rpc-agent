@@ -12,6 +12,8 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { EXPECTED_DIST_FILES } from "./publish-manifest.ts";
+
 interface NpmPackFileEntry {
   path: string;
 }
@@ -309,7 +311,7 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
-const distFilesCount = existsSync(DIST) && existsSync(resolve(DIST, "package.json")) ? "58" : "?";
+const distFilesCount = existsSync(DIST) && existsSync(resolve(DIST, "package.json")) ? String(EXPECTED_DIST_FILES) : "?";
 console.log(
   `check-release-path: ok — dist 包校验通过（预期 ${distFilesCount} 文件，main/exports/bin 全在包内）；根目录 private=${Boolean(rootPkg.private)}（无 files 字段，0 死入口）；release.yml 在 verify 打包上传、publish 校验摘要后发布同一份 tarball（不重新构建）`,
 );
