@@ -961,3 +961,31 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 **怎么钉住**：`test/adapters-codex-sticky.test.ts` 五例（续用、失败回落、无身份不落表、同适配器复用、
 `dispose` 后重开），`test/tasks-engine.test.ts` 一例（`replaceRoot` 才改根）。真机判据在 A10 探针：
 两轮拿到同一 `threadId`，且该线程在 Codex 库里落在登记的项目根下。
+
+## 68. 决策 0.9.5-i：大文件按“谁被谁依赖”拆，不按行数拆
+
+`src/lib/methods.mts` 涨到 4,408 行、44 个处理函数挤在一个 `createMethods` 里，改一条方法要在一屏之外的上下文里确认自己没串到别人。它被拆成四个模块：`types.mts`（参数/结果声明，谁都要引用）、`catalog.mts`（`METHOD_CATALOG` 与契约表，只被门禁与 `createMethods` 读）、`adapter-ops.mts`（`createDshAdapterOps`，DSH 适配器那七件事）、`helpers.mts`（`collectTurn`/`projectEvent` 这类末尾纯函数）。
+
+拆的边界是依赖方向而不是行数：声明最底层、目录表次之、适配器操作再次、纯函数最后；`methods.mts` 只留 `createMethods` 与 `export *`，因此**外部 import 路径一个字都没变**——调用方不需要知道这次拆分。
+
+代价与边界：
+
+- 发布面多 4 个模块，`scripts/publish-manifest.ts` 的 `EXPECTED_DIST_FILES` 从 59 变成 63；任何“手写发布面文件数”的地方都必须从这一处读（这是上一次把一个数字写在四个脚本里换来的教训）。
+- 两道门禁原先硬编码“去 `dist/lib/methods.mjs` 找 `const METHOD_CATALOG = [`”，拆分后必然找不到——现在它们会在 `lib/methods.mjs` 与 `lib/methods/*.mjs` 两处找，找到就用。门禁本身也要跟着代码走，否则“重构导致门禁红”会被误读成“代码坏了”。
+- 只搬不改：拆分提交里没有一行逻辑改动，`tsc` 0 错、468 例全绿是拆分前的同一批断言。
+
+## 69. 决策 0.9.5-j：把类型尺子量到底，`skipLibCheck` 不留默认值
+
+`strict` 只保证“类型大致对”。`noUncheckedIndexedAccess`（数组/索引访问可能为空）与 `exactOptionalPropertyTypes`（可选字段不许被显式塞 `undefined`）更贴近运行时会炸的那两类事：`rows[0].id` 在空表上、`{ note: undefined }` 把“没传”和“传了空”混成一种。
+
+打开前实测债务 **333 条**（`src` 56、`scripts` 37、`test` 240）。清零后它们进了 `tsconfig.json` 与 `tsconfig.client.json`，`scripts`/`test` 靠 `extends` 继承。顺序上刻意“先清债、再开开关”，不允许“开关先上、代码后修”的红窗期。
+
+`skipLibCheck` 一并从默认 `true` 改成显式 `false`：实测四个工程 0 错、`src` 的类型检查从 1.24s 变 1.39s（多约 0.11s），其余工程同量级。用不到半秒换掉“第三方 `.d.ts` 有没有问题”这个盲区是划算的；若将来某个依赖的声明真的坏了，报错会指到那个包，而不是被静默跳过。
+
+## 70. 决策 0.9.5-k：需要活宿主的测试只做“可选 job”，不挂 PR 门禁
+
+`test/e2e.ts` 与 `test/edge.ts` 打的是真实 Harness：托管 runner 上既没有 `~/.dsh/dsh-rpc/endpoint.json`，也没有 `DSH_RPC_URL`。把它们挂到 `push`/`pull_request` 上只有两种结果——永远 skip（绿灯是幻觉）、或者把没有宿主的 PR 判红（逼人绕过门禁）。
+
+因此 `.github/workflows/acceptance.yml` 只挂 `workflow_dispatch`：手动选 runner、必要时给 url、勾 `require_live` 控制“没宿主时是否要失败”。开跑前先用 `rpcCall("dsh.ping")` 探一次，探到才跑，探不到 `::notice` 记一句“按设计跳过”并以 0 退出，并在 job summary 里写清两条接宿主的路。
+
+边界：这不是“e2e 被降级”，而是把“必须在真机上才有意义”的验证放到它唯一有意义的地方——本机或 self-hosted runner。PR 门禁仍然由 `npm run verify`（468 例 + 四道 gate）负责，两者职责不重叠。

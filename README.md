@@ -790,9 +790,14 @@ npm run verify                 # 构建 + 入口一致性 + npm test + check:pac
 ```powershell
 cd dsh-rpc-plugin
 npm test                       # 51 个测试文件，共 468 例，另有 catalog smoke；无需运行中的 Harness
-node test/host.test.ts        # 1 例：真实 WebServer 集成（需先 npm ci）
-node test/e2e.mjs              # 14 例：端到端，打真实 Harness（--cwd 只接受绝对路径）
-node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harness
+node test/host.test.ts         # 1 例：真实 WebServer 集成（需先 npm ci）
+npm run test:e2e               # 14 例：端到端，打真实 Harness（--cwd 只接受绝对路径）
+npm run test:edge              # 24 例：协议/边界对抗，打真实 Harness
+```
+
+`test/e2e.ts` 与 `test/edge.ts` 需要一台活着的 Harness（插件已挂载、宿主在跑），所以它们**不在 PR 门禁里**。要跑就手动触发 [`.github/workflows/acceptance.yml`](.github/workflows/acceptance.yml)：矩阵分 `e2e` / `edge` 两相，先用 `dsh.ping` 探宿主，探不到就 `::notice` 记一笔跳过（勾 `require_live` 才会失败）。宿主怎么给：self-hosted runner 上已有的 `~/.dsh/dsh-rpc/endpoint.json`，或仓库里配 `DSH_RPC_URL` + `DSH_RPC_TOKEN`。
+
+```powershell
 ```
 
 ### 两道对账门禁

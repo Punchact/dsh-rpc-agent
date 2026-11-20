@@ -1,0 +1,131 @@
+name: acceptance
+
+# `test/e2e.ts` and `test/edge.ts` drive a *live* DeepSeek Harness (the plugin must
+# be mounted and the Host must be running), so they cannot run on a hosted runner
+# and must never gate a pull request. This workflow is the optional door for them:
+#
+#   * 手动触发（Actions → acceptance → Run workflow），不挂在 push / pull_request 上；
+#   * 有宿主就真跑，没宿主就 `::notice` 记录一句"跳过"并以 0 退出，不会变红；
+#   * `require_live` 勾上时才会"没有宿主 = 失败"，给定期演练用；
+#   * 宿主怎么给：要么让 runner 上本来就有 `~/.dsh/dsh-rpc/endpoint.json`（self-hosted），
+#     要么在仓库里配 `DSH_RPC_URL` + `DSH_RPC_TOKEN`（secrets/vars）。
+#
+# 与 `test.yml` 的分工：那边是"不需要宿主的门禁"（每次 PR 都跑），这里是"需要宿主的验收"
+# （按需跑，跑出来的绿才有意义 —— 托管 runner 上永远 skip 的绿灯只是幻觉）。
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "runner（本机有 DSH 时选 self-hosted）"
+        type: choice
+        options: ["self-hosted", "ubuntu-latest", "windows-latest"]
+        default: "self-hosted"
+      url:
+        description: "桥 URL（留空 = 读 endpoint.json 或用 DSH_RPC_URL）"
+        required: false
+        default: ""
+      require_live:
+        description: "宿主不可达时直接失败（默认只记录跳过）"
+        type: boolean
+        default: false
+
+concurrency:
+  group: acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live:
+    name: ${{ matrix.phase }} against a live Harness
+    runs-on: ${{ inputs.runner }}
+    continue-on-error: false
+    strategy:
+      fail-fast: false
+      matrix:
+        phase: ["e2e", "edge"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.x"
+          cache: npm
+
+      - name: Install dev dependencies
+        run: npm ci
+
+      - name: Build dist package
+        run: npm run build
+
+      - name: Probe the live Harness
+        id: probe
+        shell: bash
+        env:
+          URL_INPUT: ${{ inputs.url }}
+          DSH_RPC_URL: ${{ secrets.DSH_RPC_URL }}
+          DSH_RPC_TOKEN: ${{ secrets.DSH_RPC_TOKEN }}
+        run: |
+          set -u
+          url="${URL_INPUT:-${DSH_RPC_URL:-}}"
+          if [ -n "$url" ]; then
+            export DSH_RPC_URL="$url"
+          fi
+          if node --input-type=module -e '
+            import { rpcCall } from "./dist/lib/client.mjs";
+            try {
+              const reply = await rpcCall("dsh.ping", {});
+              process.stdout.write(`reachable: ${reply?.version ?? "unknown"}\n`);
+            } catch (error) {
+              process.stdout.write(`unreachable: ${error?.message ?? String(error)}\n`);
+              process.exit(9);
+            }
+          '; then
+            echo "live=yes" >> "$GITHUB_OUTPUT"
+            echo "::notice title=acceptance::${{ matrix.phase }} — a live Harness answered, running the suite"
+          else
+            echo "live=no" >> "$GITHUB_OUTPUT"
+            echo "::notice title=acceptance::${{ matrix.phase }} — no live Harness (no endpoint.json, no DSH_RPC_URL): skipped by design"
+          fi
+
+      - name: Refuse to skip when require_live is set
+        if: steps.probe.outputs.live == 'no' && inputs.require_live
+        run: |
+          echo "::error title=acceptance::require_live is on but no Harness is reachable (endpoint.json / DSH_RPC_URL)"
+          exit 1
+
+      - name: e2e against the live Harness
+        if: steps.probe.outputs.live == 'yes' && matrix.phase == 'e2e'
+        shell: bash
+        run: |
+          if [ -n "${URL_INPUT:-}" ]; then
+            node test/e2e.ts --url "$URL_INPUT"
+          else
+            node test/e2e.ts
+          fi
+        env:
+          URL_INPUT: ${{ inputs.url }}
+          DSH_RPC_URL: ${{ secrets.DSH_RPC_URL }}
+          DSH_RPC_TOKEN: ${{ secrets.DSH_RPC_TOKEN }}
+
+      - name: edge against the live Harness
+        if: steps.probe.outputs.live == 'yes' && matrix.phase == 'edge'
+        shell: bash
+        run: node test/edge.ts
+        env:
+          DSH_RPC_URL: ${{ secrets.DSH_RPC_URL }}
+          DSH_RPC_TOKEN: ${{ secrets.DSH_RPC_TOKEN }}
+
+      - name: Summarize
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### acceptance · ${{ matrix.phase }}"
+            echo ""
+            if [ "${{ steps.probe.outputs.live }}" = "yes" ]; then
+              echo "宿主可达，已跑 \`npm run test:${{ matrix.phase }}\`。"
+            else
+              echo "宿主不可达，按设计跳过（把 \`require_live\` 勾上可以让它变红）。"
+              echo ""
+              echo "接宿主的两条路：self-hosted runner 上已有 \`~/.dsh/dsh-rpc/endpoint.json\`；或配 \`DSH_RPC_URL\` + \`DSH_RPC_TOKEN\`。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
