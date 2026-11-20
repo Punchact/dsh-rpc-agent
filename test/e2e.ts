@@ -4,14 +4,14 @@
 // would import (`lib/client.mjs`), so a green run proves the whole path:
 // plugin → Host sessionController → HTTP carrier → JSON-RPC → caller.
 //
-// Usage: node test/e2e.mjs [--cwd <dir>] [--url <url>]
+// Usage: node test/e2e.ts [--cwd <dir>] [--url <url>]
 // Exit code 0 = every check passed, 1 = at least one failed.
 
 import process from "node:process";
 import { rpcCall, rpcStream } from "../dist/lib/client.mjs";
 
 const argv = process.argv.slice(2);
-const flag = (name, fallback = "") => {
+const flag = (name: string, fallback = ""): string => {
   const at = argv.indexOf(`--${name}`);
   return at >= 0 && argv[at + 1] ? argv[at + 1] : fallback;
 };
@@ -20,23 +20,32 @@ const cwd = flag("cwd", process.cwd());
 const url = flag("url", "");
 const options = url ? { url } : {};
 
-const results = [];
+interface CheckResult {
+  name: string;
+  ok: boolean;
+  ms: number;
+  detail?: string;
+  error?: unknown;
+}
 
-async function check(name, run) {
+const results: CheckResult[] = [];
+
+async function check(name: string, run: () => Promise<string>): Promise<boolean> {
   const startedAt = Date.now();
   try {
     const detail = await run();
     results.push({ name, ok: true, ms: Date.now() - startedAt, detail });
     console.log(`✔ ${name} — ${Date.now() - startedAt}ms${detail ? ` · ${detail}` : ""}`);
     return true;
-  } catch (error) {
+  } catch (error: unknown) {
     results.push({ name, ok: false, ms: Date.now() - startedAt, error });
-    console.log(`✘ ${name} — ${error?.message ?? error}`);
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(`✘ ${name} — ${message}`);
     return false;
   }
 }
 
-function assert(condition, message) {
+function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
@@ -52,7 +61,7 @@ await check("ping over the authenticated channel", async () => {
 
 await check("discover advertises the method catalog", async () => {
   const value = await rpcCall("dsh.discover", {}, options);
-  const names = (value?.methods ?? []).map((entry) => entry.name);
+  const names = (value?.methods ?? []).map((entry: { name: string }) => entry.name);
   for (const required of ["dsh.sessions.ask", "dsh.sessions.wait", "dsh.sessions.cancel", "dsh.sessions.history"]) {
     assert(names.includes(required), `catalog is missing ${required}`);
   }
@@ -60,11 +69,11 @@ await check("discover advertises the method catalog", async () => {
 });
 
 await check("a wrong token is rejected with -32001", async () => {
-  let failure = null;
+  let failure: { code?: number } | null = null;
   try {
     await rpcCall("dsh.ping", {}, { ...options, token: "0".repeat(32) });
   } catch (error) {
-    failure = error;
+    failure = error as { code?: number };
   }
   assert(failure, "a bad token was accepted");
   assert(failure.code === -32001, `expected -32001, got ${failure.code}`);
@@ -72,11 +81,11 @@ await check("a wrong token is rejected with -32001", async () => {
 });
 
 await check("an unknown method is rejected with -32601", async () => {
-  let failure = null;
+  let failure: { code?: number } | null = null;
   try {
     await rpcCall("dsh.nope", {}, options);
   } catch (error) {
-    failure = error;
+    failure = error as { code?: number };
   }
   assert(failure, "an unknown method was accepted");
   assert(failure.code === -32601, `expected -32601, got ${failure.code}`);
@@ -84,11 +93,11 @@ await check("an unknown method is rejected with -32601", async () => {
 });
 
 await check("invalid params are rejected with -32602", async () => {
-  let failure = null;
+  let failure: { code?: number } | null = null;
   try {
     await rpcCall("dsh.sessions.ask", { text: "   " }, options);
   } catch (error) {
-    failure = error;
+    failure = error as { code?: number };
   }
   assert(failure, "blank prompt text was accepted");
   assert(failure.code === -32602, `expected -32602, got ${failure.code}`);
@@ -203,6 +212,9 @@ const failed = results.filter((entry) => !entry.ok);
 console.log("");
 console.log(`${results.length - failed.length}/${results.length} checks passed`);
 if (failed.length > 0) {
-  for (const entry of failed) console.log(`  failed: ${entry.name} — ${entry.error?.stack ?? entry.error}`);
+  for (const entry of failed) {
+    const stack = entry.error instanceof Error ? entry.error.stack : undefined;
+    console.log(`  failed: ${entry.name} — ${stack ?? entry.error}`);
+  }
   process.exitCode = 1;
 }

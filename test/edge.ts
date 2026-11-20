@@ -1,11 +1,11 @@
 // Edge-case regression suite for the dsh-rpc wire surface.
 //
-// Complements test/e2e.mjs: that file proves the happy paths, this one proves the
+// Complements test/e2e.ts: that file proves the happy paths, this one proves the
 // unhappy ones — malformed envelopes, oversized bodies, notification semantics,
 // parameter injection, unknown-session errors, and concurrent prompting.
 //
 // Run it against a live Harness (the plugin must be mounted):
-//   node test/edge.mjs
+//   node test/edge.ts
 // Exit code 0 only when every check passes.
 
 import { readEndpoint, readTokenFromFile } from "../dist/lib/auth.mjs";
@@ -18,31 +18,53 @@ if (!endpoint?.url) {
 }
 const base = endpoint.url.replace(/\/+$/, "");
 const token = readTokenFromFile() ?? "";
-const H = { "content-type": "application/json", authorization: `Bearer ${token}` };
+const H: Record<string, string> = { "content-type": "application/json", authorization: `Bearer ${token}` };
 
 let failed = 0;
 let index = 0;
 
-async function check(name, fn) {
+interface RpcErrorShape {
+  code?: number;
+  message?: string;
+  data?: { available?: unknown[] };
+}
+
+interface RpcJsonShape {
+  id?: string | number;
+  result?: { ok?: boolean; status?: string };
+  error?: RpcErrorShape;
+}
+
+interface PostOptions {
+  headers?: Record<string, string>;
+  method?: string;
+  path?: string;
+}
+
+async function check(name: string, fn: () => Promise<string>): Promise<void> {
   index += 1;
   const started = Date.now();
   try {
     const detail = await fn();
     const ms = Date.now() - started;
     console.log(`✔ ${String(index).padStart(2, "0")} ${name} — ${ms}ms${detail ? ` · ${detail}` : ""}`);
-  } catch (error) {
+  } catch (error: unknown) {
     failed += 1;
     const ms = Date.now() - started;
-    console.log(`✘ ${String(index).padStart(2, "0")} ${name} — ${ms}ms · ${error.message}`);
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(`✘ ${String(index).padStart(2, "0")} ${name} — ${ms}ms · ${message}`);
   }
 }
 
-function assert(condition, message) {
+function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
 /** Raw HTTP that never throws on a non-2xx status. */
-async function post(body, { headers = H, method = "POST", path = "" } = {}) {
+async function post(
+  body: string | undefined,
+  { headers = H, method = "POST", path = "" }: PostOptions = {},
+) {
   try {
     const response = await fetch(`${base}${path}`, {
       method,
@@ -51,20 +73,21 @@ async function post(body, { headers = H, method = "POST", path = "" } = {}) {
     });
     const text = await response.text();
     return { status: response.status, text, json: safeParse(text) };
-  } catch (error) {
-    return { status: 0, text: "", networkError: error.cause?.code ?? error.message };
+  } catch (error: unknown) {
+    const err = error as { cause?: { code?: string }; message?: string };
+    return { status: 0, text: "", networkError: err.cause?.code ?? err.message };
   }
 }
 
-function safeParse(text) {
+function safeParse(text: string): RpcJsonShape | undefined {
   try {
-    return JSON.parse(text);
+    return JSON.parse(text) as RpcJsonShape;
   } catch {
     return undefined;
   }
 }
 
-function rpc(method, params, extra = {}) {
+function rpc(method: string, params: unknown, extra: Record<string, unknown> = {}): string {
   return JSON.stringify({ jsonrpc: "2.0", id: 1, method, params, ...extra });
 }
 
@@ -102,7 +125,8 @@ await check("a mixed batch answers one result and one error", async () => {
   );
   assert(res.status === 200, `expected 200, got ${res.status}`);
   assert(Array.isArray(res.json) && res.json.length === 2, `expected 2 answers, got ${JSON.stringify(res.json)}`);
-  const byId = Object.fromEntries(res.json.map((entry) => [entry.id, entry]));
+  const entries = res.json as unknown as RpcJsonShape[];
+  const byId = Object.fromEntries(entries.map((entry) => [entry.id, entry]));
   assert(byId.a?.result?.ok === true, "the valid member did not answer");
   assert(byId.b?.error?.code === -32601, "the unknown method did not answer -32601");
   return "2/2";
@@ -257,7 +281,7 @@ await check("two concurrent asks on one session are refused, not crossed", async
   const fulfilled = settled.filter((entry) => entry.status === "fulfilled");
   const rejected = settled.filter((entry) => entry.status === "rejected");
   assert(fulfilled.length === 1 && rejected.length === 1, `expected 1 ok + 1 refused, got ${settled.length - rejected.length} ok`);
-  assert(rejected[0].reason?.code === -32004, `expected busy (-32004), got ${rejected[0].reason?.code}`);
+  assert((rejected[0].reason as { code?: number } | undefined)?.code === -32004, `expected busy (-32004), got ${(rejected[0].reason as { code?: number } | undefined)?.code}`);
   return `turn ${fulfilled[0].value.turn} answered, second refused`;
 });
 
