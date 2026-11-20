@@ -898,3 +898,13 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 **代价与边界**。①`test/` 的 `.ts` 同样受“不可擦语法”限制（`enum`/`namespace`/参数属性），将来要用得先改写法。②`count-cases` 的 `testChainDigest` 会随文件内容变化，每次迁一批必须 `npm run count:cases` 刷一遍，否则 `check-docs` 报过期——这是设计使然，不是噪声。③`.ts` 测试只能在仓库内跑（`node_modules` 里的 `.ts` 会被拒绝剥类型），装到 profile 的那份包不含 `test/`，两者互不影响。
 
 **怎么钉住**。`tsconfig.test.json`（`strict`、`noEmit`）+ `check:types` 串进 `verify` + `check-test-targets` 只认 `.ts`（有 `.mjs` 溜回来就不会被扫到，等于立刻暴露）+ 三条不变量在迁移过程中逐批核对（`test(` 435、`assert` 2,241、忽略指令 0）。
+
+## 64. 决策 0.9.5-c：取消只有执行方亲口说停了才算停
+
+**现象**：真机 A09 冒烟（Codex 作为外部执行方）里，任务进入 `running` 后取消，状态走到 `cancel_requested`，5 秒内被升进 `needs_reconcile`，事件是 `cancel.unconfirmed`——取消其实生效了，但账本说“没确认”。
+
+**为什么**：`codex app-server` 的 `turn/interrupt` 只是回执；真正的停止由随后的 `turn/completed` 带上 `status: "interrupted"` 通知。适配器当时的选择是“永不自称停成功”，于是永远返回 `confirmedStopped: false`；而 `src/lib/tasks/dispatch.mts:859` 的规则是“只被接受、没被确认的停止，不许永远挂在 `cancel_requested`”——两个各自正确的决定叠成了“每次取消都交给人”。
+
+**决定**：`cancel()` 在发出中断后**有界地等那条通知**（`interruptConfirmMs`，默认 1.5 秒），等到即 `confirmedStopped: true`，等不到才 `false`。等不到的情况仍按既有规则升级，不改变“死会话不许挂死”的初衷。
+
+**边界**：等待窗口小于任何一次 pump 预算；通知若晚于窗口才到，取消仍会按 `cancel.unconfirmed` 走人工核对——宁可让人看一眼，也不谎称停在某个没兑现的承诺上。

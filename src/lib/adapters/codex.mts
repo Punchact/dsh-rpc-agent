@@ -78,6 +78,9 @@ export interface CreateCodexAdapterOptions {
   clientInfo?: CodexClientInfo;
   requestTimeoutMs?: number;
   probeTimeoutMs?: number;
+  // How long `cancel()` waits for the server to report the turn as interrupted before it
+  // reports `confirmedStopped: false` and lets the dispatcher escalate to a human.
+  interruptConfirmMs?: number;
   fsOps?: CodexFsOps;
 }
 
@@ -113,6 +116,7 @@ interface CodexSession {
   pushEvent(entry: AdapterEventEntry): void;
   sendNotification(method: string, params?: unknown): void;
   sendRequest(method: string, params?: Record<string, unknown>): Promise<any>;
+  waitForInterrupt(turnId: string | null, timeoutMs: number): Promise<boolean>;
   close(): void;
 }
 
@@ -307,6 +311,7 @@ export function createCodexAdapter({
   clientInfo = { name: "dsh-task-hub", version: "0.9.0" },
   requestTimeoutMs = 5_000,
   probeTimeoutMs = 4_000,
+  interruptConfirmMs = 1_500,
   fsOps = { existsSync, readdirSync, accessSync, statSync } as unknown as CodexFsOps,
 }: CreateCodexAdapterOptions = {}): CodexAdapter {
   const sessions = new Map<string, CodexSession>();
@@ -318,6 +323,10 @@ export function createCodexAdapter({
     const stderrDecoder = new StringDecoder("utf8");
     const pending = new Map<string | number, PendingRequest>();
     const eventQueue: AdapterEventEntry[] = [];
+    // A cancel is only real when the server says the turn stopped. `turn/interrupt` merely
+    // acknowledges the request, so `cancel()` waits on these waiters for the matching
+    // `turn/completed` with `status: "interrupted"` instead of claiming the stop itself.
+    const interruptWaiters = new Set<{ turnId: string | null; settle: (confirmed: boolean) => void }>();
     let latestTurnId: string | null = null;
     let closed = false;
     let eventSeq = 0;
@@ -376,6 +385,22 @@ export function createCodexAdapter({
           pending.set(id, { resolve, reject, timer, method });
           const line = JSON.stringify({ jsonrpc: "2.0", id, method, params });
           child.stdin.write(`${line}\n`);
+        });
+      },
+
+      waitForInterrupt(turnId: string | null, timeoutMs: number): Promise<boolean> {
+        return new Promise<boolean>((resolve) => {
+          const waiter = {
+            turnId,
+            settle: (confirmed: boolean) => {
+              clearTimeout(timer);
+              interruptWaiters.delete(waiter);
+              resolve(confirmed);
+            },
+          };
+          const timer = setTimeout(() => waiter.settle(false), Math.max(1, Math.floor(timeoutMs)));
+          if (typeof (timer as { unref?: () => void }).unref === "function") (timer as { unref: () => void }).unref();
+          interruptWaiters.add(waiter);
         });
       },
 
@@ -539,6 +564,13 @@ export function createCodexAdapter({
         } else if (msg.method === "turn/completed") {
           const turn = params.turn ?? {};
           const status = turn.status ?? "completed";
+          if (status === "interrupted") {
+            // This is the only honest confirmation of a stop: settle the waiters so a
+            // pending `cancel()` can report `confirmedStopped: true`.
+            for (const waiter of [...interruptWaiters]) {
+              if (waiter.turnId === null || waiter.turnId === (turn.id ?? latestTurnId)) waiter.settle(true);
+            }
+          }
           let report: AgentReport;
           if (status === "interrupted") {
             report = reportOf("dropped", {
@@ -863,9 +895,12 @@ export function createCodexAdapter({
         threadId,
         ...(turnId ? { turnId } : {}),
       });
-      // `turn/interrupt` only acknowledges the request: the stop is confirmed when the
-      // server reports the turn as interrupted, so never claim it here.
-      return { requestAccepted: true, confirmedStopped: false, threadId, turnId: turnId ?? null };
+      // `turn/interrupt` only acknowledges the request. The stop is real when the server
+      // reports the turn as interrupted, so wait a bounded moment for that notification
+      // instead of either lying (`true`) or giving up immediately (`false`, which makes the
+      // dispatcher escalate every cancel to a human).
+      const confirmedStopped = await session.waitForInterrupt(turnId ?? null, interruptConfirmMs);
+      return { requestAccepted: true, confirmedStopped, threadId, turnId: turnId ?? null };
     },
 
     async events(arg1, arg2, arg3) {
