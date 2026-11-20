@@ -468,7 +468,9 @@ export function createCodexAdapter({
               }),
             );
           }, requestTimeoutMs);
-          if (typeof timer.unref === "function") timer.unref();
+          // Deliberately not unref'd: a caller is awaiting this promise, and an unref'd timer
+          // lets the event loop drain first, which surfaces as "Promise resolution is still
+          // pending" instead of the timeout this code means to report.
 
           pending.set(id, { resolve, reject, timer, method });
           const line = JSON.stringify({ jsonrpc: "2.0", id, method, params });
@@ -487,7 +489,8 @@ export function createCodexAdapter({
             },
           };
           const timer = setTimeout(() => waiter.settle(false), Math.max(1, Math.floor(timeoutMs)));
-          if (typeof (timer as { unref?: () => void }).unref === "function") (timer as { unref: () => void }).unref();
+          // Same reason as the request timeout: cancel() awaits this, so the timer must keep
+          // the loop alive long enough to answer "did not confirm" instead of vanishing.
           interruptWaiters.add(waiter);
         });
       },
