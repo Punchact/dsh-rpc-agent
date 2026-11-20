@@ -155,6 +155,7 @@ test("listenSafe skips fetch-blocked ports and closes rejected sockets determini
   const res = await listen(() => {}, {
     createServerImpl: (() => {
       const assigned = ports[idx++];
+      if (assigned === undefined) throw new Error("exhausted test ports");
       return {
         listen(_p: number, _h: string, cb: () => void) {
           cb();

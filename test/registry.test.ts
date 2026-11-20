@@ -85,7 +85,9 @@ test("concurrent updates to different keys are serialized in this process", asyn
   const registry = (await readRegistry(file)) as { sessions: Record<string, { sessionId: string }> };
   assert.equal(Object.keys(registry.sessions).length, 24);
   for (let index = 0; index < 24; index += 1) {
-    assert.equal(registry.sessions[`mcp::parallel-${index}`].sessionId, `session-${index}`);
+    const entry = registry.sessions[`mcp::parallel-${index}`];
+    if (!entry) throw new Error(`missing session mcp::parallel-${index}`);
+    assert.equal(entry.sessionId, `session-${index}`);
   }
   const { readdirSync } = await import("node:fs");
   assert.deepEqual(readdirSync(process.env.DSH_HOME!).filter((name) => name.includes(".tmp")), []);
@@ -114,7 +116,9 @@ test("the written file is complete JSON even when rewritten many times", async (
   };
   assert.equal(parsed.version, REGISTRY_VERSION);
   for (const key of ["mcp::p0", "mcp::p1", "mcp::p2"]) {
-    assert.equal(typeof parsed.sessions[key].sessionId, "string");
+    const entry = parsed.sessions[key];
+    if (!entry) throw new Error(`missing session ${key}`);
+    assert.equal(typeof entry.sessionId, "string");
   }
   // No temp files left behind by the atomic replace.
   const { readdirSync } = await import("node:fs");

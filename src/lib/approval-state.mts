@@ -373,7 +373,9 @@ export function createApprovalState({
     try {
       release = acquireFileLock(file);
       const fresh = loadFrom(file, null, now());
-      let record: ApprovalLedgerRecord | null = Object.hasOwn(fresh.sessions, sessionId) ? fresh.sessions[sessionId] : null;
+      let record: ApprovalLedgerRecord | null = Object.hasOwn(fresh.sessions, sessionId)
+        ? (fresh.sessions[sessionId] ?? null)
+        : null;
       if (!record) {
         record = {
           ledgerVersion: 2,

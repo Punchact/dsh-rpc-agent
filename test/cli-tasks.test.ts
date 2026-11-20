@@ -147,17 +147,23 @@ test("CLI tasks and agents subcommands invoke matching RPC methods and honor --j
     async ({ calls, getStdout }) => {
       const c1 = await main(["tasks", "submit", "--workspace", "local", "--agent", "ag-1", "--capability", "cap-1", "hello"]);
       assert.equal(c1, 0);
-      assert.equal(calls[0].method, "dsh.tasks.submit");
+      const call0 = calls[0];
+      if (!call0) throw new Error("missing calls[0]");
+      assert.equal(call0.method, "dsh.tasks.submit");
       assert.match(getStdout(), /task task_99 · queued · machine\/queued/);
 
       const c2 = await main(["tasks", "list", "--json"]);
       assert.equal(c2, 0);
-      assert.equal(calls[1].method, "dsh.tasks.list");
+      const call1 = calls[1];
+      if (!call1) throw new Error("missing calls[1]");
+      assert.equal(call1.method, "dsh.tasks.list");
 
       const c3 = await main(["agents", "probe", "ag-1", "--controls", "start,cancel"]);
       assert.equal(c3, 0);
-      assert.equal(calls[2].method, "dsh.agents.probe");
-      assert.deepEqual(calls[2].params, { agentId: "ag-1", controls: ["start", "cancel"] });
+      const call2 = calls[2];
+      if (!call2) throw new Error("missing calls[2]");
+      assert.equal(call2.method, "dsh.agents.probe");
+      assert.deepEqual(call2.params, { agentId: "ag-1", controls: ["start", "cancel"] });
     },
   );
 });

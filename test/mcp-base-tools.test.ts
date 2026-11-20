@@ -31,6 +31,12 @@ function pluginCalls(calls: MockRpcRequest[]): MockRpcRequest[] {
   return calls.filter((req) => req.method !== "dsh.discover");
 }
 
+function firstPluginCall(calls: MockRpcRequest[]): MockRpcRequest {
+  const first = pluginCalls(calls)[0];
+  if (first === undefined) throw new Error("expected at least one plugin RPC call");
+  return first;
+}
+
 /**
  * Same shape as test/mcp-tasks-tools.test.ts: swap global fetch for one that answers the
  * bridge's own JSON-RPC frames, so these assertions are about the tool layer
@@ -100,7 +106,7 @@ test("dsh_status asks dsh.ping and prints the four lines it promises", async () 
     async (calls) => {
       const out = await invokeTool("dsh_status", {});
       assert.equal(out.isError, false);
-      const [first] = pluginCalls(calls);
+      const first = firstPluginCall(calls);
       assert.equal(first.method, "dsh.ping");
       assert.deepEqual(first.params, {});
       const text = textOf(out);
@@ -135,7 +141,7 @@ test("dsh_workspaces lists through dsh.workspaces.list and keeps id, title, stat
     }),
     async (calls) => {
       const text = textOf(await invokeTool("dsh_workspaces", {}));
-      const [first] = pluginCalls(calls);
+      const first = firstPluginCall(calls);
       assert.equal(first.method, "dsh.workspaces.list");
       assert.match(text, /local {2}插件项目 {2}\[ready, 12 sessions\]/);
       assert.match(text, /C:\\work\\p/);
@@ -158,7 +164,7 @@ test("dsh_workspaces registers a directory and forwards the title only when one 
     () => ({ result: { id: "ws-1", title: "插件项目", path: "C:\\work\\p" } }),
     async (calls) => {
       const text = textOf(await invokeTool("dsh_workspaces", { path: " C:\\work\\p ", title: " 插件项目 " }));
-      const [first] = pluginCalls(calls);
+      const first = firstPluginCall(calls);
       assert.equal(first.method, "dsh.workspaces.create");
       assert.deepEqual(first.params, { path: "C:\\work\\p", title: "插件项目" });
       assert.equal(text, "workspace ws-1  插件项目\nC:\\work\\p");
@@ -168,7 +174,7 @@ test("dsh_workspaces registers a directory and forwards the title only when one 
     () => ({ result: { id: "ws-2", title: "p", path: "C:\\work\\p" } }),
     async (calls) => {
       await invokeTool("dsh_workspaces", { path: "C:\\work\\p" });
-      const [first] = pluginCalls(calls);
+      const first = firstPluginCall(calls);
       assert.deepEqual(first.params, { path: "C:\\work\\p" }, "no title means no title key at all");
     },
   );
@@ -187,7 +193,7 @@ test("dsh_permissions marks the default preset and keeps the deployment's order"
     }),
     async (calls) => {
       const lines = textOf(await invokeTool("dsh_permissions", {})).split("\n");
-      const [first] = pluginCalls(calls);
+      const first = firstPluginCall(calls);
       assert.equal(first.method, "dsh.permissions.catalog");
       assert.equal(lines.length, 2);
       assert.equal(lines[0], "  read-only  Read only");
@@ -210,7 +216,7 @@ test("dsh_approvals_pending explains a bridge that cannot hold escalations", asy
     () => ({ result: { pending: [], mode: "off", timedOut: false } }),
     async (calls) => {
       const text = textOf(await invokeTool("dsh_approvals_pending", {}));
-      const [first] = pluginCalls(calls);
+      const first = firstPluginCall(calls);
       assert.equal(first.method, "dsh.approvals.pending");
       assert.match(text, /does not hold escalations: approvals\.mode=off/);
     },
@@ -222,7 +228,7 @@ test("dsh_approvals_pending forwards wait_ms as waitMs and session_id as session
     () => ({ result: { pending: [], mode: "delegate", timedOut: true } }),
     async (calls) => {
       await invokeTool("dsh_approvals_pending", { session_id: " session-1 ", wait_ms: 500 });
-      const [first] = pluginCalls(calls);
+      const first = firstPluginCall(calls);
       assert.deepEqual(first.params, { sessionId: "session-1", waitMs: 500 });
     },
   );
@@ -286,7 +292,7 @@ test("dsh_capabilities forwards the snake_case contract and prefers the plugin's
         max_chars: 4000,
         session_id: " session-1 ",
       });
-      const [first] = pluginCalls(calls);
+      const first = firstPluginCall(calls);
       assert.equal(first.method, "dsh.capabilities");
       assert.deepEqual(first.params, { sections: ["runtime"], max_chars: 4000, session_id: "session-1" });
       assert.equal(textOf(out), "## runtime\nnode v24.22.3");

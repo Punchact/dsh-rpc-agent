@@ -79,15 +79,15 @@ export interface PendingOpenResult {
 
 export interface PendingResolveResult {
   resolved: boolean;
-  sessionId?: string;
-  toolName?: string;
-  decision?: ApprovalDecision | string;
+  sessionId?: string | undefined;
+  toolName?: string | undefined;
+  decision?: ApprovalDecision | string | undefined;
 }
 
 export interface PendingWaitOptions {
-  sessionId?: string;
-  waitMs?: number;
-  signal?: AbortSignal | null;
+  sessionId?: string | undefined;
+  waitMs?: number | undefined;
+  signal?: AbortSignal | null | undefined;
 }
 
 export interface PendingWaitResult {
@@ -298,7 +298,8 @@ export function createPendingStore({
       if (found.length === 0) return;
       active = false;
       waiters.delete(check);
-      resolveWatch(found[0]);
+      // found.length > 0 checked immediately above.
+      resolveWatch(found[0] as PendingApprovalPacket);
     };
     waiters.add(check);
     check();

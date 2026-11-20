@@ -109,7 +109,9 @@ test("antigravity adapter sends projectEnvConfig.projectId, flat items[].text, r
       cascadeConfig: { plannerConfig: { requestedModel: { model: string } } };
     };
     assert.deepEqual(sendBody.items, [{ text: "review diff" }]);
-    assert.equal(sendBody.items[0].chunk, undefined);
+    const sendItem0 = sendBody.items[0];
+    if (!sendItem0) throw new Error("missing sendBody.items[0]");
+    assert.equal(sendItem0.chunk, undefined);
     assert.equal(sendBody.cascadeConfig.plannerConfig.requestedModel.model, "MODEL_PLACEHOLDER_M777");
 
     // Inspect status mappings

@@ -118,7 +118,9 @@ test("a report indexes verifiable artifacts and readArtifact returns a bounded w
     const events = await engine.events({ taskId });
     const indexed = events.events.find((event) => event.type === "artifact.indexed");
     assert.ok(indexed, "expected artifact.indexed");
-    const artifactId = (indexed.payload as unknown as ArtifactIndexedPayload).artifacts[0].artifactId;
+    const art0 = (indexed.payload as unknown as ArtifactIndexedPayload).artifacts[0];
+    if (!art0) throw new Error("missing artifact[0]");
+    const artifactId = art0.artifactId;
     assert.match(artifactId, /^art_[0-9a-f]{24}$/);
 
     const meta = await engine.readArtifact({ taskId, artifactId, offset: 0, length: 8 });
@@ -181,7 +183,9 @@ test("an unverifiable claim is refused, not silently dropped, and non-UTF-8 byte
     });
     const after = await engine.events({ taskId });
     const accepted = after.events.filter((event) => event.type === "artifact.indexed").pop()!;
-    const artifactId = (accepted.payload as unknown as ArtifactIndexedPayload).artifacts[0].artifactId;
+    const art0 = (accepted.payload as unknown as ArtifactIndexedPayload).artifacts[0];
+    if (!art0) throw new Error("missing artifact[0]");
+    const artifactId = art0.artifactId;
 
     const read = await engine.readArtifact({ taskId, artifactId, offset: 0, length: 5 });
     assert.equal(read.encoding, "base64");

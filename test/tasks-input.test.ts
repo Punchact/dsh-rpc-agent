@@ -123,8 +123,10 @@ test("an answer is queued, delivered through the adapter, and closes the questio
   assert.equal(drained.processed, 1);
   assert.equal(drained.completed, 1);
   assert.equal(sent.length, 1);
-  assert.equal(sent[0].input.text, "staging");
-  assert.equal(sent[0].input.questionId, "q_env");
+  const sent0 = sent[0];
+  if (!sent0) throw new Error("missing sent[0]");
+  assert.equal(sent0.input.text, "staging");
+  assert.equal(sent0.input.questionId, "q_env");
 
   const after = await engine.get({ taskId });
   assert.equal(after.status, "running");

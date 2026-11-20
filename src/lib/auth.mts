@@ -20,8 +20,8 @@ export const MIN_TOKEN_LENGTH = 16;
 export type TokenSource = "config" | "env" | "file" | "generated";
 
 export interface AuthConfigInput {
-  token?: string;
-  tokenFile?: string;
+  token?: string | undefined;
+  tokenFile?: string | undefined;
 }
 
 export interface LoadOrCreateTokenResult {
@@ -159,7 +159,8 @@ export function extractToken(
   const auth = headers?.authorization;
   if (typeof auth === "string") {
     const match = /^Bearer\s+(.+)$/i.exec(auth.trim());
-    if (match) return match[1].trim();
+    // Capture group 1 (.+) is guaranteed to be a string when the regex matches.
+    if (match) return (match[1] as string).trim();
   }
   const header = headers?.["x-dsh-rpc-token"];
   if (typeof header === "string") return header.trim();

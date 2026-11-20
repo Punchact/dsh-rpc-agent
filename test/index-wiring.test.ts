@@ -371,13 +371,16 @@ test("blocked-port startup warning deduplicates per port rather than silencing a
     await applyPlugin(fake.ctx, { token: "e".repeat(32), defaultCwd: home, tasksEnabled: false });
     assert.equal(readyHandlers.length, 1);
 
+    const onReady = readyHandlers[0];
+    if (!onReady) throw new Error("missing ready handler");
+
     currentOrigin = "http://127.0.0.1:5060";
-    readyHandlers[0]();
-    readyHandlers[0]();
+    onReady();
+    onReady();
     assert.equal(fake.warnings.filter((w) => /port 5060 /.test(w)).length, 1);
 
     currentOrigin = "http://127.0.0.1:6667";
-    readyHandlers[0]();
+    onReady();
     assert.equal(fake.warnings.filter((w) => /port 6667 /.test(w)).length, 1);
   } finally {
     if (prevHome === undefined) delete process.env.DSH_HOME;
@@ -496,7 +499,7 @@ test("client.js passes strict tsc checkJs with 0 diagnostics and registers the W
 
   let loaded = null as ClientRegistryEntry | null;
   const registered: Array<{ slot: string; entry: { meta: { id: string } } }> = [];
-  const effects: Array<{ fn: () => void; label?: string }> = [];
+  const effects: Array<{ fn: () => void; label?: string | undefined }> = [];
   const sandbox = {
     navigator: { language: "zh-CN" },
     window: {
@@ -535,6 +538,8 @@ test("client.js passes strict tsc checkJs with 0 diagnostics and registers the W
   });
   assert.equal(effects.length, 1);
   assert.equal(registered.length, 1);
-  assert.equal(registered[0].slot, "settings.section");
-  assert.equal(registered[0].entry.meta.id, "dsh-rpc-status");
+  const reg0 = registered[0];
+  if (!reg0) throw new Error("missing registered[0]");
+  assert.equal(reg0.slot, "settings.section");
+  assert.equal(reg0.entry.meta.id, "dsh-rpc-status");
 });

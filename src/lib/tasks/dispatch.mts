@@ -76,10 +76,10 @@ export interface CreateDispatcherOptions {
 
 export interface StartTaskParams {
   taskId: string;
-  prompt?: string;
-  model?: string;
-  projectId?: string;
-  title?: string;
+  prompt?: string | undefined;
+  model?: string | undefined;
+  projectId?: string | undefined;
+  title?: string | undefined;
 }
 
 export type StartTaskResult =
@@ -111,8 +111,8 @@ export type StartTaskResult =
 
 export interface PumpParams {
   taskId: string;
-  maxSteps?: number;
-  deadlineMs?: number;
+  maxSteps?: number | undefined;
+  deadlineMs?: number | undefined;
   cursor?: unknown;
 }
 

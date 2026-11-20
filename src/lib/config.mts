@@ -27,20 +27,20 @@ export interface TaskAdapterConfig {
 
 export interface ResolvedConfig {
   enabled: boolean;
-  token?: string;
-  tokenFile?: string;
+  token?: string | undefined;
+  tokenFile?: string | undefined;
   path: string;
   allowRemote: boolean;
   defaultCwd: string;
   defaultAgentPreset: string;
   defaultTimeoutMs: number;
   maxWaitSliceMs: number;
-  maxWaitSliceMsRequested?: number;
+  maxWaitSliceMsRequested?: number | undefined;
   historyBudgetMs: number;
-  historyBudgetMsRequested?: number;
+  historyBudgetMsRequested?: number | undefined;
   maxBodyBytes: number;
   maxSessions: number;
-  logRequests?: boolean;
+  logRequests?: boolean | undefined;
   traceDefault: TraceLevel;
   traceDefaultRequested?: unknown;
   maxResultChars: number;

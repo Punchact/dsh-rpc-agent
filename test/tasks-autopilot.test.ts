@@ -161,9 +161,13 @@ test("one failing task does not stop the others, and the failure is reported", a
     result.failed.map((f) => f.action),
     ["start", "pump:running"],
   );
-  assert.match(result.failed[0].message, /adapter exploded/);
+  const fail0 = result.failed[0];
+  if (!fail0) throw new Error("missing result.failed[0]");
+  assert.match(fail0.message, /adapter exploded/);
   assert.equal(logger.lines.length, 1);
-  assert.match(logger.lines[0], /autopilot pass reported 2 failure\(s\)/);
+  const line0 = logger.lines[0];
+  if (line0 === undefined) throw new Error("missing logger.lines[0]");
+  assert.match(line0, /autopilot pass reported 2 failure\(s\)/);
 });
 
 test("a slow pass refuses to stack a second one on top of itself", async () => {
@@ -238,7 +242,9 @@ test("a page answered asynchronously is awaited before dispatch", async () => {
     ["task_async"],
   );
   assert.deepEqual(result.failed, []);
-  assert.equal(result.started[0].taskId, "task_async");
+  const started0 = result.started[0];
+  if (!started0) throw new Error("missing result.started[0]");
+  assert.equal(started0.taskId, "task_async");
 });
 
 test("a broken ledger query is reported, not thrown at the timer", async () => {
@@ -255,7 +261,9 @@ test("a broken ledger query is reported, not thrown at the timer", async () => {
   const result = await autopilot.step();
 
   assert.deepEqual(result.failed.map((f) => f.action), ["list"]);
-  assert.match(result.failed[0].message, /database is gone/);
+  const fail0 = result.failed[0];
+  if (!fail0) throw new Error("missing result.failed[0]");
+  assert.match(fail0.message, /database is gone/);
   assert.equal(dispatcher.calls.start.length, 0);
   assert.equal(logger.lines.length, 1);
 });

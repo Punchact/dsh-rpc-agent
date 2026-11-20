@@ -972,8 +972,11 @@ function validateValue(schema: McpJsonSchemaProperty | McpToolInputSchema, value
     if (props) {
       for (const [key, val] of Object.entries(valObj)) {
         if (PROTO_KEYS.has(key) || val === undefined || !Object.hasOwn(props, key)) continue;
+        const propSchema = props[key];
+        // Originally validateValue(undefined, ...) returned null immediately; skipping undefined preserves behavior.
+        if (!propSchema) continue;
         const propPath = path === "arguments" ? key : `${path}.${key}`;
-        const err = validateValue(props[key], val, propPath, depth + 1);
+        const err = validateValue(propSchema, val, propPath, depth + 1);
         if (err) return err;
       }
     }
@@ -996,8 +999,10 @@ async function callTool(
   // these two wrappers are the only places that talk to the bridge from here.
   const call: CallRpcFn = (method, params, options = {}) =>
     rpcCall(method, params, signal ? { ...options, signal } : options);
-  const waitTurn = (sessionId: string, options: RpcCallOptions & { sliceMs?: number; since?: number } = {}) =>
-    waitForTurn(sessionId, signal ? { ...options, signal } : options);
+  const waitTurn = (
+    sessionId: string,
+    options: RpcCallOptions & { sliceMs?: number | undefined; since?: number | undefined } = {},
+  ) => waitForTurn(sessionId, signal ? { ...options, signal } : options);
   try {
     const defaults = await bridgeSettings();
     const turnDefault =

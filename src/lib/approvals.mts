@@ -116,15 +116,15 @@ export interface ApprovalGate {
 }
 
 export interface CreateApprovalGateOptions {
-  mode?: ApprovalMode | string;
-  isOwned?: (sessionId: string) => boolean;
-  onDeny?: (info: ApprovalEventInfo) => void;
-  onAllow?: (info: ApprovalEventInfo) => void;
-  applyPreset?: (sessionId: string, preset: string) => Promise<unknown>;
-  currentPreset?: (sessionId: string) => string | null;
-  store?: PendingStore | null;
-  state?: ApprovalState | null;
-  log?: ApprovalGateLogger | null;
+  mode?: ApprovalMode | string | undefined;
+  isOwned?: ((sessionId: string) => boolean) | undefined;
+  onDeny?: ((info: ApprovalEventInfo) => void) | undefined;
+  onAllow?: ((info: ApprovalEventInfo) => void) | undefined;
+  applyPreset?: ((sessionId: string, preset: string) => Promise<unknown>) | undefined;
+  currentPreset?: ((sessionId: string) => string | null) | undefined;
+  store?: PendingStore | null | undefined;
+  state?: ApprovalState | null | undefined;
+  log?: ApprovalGateLogger | null | undefined;
 }
 
 interface ClaimedTarget {
