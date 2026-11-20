@@ -908,3 +908,17 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 **决定**：`cancel()` 在发出中断后**有界地等那条通知**（`interruptConfirmMs`，默认 1.5 秒），等到即 `confirmedStopped: true`，等不到才 `false`。等不到的情况仍按既有规则升级，不改变“死会话不许挂死”的初衷。
 
 **边界**：等待窗口小于任何一次 pump 预算；通知若晚于窗口才到，取消仍会按 `cancel.unconfirmed` 走人工核对——宁可让人看一眼，也不谎称停在某个没兑现的承诺上。
+
+## 65. 决策 0.9.5-d：桥的会话必须能在 Codex 窗口里看见
+
+**现象**：Codex 作为外部执行方在真机上 7/7 通过、turn 真的跑完（`threadId`/`turnId`/`agentMessage` 俱全），但用户在本机 Codex 窗口里**一条也看不到**。他的原话是「完全没有一次成功的会话显示在可见的窗口上」。
+
+**为什么**：适配器启动线程时传了 `ephemeral: true`。三组对照实测（同一台机、同一份 app-server）：
+- `ephemeral: true` → `~/.codex/sessions/` 下**没有** rollout，`state_5.sqlite.threads` 里**没有**行；
+- 省略该参数 → 写 rollout + 落行；
+- `ephemeral: false` → 同省略。
+桌面端的列表读的是这两份东西，所以桥的会话对它是“从未发生过”。
+
+**决定**：桥默认**持久化**（不传 `ephemeral`），并按桌面端自己的口径写：`clientInfo.name = codex_work_desktop`（桌面端自家服务名，落在 `threads.originator`）、`thread/start` 带 `threadSource: "user"`。真机对照显示桥的会话行与桌面端自建线程同形（`originator=codex_work_desktop, source=vscode, thread_source=user`）。
+
+**边界**：这是“让本机工具产出的会话与桌面端自己的会话在同一张表里同形”，不是伪造用户动作——任务账本仍在 DSH 自己的库（§54），桥只把“这次 turn 发生过”如实写进 Codex 自己的会话库；不想被记录时可传 `persistThreads: false` 退回旧行为。

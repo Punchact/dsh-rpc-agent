@@ -60,6 +60,9 @@ interface CodexAdapterOptions {
   requestTimeoutMs?: number;
   probeTimeoutMs?: number;
   interruptConfirmMs?: number;
+  persistThreads?: boolean;
+  serviceName?: string;
+  threadSource?: string;
 }
 
 interface CodexEventRecord {
@@ -484,12 +487,29 @@ test("probe only turns green after the app-server answers initialize", async () 
 
   const initialized = fake.sentMessages.filter((msg) => msg.method === "initialize");
   assert.equal(initialized.length, 1, "a probe costs exactly one handshake");
-  assert.equal(initialized[0].params!.clientInfo!.name, "dsh-task-hub", "handshake identifies itself");
+  // The service name is what the desktop app writes for its own threads and what makes a
+  // bridged session visible there, so the adapter identifies as `codex_work_desktop` by
+  // default; `serviceName` overrides it.
+  assert.equal(initialized[0].params!.clientInfo!.name, "codex_work_desktop", "handshake identifies as the desktop service");
   assert.equal(
     fake.sentMessages.some((msg) => msg.method === "thread/start" || msg.method === "turn/start"),
     false,
     "a probe must not start work",
   );
+});
+
+test("a configured serviceName replaces the desktop default on the wire", async () => {
+  const fake = makeFakeSpawn();
+  const adapter = buildCodexAdapter({
+    spawn: fake.spawn,
+    spawnSync: () => ({ status: 0, stdout: "codex-cli 0.169.1\n" }),
+    binary: "C:\\fake\\codex.exe",
+    serviceName: "dsh-task-hub",
+  });
+  const probed = (await adapter.probe()) as { ok?: boolean };
+  assert.equal(probed.ok, true);
+  const initialized = fake.sentMessages.filter((msg) => msg.method === "initialize");
+  assert.equal(initialized[0].params!.clientInfo!.name, "dsh-task-hub");
 });
 
 test("probe stays red when the app-server never answers", async () => {

@@ -81,6 +81,13 @@ export interface CreateCodexAdapterOptions {
   // How long `cancel()` waits for the server to report the turn as interrupted before it
   // reports `confirmedStopped: false` and lets the dispatcher escalate to a human.
   interruptConfirmMs?: number;
+  // Sessions must be visible in the Codex window. `ephemeral: true` writes no rollout at
+  // all, so the app can never list the thread; `serviceName`/`threadSource` are what the
+  // desktop app writes for its own threads, and one of them is how it recognises a
+  // session it is allowed to show.
+  persistThreads?: boolean;
+  serviceName?: string;
+  threadSource?: string;
   fsOps?: CodexFsOps;
 }
 
@@ -308,12 +315,18 @@ export function createCodexAdapter({
   spawnSync = childProcess.spawnSync,
   binary: defaultBinary = "",
   now = Date.now,
-  clientInfo = { name: "dsh-task-hub", version: "0.9.0" },
+  clientInfo,
+  persistThreads = true,
+  serviceName = "codex_work_desktop",
+  threadSource = "user",
   requestTimeoutMs = 5_000,
   probeTimeoutMs = 4_000,
   interruptConfirmMs = 1_500,
   fsOps = { existsSync, readdirSync, accessSync, statSync } as unknown as CodexFsOps,
 }: CreateCodexAdapterOptions = {}): CodexAdapter {
+  // The service name is what the desktop app writes for its own threads; defaulting it to
+  // `codex_work_desktop` makes a bridged session look like one the app is willing to list.
+  const resolvedClientInfo: CodexClientInfo = clientInfo ?? { name: serviceName, version: "0.9.0" };
   const sessions = new Map<string, CodexSession>();
 
   function attachSession(child: any, binaryInfo: { path: string; source: string; version: string | null }): CodexSession {
@@ -698,7 +711,7 @@ export function createCodexAdapter({
 
       const handshake: CodexHandshakeResult =
         typeof spawn === "function"
-          ? await handshakeAppServer({ spawn, path: resolved.path, clientInfo, timeoutMs: probeTimeoutMs })
+          ? await handshakeAppServer({ spawn, path: resolved.path, clientInfo: resolvedClientInfo, timeoutMs: probeTimeoutMs })
           : { ok: false, reason: "no_spawn" };
 
       if (!handshake.ok) {
@@ -778,15 +791,19 @@ export function createCodexAdapter({
       const session = attachSession(child, { ...resolved, version });
 
       try {
-        await session.sendRequest("initialize", { clientInfo });
+        await session.sendRequest("initialize", { clientInfo: resolvedClientInfo });
         session.sendNotification("initialized");
 
         const cwd = req.cwd ?? workspace.rootPath ?? workspace.root_path ?? process.cwd();
         const model = req.model ?? summary.model ?? adapterConfig.model ?? undefined;
+        // An `ephemeral: true` thread is never written to `~/.codex/sessions`, so the
+        // desktop app cannot list it. Persistent threads record the rollout plus a row in
+        // `state_5.sqlite`, together with the service name the app uses for its own work.
         const threadResp = await session.sendRequest("thread/start", {
           cwd,
           ...(model ? { model } : {}),
-          ephemeral: true,
+          threadSource,
+          ...(persistThreads ? {} : { ephemeral: true }),
         });
         const threadId = threadResp?.thread?.id ?? threadResp?.threadId;
         if (!threadId) {
