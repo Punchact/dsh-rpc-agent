@@ -76,7 +76,7 @@ Repository and package name are both `dsh-rpc-agent`; the commands (`dsh-rpc`, `
 - **Self-describing**: `dsh_capabilities` returns an eight-section snapshot (runtime, permission presets, callable tools, MCP prefixes, sessions, workspaces, plugins), so a planner does not have to guess what this machine offers.
 - **No pretend knowledge**: when an outer client caps tool calls below the bridge budget, the bridge says so and recommends polling in slices instead of letting a long job look like a failure.
 - **Managed external agent tasks (Task centre, `tasksEnabled: false` by default)**: a 15-table SQLite ledger, 11-state machine, and capability cards/read-only probes driving DSH itself, Antigravity, and Codex App Server; see [docs/task-center.md](./docs/task-center.md).
-- **Regression tests guard the sharp edges**: 47 test files (436 cases) + catalog smoke (436/436 pass locally, including the 15 `approvals` cases) + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
+- **Regression tests guard the sharp edges**: 50 test files (448 cases) + catalog smoke (448/448 pass locally, including the 15 `approvals` cases) + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
 
 ## Install and update
 
@@ -757,6 +757,20 @@ Everything the page shows comes from that read-only endpoint; it writes nothing.
 | `Cannot read properties of undefined (reading 'throwIfAborted')` | Older versions called the host's `prompt`/`list` with `undefined`; fixed |
 | Plugin row shows `absent` | Expected: the plugin exports no `Config` schema, so `cordis_inspect_query` has no config contract |
 
+## Executor session ownership and stickiness
+
+When the bridge hands a task to an external executor (Codex app-server, Antigravity cascade), both sides keep a record:
+
+- **Ownership**: the session must land where a human can see it. On the Codex side the defaults are `serviceName: "codex_work_desktop"` and persistent threads (no `ephemeral`), so the thread is written to `~/.codex/sessions` and listed under the matching project by `cwd`; registering the repository root as a Codex project brings older threads into place automatically.
+- **Stickiness**: consecutive tasks from the same executor + agent + workspace reuse one session — Codex via `thread/resume`, Antigravity via a reused `cascadeId`. The map lives in `~/.dsh/storages/task-center/executor-sessions.json` (outside the task ledger, survives restarts); a failed resume is forgotten and falls back to a fresh session.
+
+Four rules for a new executor adapter:
+
+1. Declare a service name the remote side recognises (`serviceName`) and let its listing surface the thread/cascade;
+2. `start()` looks the stickiness up first and records only after success — and `forget` on failure, so a dead id cannot linger;
+3. For a one-off session pass `persistThreads: false` or an explicit `cascadeId` rather than relying on defaults;
+4. Do not resume the same session on both ends at once: if the bridge is running it, do not continue the conversation in the app, and vice versa.
+
 ## Development and tests
 
 ### Building from source
@@ -775,7 +789,7 @@ npm run verify                 # build + entry parity + npm test + check:package
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 47 test files, 436 cases, plus catalog smoke; no running Harness needed
+npm test                       # 50 test files, 448 cases, plus catalog smoke; no running Harness needed
 node test/host.test.ts        # 1 case: real WebServer integration (needs npm ci first)
 node test/e2e.mjs              # 14 cases: end to end against a real Harness (--cwd takes an absolute path only)
 node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a real Harness
@@ -798,7 +812,7 @@ npm run docs:surface    # re-extract the snapshot after editing the plan doc (ne
 `check:surface` looks both ways: everything the plan promised must exist, and any new task/agent-family interface in code must be either in the plan or recorded in the snapshot's `implementationOnly`. That is the check that would have caught 0.9.0's "plan promised `dsh.tasks.resolve`, implementation missed it".
 
 <details>
-<summary>What each of the 47 test files covers</summary>
+<summary>What each of the 50 test files covers</summary>
 
 | Suite | Cases | Covers |
 | --- | --- | --- |
@@ -830,6 +844,9 @@ npm run docs:surface    # re-extract the snapshot after editing the plan doc (ne
 | `adapters-antigravity` | 3 | `projectEnvConfig.projectId`, model placeholder lookup, `ForceStopCascadeTree`, response cap, unavailable handling |
 | `adapters-codex` | 5 | `codex.exe` discovery, `stdio://` handshake, frame shape and size limits, event queue, `turn/interrupt` |
 | `adapters-dsh` | 8 | DSH baseline 7-op mapping, honest stop, `resultValid: false`, and dispatch integration |
+| `adapters-sticky` | 7 | Session-stickiness map: persistence across instances, per-adapter/agent/workspace keys, corrupt-file tolerance, disabled store, bounded size |
+| `adapters-codex-sticky` | 3 | Codex thread reuse via `thread/resume`, fallback to a fresh thread, no key no memory |
+| `adapters-antigravity-sticky` | 2 | Cascade reuse and explicit `cascadeId` outranking the memory |
 | `methods-dsh-ops` | 2 | `createDshAdapterOps` error containment, auto-wiring, `registerAgent`, `decideApproval` |
 | `tasks-dispatch` | 12 | `startTask`/`pump`/`drainEffects`, lease reclamation, atomic `maxConcurrent` gate, failure sanitising |
 | `tasks-autopilot` | 7 | The advance loop: every active status covered, one failure does not stop the pass, a slow pass does not stack, an empty ledger stays quiet, async paging is awaited before dispatch, and a broken ledger reports instead of throwing |
@@ -852,7 +869,7 @@ npm run docs:surface    # re-extract the snapshot after editing the plan doc (ne
 
 </details>
 
-`npm test` runs these 47 test files plus the catalog smoke in a fixed order; `npm run test:host` runs the real-WebServer integration test; `npm run test:e2e` / `npm run test:edge` need a live Harness.
+`npm test` runs these 50 test files plus the catalog smoke in a fixed order; `npm run test:host` runs the real-WebServer integration test; `npm run test:e2e` / `npm run test:edge` need a live Harness.
 
 > [!TIP]
 > **If `node --test` hits `spawn EPERM` in a restricted sandbox**: run individual files via `node <file>` or pass `node --test --test-isolation=none <file>`.
@@ -864,7 +881,7 @@ A few worth calling out:
 - **Edge** probes the protocol layer: batches, notifications, id shapes, auth headers, oversized bodies (a genuine 413, not a dropped connection), parameter-injection defences, timeout clamping, concurrent asks, `limit` semantics.
 - **Port drift** (manual): point `endpoint.json` at a dead port and run `dsh-rpc ping`; expect exit code 3 and a readable error mentioning `nothing is listening`, `pid` and `health --wait`.
 
-Local verification (2026-11-19, 0.9.0, real repository): all 47 test files in the `npm test` chain pass (**436/436** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.ts` (`methods: 34` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`). Formatting (UTF-8 without BOM, LF) is a review convention here, not an automated gate.
+Local verification (2026-11-19, 0.9.0, real repository): all 50 test files in the `npm test` chain pass (**448/448** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.ts` (`methods: 34` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`). Formatting (UTF-8 without BOM, LF) is a review convention here, not an automated gate.
 
 ## License
 

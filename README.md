@@ -76,7 +76,7 @@ http://127.0.0.1:<port>/dsh-rpc   ->   DSH agent
 - **会自述**：`dsh_capabilities` 给出八节能力快照（运行时、权限档位、可调工具、MCP 前缀、会话、工作区、插件），做计划前不必猜本机有什么。
 - **不假装知道**：外层客户端有更短的超时上限时，本桥只如实说明并建议分段轮询，不让长任务看起来像失败。
 - **可托管外部 agent 任务（任务中心，`tasksEnabled` 默认关闭）**：内置 15 表 SQLite 账本、11 态状态机与能力卡/只读探测，统一调度 DSH 自身、Antigravity 与 Codex App Server，详情见 [任务中心手册](./docs/task-center.md)。
-- **关键行为有回归用例守着**：47 个测试文件共 436 例 + catalog smoke（本机实测 436/436 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
+- **关键行为有回归用例守着**：50 个测试文件共 448 例 + catalog smoke（本机实测 448/448 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
 
 ## 安装与更新
 
@@ -757,6 +757,20 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 | `Cannot read properties of undefined (reading 'throwIfAborted')` | 旧版本把 Host 的 `prompt`/`list` 用 `undefined` 调用；已修 |
 | 插件行状态 `absent` | 正常：插件不导出 `Config` schema，`cordis_inspect_query` 里没有 config 契约 |
 
+## 执行端会话归属与粘性
+
+桥把任务派给外部执行端（Codex app-server、Antigravity cascade）时，两边各留一份账，规则如下：
+
+- **归属**：会话必须落在能被人看见的地方。Codex 侧默认 `serviceName: "codex_work_desktop"`、持久线程（不传 `ephemeral`），线程会写进 `~/.codex/sessions` 并在桌面端按 `cwd` 归到对应项目；把仓库根注册成 Codex 项目后，历史线程自动归位。
+- **粘性**：同一「执行端 + 代理 + 工作区」的连续任务复用同一会话——Codex 走 `thread/resume`，Antigravity 复用 `cascadeId`。记忆在 `~/.dsh/storages/task-center/executor-sessions.json`（账本之外、重启仍在），`resume` 失败即忘并回落新建。
+
+写执行端适配器时的四条规范：
+
+1. 声明对端认得出的服务名（`serviceName`），并让线程/级联能被对端列出；
+2. `start()` 先查粘性、成功后再登记，失败必须 `forget`，别让坏 id 长期占位；
+3. 需要一次性会话时显式给 `persistThreads: false` 或每次传 `cascadeId`，不要靠默认值猜；
+4. 同一会话不要在两端同时续跑：桥在跑的线程，人不要在应用里继续对话，反之亦然。
+
 ## 开发与验证
 
 ### 从源码构建
@@ -775,7 +789,7 @@ npm run verify                 # 构建 + 入口一致性 + npm test + check:pac
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 47 个测试文件，共 436 例，另有 catalog smoke；无需运行中的 Harness
+npm test                       # 50 个测试文件，共 448 例，另有 catalog smoke；无需运行中的 Harness
 node test/host.test.ts        # 1 例：真实 WebServer 集成（需先 npm ci）
 node test/e2e.mjs              # 14 例：端到端，打真实 Harness（--cwd 只接受绝对路径）
 node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harness
@@ -798,7 +812,7 @@ npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案
 `check:surface` 查两个方向：方案写了的接口必须真实存在；代码里任务族/代理族的新接口必须要么在方案里、要么在快照的 `implementationOnly` 里如实记着。0.9.0 就是靠这一类对账才发现「方案写了 `dsh.tasks.resolve`、实现漏了」。
 
 <details>
-<summary>47 个测试文件各自覆盖什么</summary>
+<summary>50 个测试文件各自覆盖什么</summary>
 
 | 套件 | 例 | 覆盖 |
 | --- | --- | --- |
@@ -829,7 +843,10 @@ npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案
 | `adapters-redact` | 5 | 凭据形态脱敏（Bearer/Basic/Cookie/userinfo/PAT/AK）、Cookie 逐对且不破坏 JSON、截断、深度上限与预算数字不误伤 |
 | `adapters-antigravity` | 3 | 项目归属、模型占位符、`ForceStopCascadeTree`、响应上限与不可用失败 |
 | `adapters-codex` | 5 | `codex.exe` 发现、`stdio://` 握手、帧形状与上限、事件队列与 `turn/interrupt` |
-| `adapters-dsh` | 8 | DSH 基准适配器七操作映射、诚实停机、`resultValid: false` 与派发联调 |
+| `adapters-dsh` | 8 |
+| `adapters-sticky` | 7 | 会话粘性表：跨实例持久化、适配器/代理/工作区键隔离、坏文件容忍、禁用与上限裁剪 |
+| `adapters-codex-sticky` | 3 | Codex 线程续用（`thread/resume`）、失效回落新建、无身份不落表 |
+| `adapters-antigravity-sticky` | 2 | cascade 续用、显式 `cascadeId` 优先于记忆 | DSH 基准适配器七操作映射、诚实停机、`resultValid: false` 与派发联调 |
 | `methods-dsh-ops` | 2 | `createDshAdapterOps` 容错、自动装配、`registerAgent` 与 `decideApproval` |
 | `tasks-dispatch` | 12 | `startTask`/`pump`/`drainEffects`、租约回收、`maxConcurrent` 门控与失败净化 |
 | `tasks-autopilot` | 7 | 推进环：覆盖所有活跃状态、失败不中断并告警、慢遍不叠加、空账本不动作、异步分页必须 await 才派发、破账本只报不抛 |
@@ -852,7 +869,7 @@ npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案
 
 </details>
 
-`npm test` 按固定顺序跑这 47 个测试文件和 catalog smoke；`npm run test:host` 跑真实 WebServer 集成；`npm run test:e2e` / `npm run test:edge` 要活的 Harness。
+`npm test` 按固定顺序跑这 50 个测试文件和 catalog smoke；`npm run test:host` 跑真实 WebServer 集成；`npm run test:e2e` / `npm run test:edge` 要活的 Harness。
 
 > [!TIP]
 > **受限沙箱里 `node --test` 可能触发 `spawn EPERM`**：若默认并发子进程被拦，使用 `node --test --test-isolation=none <file>` 或单文件 `node <file>` 运行。
@@ -864,7 +881,7 @@ npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案
 - **边界**检查协议层：batch、通知、id 形态、鉴权头、超大 body（应得真正的 413 而不是断连）、参数注入防护、超时钳制、并发 ask、`limit` 语义。
 - **端口漂移**（手工）：把 `endpoint.json` 的 url 改成死端口再跑 `dsh-rpc ping`，应得退出码 3 与含 `nothing is listening`、`pid`、`health --wait` 的可读报错。
 
-本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 47 个测试文件 **436/436** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.ts` 输出 `methods: 34` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
+本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 50 个测试文件 **448/448** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.ts` 输出 `methods: 34` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
 
 ## 许可证
 

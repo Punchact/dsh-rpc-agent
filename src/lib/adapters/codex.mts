@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 import { TASK_ERROR, taskError } from "../tasks/errors.mjs";
+import { createStickySessions, type StickySessions } from "./sticky.mjs";
 import {
   ADAPTER_FAILURE_MESSAGES,
   type AdapterEventEntry,
@@ -86,6 +87,9 @@ export interface CreateCodexAdapterOptions {
   // desktop app writes for its own threads, and one of them is how it recognises a
   // session it is allowed to show.
   persistThreads?: boolean;
+  // Session stickiness: one thread per (agent, workspace) so successive turns of the
+  // same executor continue the same conversation instead of starting a new one.
+  sticky?: StickySessions | null;
   serviceName?: string;
   threadSource?: string;
   fsOps?: CodexFsOps;
@@ -317,6 +321,7 @@ export function createCodexAdapter({
   now = Date.now,
   clientInfo,
   persistThreads = true,
+  sticky = createStickySessions(),
   serviceName = "codex_work_desktop",
   threadSource = "user",
   requestTimeoutMs = 5_000,
@@ -796,16 +801,47 @@ export function createCodexAdapter({
 
         const cwd = req.cwd ?? workspace.rootPath ?? workspace.root_path ?? process.cwd();
         const model = req.model ?? summary.model ?? adapterConfig.model ?? undefined;
+        // Session stickiness: if this agent already has a thread in this workspace, continue
+        // it. `thread/resume` fails when the thread was archived or removed, and that failure
+        // is a normal outcome rather than an error — fall through to a fresh thread.
+        const stickyKey = {
+          kind: "codex",
+          agentId: String(agent.agentId ?? ""),
+          workspaceId: String(workspace.workspaceId ?? workspace.workspace_id ?? workspace.rootPath ?? workspace.root_path ?? ""),
+        };
+        const stickyUsable = stickyKey.agentId.length > 0 && stickyKey.workspaceId.length > 0;
+        let threadId: string | null = null;
+        let resumed = false;
+        if (stickyUsable && sticky) {
+          const remembered = sticky.get(stickyKey);
+          if (remembered) {
+            try {
+              const resumedResp = await session.sendRequest("thread/resume", { threadId: remembered });
+              const resumedId = resumedResp?.thread?.id ?? resumedResp?.threadId ?? remembered;
+              if (typeof resumedId === "string" && resumedId.length > 0) {
+                threadId = resumedId;
+                resumed = true;
+                session.threadId = resumedId;
+              }
+            } catch {
+              sticky.forget(stickyKey);
+            }
+          }
+        }
         // An `ephemeral: true` thread is never written to `~/.codex/sessions`, so the
         // desktop app cannot list it. Persistent threads record the rollout plus a row in
         // `state_5.sqlite`, together with the service name the app uses for its own work.
-        const threadResp = await session.sendRequest("thread/start", {
-          cwd,
-          ...(model ? { model } : {}),
-          threadSource,
-          ...(persistThreads ? {} : { ephemeral: true }),
-        });
-        const threadId = threadResp?.thread?.id ?? threadResp?.threadId;
+        if (!threadId) {
+          const threadResp = await session.sendRequest("thread/start", {
+            cwd,
+            ...(model ? { model } : {}),
+            threadSource,
+            ...(persistThreads ? {} : { ephemeral: true }),
+          });
+          const created = threadResp?.thread?.id ?? threadResp?.threadId;
+          threadId = typeof created === "string" && created.length > 0 ? created : null;
+        }
+        if (stickyUsable && sticky && threadId && !resumed) sticky.remember(stickyKey, threadId);
         if (!threadId) {
           throw taskError(TASK_ERROR.ADAPTER_UNAVAILABLE, ADAPTER_FAILURE_MESSAGES.unavailable, {
             reason: "missing_thread_id",

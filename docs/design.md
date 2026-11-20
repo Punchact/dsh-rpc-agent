@@ -922,3 +922,15 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 **决定**：桥默认**持久化**（不传 `ephemeral`），并按桌面端自己的口径写：`clientInfo.name = codex_work_desktop`（桌面端自家服务名，落在 `threads.originator`）、`thread/start` 带 `threadSource: "user"`。真机对照显示桥的会话行与桌面端自建线程同形（`originator=codex_work_desktop, source=vscode, thread_source=user`）。
 
 **边界**：这是“让本机工具产出的会话与桌面端自己的会话在同一张表里同形”，不是伪造用户动作——任务账本仍在 DSH 自己的库（§54），桥只把“这次 turn 发生过”如实写进 Codex 自己的会话库；不想被记录时可传 `persistThreads: false` 退回旧行为。
+
+## 66. 决策 0.9.5-e：会话粘性放在任务账本之外，按「执行端 + 代理 + 工作区」分桶
+
+**现象**：桥的每次派发都是一次新会话——Codex 建新 thread、Antigravity 建新 cascade。任务本身没问题，但同一个代理在同一个仓库里连续干三件事，执行端那边看到的是三段互不相识的对话：前面的判断、读过的文件、被否决的方案，全部重来。用户一句「保存一定的会话粘性」点出的是成本，不是偏好。
+
+**决定**：新增 `src/lib/adapters/sticky.mts`，把「这个代理在这个工作区用的是哪个远端会话」记在 `~/.dsh/storages/task-center/executor-sessions.json`（与账本同目录、不同文件）。键是 `kind:agentId:workspaceId`，值是执行端给的 id；Codex 启动时先 `thread/resume`，Antigravity 复用 `cascadeId`。落表时机是**成功之后**，失败即忘（线程被归档/删除时 `resume` 会失败，回落新建并覆盖）。
+
+**为什么不写进账本**：账本记的是「一个任务做了什么」，随任务终态冻结；粘性记的是「这对代理/工作区当前在跟谁说话」，跨任务存活、跨重启存活。混进 `tasks` 表会让两个生命周期互相污染——清账本不该丢会话，换会话也不该动任务。
+
+**边界**：①只记 id，不记内容；映射丢了最坏结果是新开一个会话，不会丢任务；②上限 200 条、按最近使用裁剪；③读坏文件按空处理，因为这不是事实来源，是加速器；④`agentId` 或工作区缺失时不落表（无主键的粘性没有意义），显式 `cascadeId` 永远优先于记忆。
+
+**怎么钉住**：`test/adapters-sticky.test.ts` 七例（跨实例持久化、键隔离、坏文件、禁用、上限、空 id、默认路径），`test/adapters-codex-sticky.test.ts` 三例（续用 `thread/resume`、`resume` 失败回落、无身份不落表），`test/adapters-antigravity-sticky.test.ts` 两例（cascade 续用、显式 id 优先）。
