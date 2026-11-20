@@ -83,7 +83,7 @@ export interface AgentReport {
 export interface AdapterProbeResult {
   ok: boolean;
   elapsedMs: number;
-  reason?: string;
+  reason?: string | undefined;
   controls?: Record<AdapterControlName, boolean>;
   version?: string | null;
   httpPort?: number;

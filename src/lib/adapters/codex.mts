@@ -968,7 +968,8 @@ export function createCodexAdapter({
       const fromFloor = Math.max(0, session.turnFloor - session.droppedEvents);
       const own = session.eventQueue.slice(fromFloor);
       if (own.length > 0) {
-        return own[own.length - 1].report!;
+        // own.length > 0 checked immediately above.
+        return (own[own.length - 1] as AdapterEventEntry).report!;
       }
       return reportOf("progress", {
         observedStatus: "inProgress",

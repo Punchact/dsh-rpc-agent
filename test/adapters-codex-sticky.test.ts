@@ -135,7 +135,9 @@ test("the second turn resumes the thread the first turn created", async () => {
     ["initialize", "initialized", "thread/resume", "turn/start"],
     "the second turn continues the remembered thread",
   );
-  assert.equal(secondFake.sent[2].params?.threadId, "thr-new");
+  const resumeMsg = secondFake.sent[2];
+  if (!resumeMsg) throw new Error("missing secondFake.sent[2]");
+  assert.equal(resumeMsg.params?.threadId, "thr-new");
   assert.equal(started.locator.threadId, "thr-new");
 });
 

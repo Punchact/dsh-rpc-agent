@@ -16,6 +16,11 @@ import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
+function req<T>(value: T | undefined, what = "item"): T {
+  if (value === undefined) throw new Error(`missing ${what}`);
+  return value;
+}
+
 // 探针第一步是解析二进制：`resolveCodexBinary` 要求它是普通文件且大小 > 0。CI 跑在 Linux 上，
 // 写死 `C:\\fake\\codex.exe` 在那里 stat 不到，探针会先报 binary_not_found 而根本走不到握手。
 // 这里造一个跨平台都成立的临时文件，spawn 依旧是假件。
@@ -234,9 +239,11 @@ test("codex adapter executes initialize -> initialized -> thread/start -> turn/s
   const cancelled = (await adapter.cancel(started.locator)) as { requestAccepted: boolean; confirmedStopped: boolean };
   assert.equal(cancelled.requestAccepted, true);
   assert.equal(cancelled.confirmedStopped, false, "an acknowledged interrupt is not a confirmed stop");
-  assert.equal(fake.sentMessages[4].method, "turn/steer");
-  assert.equal(fake.sentMessages[5].method, "turn/interrupt");
-  assert.equal(fake.sentMessages[5].params?.threadId, "thr-1");
+  const msg4 = req(fake.sentMessages[4], "sentMessages[4]");
+  const msg5 = req(fake.sentMessages[5], "sentMessages[5]");
+  assert.equal(msg4.method, "turn/steer");
+  assert.equal(msg5.method, "turn/interrupt");
+  assert.equal(msg5.params?.threadId, "thr-1");
 
   // Emit turn/completed notification and drain via events()
   fake.emitServerLine({
@@ -246,7 +253,7 @@ test("codex adapter executes initialize -> initialized -> thread/start -> turn/s
   await new Promise((r) => setTimeout(r, 10));
 
   const drained = await adapter.events(started.locator, 0);
-  const last = drained.events[drained.events.length - 1];
+  const last = req(drained.events[drained.events.length - 1], "last event");
   assert.equal(last.report.state, "ready");
   assert.equal(last.report.resultValid, true);
 });
@@ -374,7 +381,7 @@ test("codex adapter enforces frame limit, non-object filtering, bounded event qu
     (err) => isTaskError(err, TASK_ERROR.ADAPTER_UNAVAILABLE),
   );
   const afterProto = await adapter.events(started.locator, 0);
-  const protoEvt = afterProto.events[afterProto.events.length - 1];
+  const protoEvt = req(afterProto.events[afterProto.events.length - 1], "protoEvt");
   assert.equal(protoEvt.report.state, "failed");
   assert.equal(protoEvt.report.failureClass, "protocol_error");
   assert.equal(afterProto.protocolError, "frame_exceeds_limit");
@@ -407,7 +414,7 @@ test("codex adapter enforces strict frame validation, UTF-8 StringDecoder assemb
     await new Promise((r) => setTimeout(r, 10));
     const ev = await adapter.events(started.locator, 0);
     assert.equal(ev.protocolError, expectedCode, `expected ${expectedCode} for ${badLine}`);
-    const last = ev.events[ev.events.length - 1];
+    const last = req(ev.events[ev.events.length - 1], "last event");
     assert.equal(last.report.state, "failed");
     assert.equal(last.report.failureClass, "protocol_error");
   }
@@ -490,7 +497,7 @@ test("probe only turns green after the app-server answers initialize", async () 
   // The service name is what the desktop app writes for its own threads and what makes a
   // bridged session visible there, so the adapter identifies as `codex_work_desktop` by
   // default; `serviceName` overrides it.
-  assert.equal(initialized[0].params!.clientInfo!.name, "codex_work_desktop", "handshake identifies as the desktop service");
+  assert.equal(req(initialized[0], "initialized[0]").params!.clientInfo!.name, "codex_work_desktop", "handshake identifies as the desktop service");
   assert.equal(
     fake.sentMessages.some((msg) => msg.method === "thread/start" || msg.method === "turn/start"),
     false,
@@ -509,7 +516,7 @@ test("a configured serviceName replaces the desktop default on the wire", async 
   const probed = (await adapter.probe()) as { ok?: boolean };
   assert.equal(probed.ok, true);
   const initialized = fake.sentMessages.filter((msg) => msg.method === "initialize");
-  assert.equal(initialized[0].params!.clientInfo!.name, "dsh-task-hub");
+  assert.equal(req(initialized[0], "initialized[0]").params!.clientInfo!.name, "dsh-task-hub");
 });
 
 test("probe stays red when the app-server never answers", async () => {

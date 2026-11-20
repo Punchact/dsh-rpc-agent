@@ -13,19 +13,19 @@ import { transportCode, type TransportCode } from "./transport.mjs";
 export type { PublishedEndpoint, TransportCode };
 
 export interface ClientConnectionOptions {
-  url?: string;
-  token?: string;
+  url?: string | undefined;
+  token?: string | undefined;
 }
 
 export interface RpcCallOptions extends ClientConnectionOptions {
-  timeoutMs?: number;
-  signal?: AbortSignal;
-  id?: string | number | null;
+  timeoutMs?: number | undefined;
+  signal?: AbortSignal | undefined;
+  id?: string | number | null | undefined;
 }
 
 export interface WaitForTurnOptions extends RpcCallOptions {
-  sliceMs?: number;
-  since?: number;
+  sliceMs?: number | undefined;
+  since?: number | undefined;
 }
 
 export interface RpcStreamOptions extends ClientConnectionOptions {
@@ -323,12 +323,13 @@ async function performCall<T>(
   budget: number,
 ): Promise<T> {
   let response: Response;
+  const signal = requestSignal(budget, options.signal);
   try {
     response = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json", ...authHeaders(token) },
       body: JSON.stringify({ jsonrpc: "2.0", id: options.id ?? 1, method, params }),
-      signal: requestSignal(budget, options.signal),
+      ...(signal !== undefined ? { signal } : {}),
     });
   } catch (error) {
     throw transportError(error, `dsh-rpc ${method}`, { timeoutMs: budget });
@@ -455,12 +456,13 @@ async function openStream(
 ): Promise<Response & { body: NonNullable<Response["body"]> }> {
   const target = `${url.replace(/\/+$/, "")}/stream`;
   let response: Response;
+  const signal = requestSignal(budget, options.signal);
   try {
     response = await fetch(target, {
       method: "POST",
       headers: { "content-type": "application/json", ...authHeaders(token) },
       body: JSON.stringify(params),
-      signal: requestSignal(budget, options.signal),
+      ...(signal !== undefined ? { signal } : {}),
     });
   } catch (error) {
     throw transportError(error, "dsh-rpc stream", { timeoutMs: budget });

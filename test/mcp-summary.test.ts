@@ -152,13 +152,14 @@ test("formatTaskListLine exposes unvalidated, resultValid=true, degraded, and pe
 test("a passed-through transport code gets a next step instead of being echoed back", () => {
   // 0.9.3 复核第三轮：字符串码会原样透出，若只把码抄一遍，调用方拿到的仍是「去猜」。
   const refused = formatToolError("fetch failed: nothing answered on 127.0.0.1:4035", null, "ECONNREFUSED");
-  assert.match(refused.content[0].text, /next: nothing answered on that port/);
-  assert.match(refused.content[0].text, /dsh-rpc health/);
+  const refusedText = refused.content[0]?.text ?? "";
+  assert.match(refusedText, /next: nothing answered on that port/);
+  assert.match(refusedText, /dsh-rpc health/);
 
   const reset = formatToolError("socket closed", null, "ECONNRESET");
-  assert.match(reset.content[0].text, /next: the connection dropped mid-request/);
+  assert.match(reset.content[0]?.text ?? "", /next: the connection dropped mid-request/);
 
   // 未知的字符串码仍然直说，不许编一个不存在的下一步。
   const unknown = formatToolError("something odd", null, "EWEIRD");
-  assert.match(unknown.content[0].text, /next: EWEIRD/);
+  assert.match(unknown.content[0]?.text ?? "", /next: EWEIRD/);
 });

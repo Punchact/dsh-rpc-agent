@@ -173,8 +173,10 @@ test("CLI tasks approve and agents commands invoke matching RPCs and honor --jso
         "--json",
       ]);
       assert.equal(codeApprove, 0);
-      assert.equal(calls[0].method, "dsh.tasks.decideApproval");
-      assert.deepEqual(calls[0].params, {
+      const call0 = calls[0];
+      if (!call0) throw new Error("missing calls[0]");
+      assert.equal(call0.method, "dsh.tasks.decideApproval");
+      assert.deepEqual(call0.params, {
         taskId: "task_1",
         attemptId: "att_1",
         approvalId: "apr_1",
@@ -189,15 +191,21 @@ test("CLI tasks approve and agents commands invoke matching RPCs and honor --jso
         "--json",
       ]);
       assert.equal(codeReg, 0);
-      assert.equal(calls[1].method, "dsh.agents.register");
+      const call1 = calls[1];
+      if (!call1) throw new Error("missing calls[1]");
+      assert.equal(call1.method, "dsh.agents.register");
 
       const codeList = await main(["agents", "list", "--kind", "dsh", "--verified-only"]);
       assert.equal(codeList, 0);
-      assert.equal(calls[2].method, "dsh.agents.list");
+      const call2 = calls[2];
+      if (!call2) throw new Error("missing calls[2]");
+      assert.equal(call2.method, "dsh.agents.list");
 
       const codeProbe = await main(["agents", "probe", "--agent", "ag_dsh", "--controls", "start,cancel"]);
       assert.equal(codeProbe, 0);
-      assert.equal(calls[3].method, "dsh.agents.probe");
+      const call3 = calls[3];
+      if (!call3) throw new Error("missing calls[3]");
+      assert.equal(call3.method, "dsh.agents.probe");
 
       await assert.rejects(
         () =>

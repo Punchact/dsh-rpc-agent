@@ -69,7 +69,7 @@ async function post(
     const response = await fetch(`${base}${path}`, {
       method,
       headers,
-      body: method === "POST" && body !== undefined ? body : undefined,
+      ...(method === "POST" && body !== undefined ? { body } : {}),
     });
     const text = await response.text();
     return { status: response.status, text, json: safeParse(text) };
@@ -281,8 +281,11 @@ await check("two concurrent asks on one session are refused, not crossed", async
   const fulfilled = settled.filter((entry) => entry.status === "fulfilled");
   const rejected = settled.filter((entry) => entry.status === "rejected");
   assert(fulfilled.length === 1 && rejected.length === 1, `expected 1 ok + 1 refused, got ${settled.length - rejected.length} ok`);
-  assert((rejected[0].reason as { code?: number } | undefined)?.code === -32004, `expected busy (-32004), got ${(rejected[0].reason as { code?: number } | undefined)?.code}`);
-  return `turn ${fulfilled[0].value.turn} answered, second refused`;
+  const firstFulfilled = fulfilled[0];
+  const firstRejected = rejected[0];
+  if (!firstFulfilled || !firstRejected) throw new Error("missing settled entry");
+  assert((firstRejected.reason as { code?: number } | undefined)?.code === -32004, `expected busy (-32004), got ${(firstRejected.reason as { code?: number } | undefined)?.code}`);
+  return `turn ${firstFulfilled.value.turn} answered, second refused`;
 });
 
 console.log(

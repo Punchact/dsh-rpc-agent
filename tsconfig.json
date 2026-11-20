@@ -5,6 +5,8 @@
     "target": "es2023",
     "lib": ["es2023"],
     "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
     "allowJs": true,
     "checkJs": false,
     "noEmitOnError": true,
@@ -12,7 +14,7 @@
     "declaration": false,
     "rootDir": "src",
     "outDir": "dist",
-    "skipLibCheck": true,
+    "skipLibCheck": false,
     "types": ["node"]
   },
   "include": ["src/**/*"]

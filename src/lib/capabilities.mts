@@ -48,8 +48,8 @@ export interface NormalizedCapabilitySection {
 }
 
 export interface FormatCapabilitiesOptions {
-  maxChars?: number;
-  missing?: string[];
+  maxChars?: number | undefined;
+  missing?: string[] | undefined;
 }
 
 export interface FormattedCapabilitiesStructured {
@@ -155,7 +155,8 @@ function applyMaxChars(lines: string[], maxChars: number): { text: string; trunc
   }
 
   if (kept.length === 0 && lines.length > 0) {
-    kept.push(lines[0].slice(0, budget));
+    // lines.length > 0 checked immediately above.
+    kept.push((lines[0] as string).slice(0, budget));
   }
   kept.push(TRUNCATION_LINE);
   return { text: kept.join("\n"), truncated: true };

@@ -341,7 +341,8 @@ function collectMcp(toolsResult: ToolsReadResult): CollectedCapabilitySection {
   for (const fullName of toolsResult.names) {
     const match = MCP_PREFIX_RE.exec(fullName);
     if (!match) continue;
-    const prefix = match[1];
+    // Capture group 1 in MCP_PREFIX_RE is non-optional whenever the regex matches.
+    const prefix = match[1] as string;
     const shortName = fullName.slice(match[0].length) || fullName;
     let bucket = groups.get(prefix);
     if (!bucket) {

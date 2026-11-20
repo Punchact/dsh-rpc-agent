@@ -37,12 +37,12 @@ export interface TraceToolInput {
 
 export interface DescribeTraceOptions {
   level?: unknown;
-  now?: number;
-  outputChars?: number;
-  status?: string | null;
-  maxLines?: number;
-  maxChars?: number;
-  since?: number | null;
+  now?: number | undefined;
+  outputChars?: number | undefined;
+  status?: string | null | undefined;
+  maxLines?: number | undefined;
+  maxChars?: number | undefined;
+  since?: number | null | undefined;
 }
 
 export interface TraceTruncation {
@@ -365,12 +365,14 @@ function buildErrorsLines(
   if (keptFailed.length > 0) {
     candidates.push(`errors: ${errorsCount} of ${total} tool calls`);
     for (let index = keptFailed.length - 1; index >= 0 && candidates.length < 4; index -= 1) {
-      const tool = keptFailed[index].tool;
+      // Loop bounds guarantee 0 <= index < keptFailed.length.
+      const tool = (keptFailed[index] as IndexedTool).tool;
       const detail = detailOf(tool);
       candidates.push(`✗ ${toolName(tool)} "${previewOf(tool.arguments)}"${detail ? ` — ${detail}` : ""}`);
     }
   } else if (!turnFinished && keptRunning.length > 0) {
-    const last = keptRunning[keptRunning.length - 1].tool;
+    // keptRunning.length > 0 checked immediately above.
+    const last = (keptRunning[keptRunning.length - 1] as IndexedTool).tool;
     candidates.push(`last: ${toolName(last)} "${previewOf(last.arguments)}"${inflightSuffix(last, now, turnFinished)}`);
   }
 
@@ -417,7 +419,8 @@ function buildFullLines(
 
   // Newest tools win the remaining budget, then selected blocks are emitted oldest-first.
   for (let index = blocks.length - 1; index >= 0; index -= 1) {
-    const block = blocks[index];
+    // Loop bounds guarantee 0 <= index < blocks.length.
+    const block = blocks[index] as string[];
     const blockChars = block.join("\n").length;
     const separator = lines.length > 0 || selectedBlocks.length > 0 ? 1 : 0;
     const nextLines = lines.length + selectedLinesCount + block.length;

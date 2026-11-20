@@ -84,14 +84,14 @@ export interface FormatToolResultInput {
   requestId?: string | null;
   status?: string;
   accepted?: boolean;
-  text?: string | null;
+  text?: string | null | undefined;
   durationMs?: number;
   cursor?: number | null;
   sliceMs?: number;
   requestedMs?: number;
   timedOut?: boolean;
   partial?: boolean;
-  tools?: unknown[];
+  tools?: unknown[] | undefined;
   reason?: { kind?: string; reason?: unknown; error?: { code?: unknown; message?: unknown }; message?: unknown } | null;
   pendingApproval?: PendingEscalationSummary | null;
   next?: unknown;
@@ -145,7 +145,7 @@ export interface TaskPreviewCandidate {
 }
 
 export interface TaskProjection {
-  taskId?: string | null;
+  taskId?: string | null | undefined;
   previewId?: string | null;
   status?: string | null;
   phase?: string | null;
@@ -206,7 +206,9 @@ export function capText<T extends McpTextBlock[]>(content: T, maxResultChars = D
   }
   const kept = bodyText.slice(0, end).replace(/[ \t\r\n]+$/, "");
   const marker = `\n… (turn text truncated at ${maxResultChars} chars; raise config.maxResultChars to lift the cap)`;
-  const cappedBlock: McpTextBlock = { ...content[1], text: `${kept}${marker}` };
+  // content.length >= 3 and content[1]?.text are checked above.
+  const bodyBlock = content[1] as McpTextBlock;
+  const cappedBlock: McpTextBlock = { ...bodyBlock, text: `${kept}${marker}` };
   if (Object.isFrozen(content)) {
     const copy = content.slice() as T;
     copy[1] = cappedBlock;

@@ -148,7 +148,9 @@ test("MCP exposes task tools when tasksEnabled=true, never exposes reconcile/dec
         prompt: "run review",
       });
       assert.equal(res.isError, false);
-      assert.equal(res.content[0].text, "task task_abc · queued · machine/queued");
+      const part0 = res.content[0];
+      if (!part0) throw new Error("missing res.content[0]");
+      assert.equal(part0.text, "task task_abc · queued · machine/queued");
       assert.equal(res.structuredContent?.taskId, "task_abc");
     },
   );

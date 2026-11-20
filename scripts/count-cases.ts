@@ -51,7 +51,9 @@ const packageJson = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8"))
 /** `npm test` 链上的测试文件（顺序即执行顺序）。 */
 export function chainTestFiles(): string[] {
   const chain = String(packageJson.scripts?.test ?? "");
-  return [...chain.matchAll(/node (test\/[A-Za-z0-9_.-]+\.test\.(?:mjs|ts))/g)].map((m) => m[1]);
+  return [...chain.matchAll(/node (test\/[A-Za-z0-9_.-]+\.test\.(?:mjs|ts))/g)].flatMap((m) =>
+    m[1] !== undefined ? [m[1]] : [],
+  );
 }
 
 /** 测试文件内容摘要 + 声明的用例条数：任何一个变了，旧数字就不可信。 */

@@ -31,7 +31,7 @@ if (!existsSync(DIST) || !existsSync(join(DIST, "package.json"))) {
 }
 
 function firstLine(absPath: string): string {
-  return readFileSync(absPath, "utf8").split(/\r?\n/, 1)[0];
+  return readFileSync(absPath, "utf8").split(/\r?\n/, 1)[0] ?? "";
 }
 
 function toPosixRel(root: string, absPath: string): string {
@@ -182,7 +182,9 @@ for (const [subpath, srcTarget] of Object.entries(srcExports)) {
     const starIdx = relPattern.indexOf("*");
     const dirRel = posix.dirname(relPattern);
     const basePattern = posix.basename(relPattern);
-    const [prefix, suffix] = basePattern.split("*");
+    const parts = basePattern.split("*");
+    const prefix = parts[0] ?? "";
+    const suffix = parts[1] ?? "";
     if (starIdx < 0 || !existsSync(join(REPO, dirRel)) || !existsSync(join(DIST, dirRel))) {
       problems.push(`exports["${subpath}"] 目录缺失: ${dirRel}`);
       continue;

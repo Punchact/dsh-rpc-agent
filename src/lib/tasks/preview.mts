@@ -57,7 +57,7 @@ export interface CreatePreviewResult {
 export interface ConsumePreviewParams {
   previewId: string;
   principalId: string;
-  requestDigest?: string | null;
+  requestDigest?: string | null | undefined;
   now?: () => number;
 }
 

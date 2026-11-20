@@ -117,7 +117,9 @@ test("the default slice stays well clear of the transport ceiling", async () => 
   try {
     await waitForTurn("session-d", { url: bridge.url, token: TOKEN, timeoutMs: 600_000 });
     assert.equal(WAIT_SLICE_MS, 120_000, "the default is two minutes, not four");
-    assert.equal(bridge.calls[0].params.timeoutMs, 120_000);
+    const call0 = bridge.calls[0];
+    if (!call0) throw new Error("missing bridge.calls[0]");
+    assert.equal(call0.params.timeoutMs, 120_000);
   } finally {
     await bridge.close();
   }
@@ -136,8 +138,10 @@ test("a fractional budget is ignored instead of reaching AbortSignal.timeout", a
       sliceMs: 1_000.5,
     });
     assert.equal(result.status, "completed");
-    assert.equal(bridge.calls[0].params.timeoutMs, WAIT_SLICE_MS, "a fractional hint falls back to the default slice");
-    assert.equal(Number.isInteger(bridge.calls[0].params.timeoutMs), true);
+    const call0 = bridge.calls[0];
+    if (!call0) throw new Error("missing bridge.calls[0]");
+    assert.equal(call0.params.timeoutMs, WAIT_SLICE_MS, "a fractional hint falls back to the default slice");
+    assert.equal(Number.isInteger(call0.params.timeoutMs), true);
   } finally {
     await bridge.close();
   }
@@ -154,7 +158,9 @@ test("a slice hint above the ceiling is clamped, never forwarded", async () => {
       timeoutMs: 3_600_000,
       sliceMs: 900_000,
     });
-    assert.equal(bridge.calls[0].params.timeoutMs, MAX_WAIT_SLICE_MS);
+    const call0 = bridge.calls[0];
+    if (!call0) throw new Error("missing bridge.calls[0]");
+    assert.equal(call0.params.timeoutMs, MAX_WAIT_SLICE_MS);
     assert.equal(MAX_WAIT_SLICE_MS, 240_000);
   } finally {
     await bridge.close();

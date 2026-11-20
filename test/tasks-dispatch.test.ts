@@ -35,9 +35,14 @@ interface TaskDispatchResult {
   orphan?: boolean;
   attemptId?: string;
 }
+function req<T>(value: T | undefined, what = "item"): T {
+  if (value === undefined) throw new Error(`missing ${what}`);
+  return value;
+}
+
 interface DispatcherInstance {
   startTask(params: { taskId: string }): Promise<TaskDispatchResult>;
-  pump(params: { taskId: string; maxSteps?: number; cursor?: number }): Promise<{
+  pump(params: { taskId: string; maxSteps?: number; cursor?: number | undefined }): Promise<{
     stepsProcessed: number;
     hitMaxSteps: boolean;
     status: string;
@@ -575,8 +580,9 @@ test("dispatch logger omits raw exception text by default, logs redacted [raw] o
     });
     await disp.startTask({ taskId: t.taskId });
     assert.equal(defaultLogs.length, 1);
-    assert.equal(defaultLogs[0].meta.taskId, t.taskId);
-    assert.equal(defaultLogs[0].meta.code, "ECONNREFUSED");
+    const log0 = req(defaultLogs[0], "defaultLogs[0]");
+    assert.equal(log0.meta.taskId, t.taskId);
+    assert.equal(log0.meta.code, "ECONNREFUSED");
     assert.doesNotMatch(JSON.stringify(defaultLogs), /eyJ_secret_abc|sk-1234|\[raw\]|zzz/);
   } finally {
     sDefault.store.close();
@@ -608,10 +614,11 @@ test("dispatch logger omits raw exception text by default, logs redacted [raw] o
     });
     await disp.startTask({ taskId: t.taskId });
     assert.equal(rawLogs.length, 1);
-    assert.ok(rawLogs[0].msg.startsWith("[raw] "));
-    assert.ok(rawLogs[0].msg.includes("[redacted]"));
-    assert.ok(rawLogs[0].msg.includes("… (truncated)"));
-    assert.doesNotMatch(rawLogs[0].msg, /eyJ_secret_abc|sk-1234/);
+    const log0 = req(rawLogs[0], "rawLogs[0]");
+    assert.ok(log0.msg.startsWith("[raw] "));
+    assert.ok(log0.msg.includes("[redacted]"));
+    assert.ok(log0.msg.includes("… (truncated)"));
+    assert.doesNotMatch(log0.msg, /eyJ_secret_abc|sk-1234/);
   } finally {
     sRaw.store.close();
   }
@@ -653,7 +660,7 @@ test("dispatch logger omits raw exception text by default, logs redacted [raw] o
     const attRows = sEng.store.read((db: SqliteDbLike) => db.prepare("SELECT prompt FROM attention WHERE task_id = ?").all(t.taskId)) as Array<{ prompt: string }>;
     assert.doesNotMatch(JSON.stringify(evRows), /tok_leak_1|ghp_1234/);
     assert.doesNotMatch(JSON.stringify(attRows), /sk-1234|csrf-secret-xyz/);
-    assert.ok(attRows[0].prompt.includes("[redacted]"));
+    assert.ok(req(attRows[0], "attRows[0]").prompt.includes("[redacted]"));
   } finally {
     sEng.store.close();
   }
@@ -803,8 +810,9 @@ test("the autopilot pass frees the only slot an orphaned start was holding", asy
     const first = await autopilot.step();
     assert.deepEqual(first.pumped.map((item) => item.taskId), [orphan.taskId]);
     assert.equal(first.failed.length, 1, "the queued task cannot start while the orphan holds the slot");
-    assert.equal(first.failed[0].taskId, queued.taskId);
-    assert.match(first.failed[0].message, /concurrency limit/);
+    const fail0 = req(first.failed[0], "first.failed[0]");
+    assert.equal(fail0.taskId, queued.taskId);
+    assert.match(fail0.message, /concurrency limit/);
 
     const orphanDetail = await engine.get({ taskId: orphan.taskId });
     assert.equal(orphanDetail.status, "needs_reconcile");

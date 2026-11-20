@@ -6,8 +6,10 @@
     "allowJs": true,
     "checkJs": true,
     "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
     "noEmit": true,
-    "skipLibCheck": true,
+    "skipLibCheck": false,
     "types": []
   },
   "include": ["client.js"]
