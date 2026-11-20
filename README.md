@@ -76,7 +76,7 @@ http://127.0.0.1:<port>/dsh-rpc   ->   DSH agent
 - **会自述**：`dsh_capabilities` 给出八节能力快照（运行时、权限档位、可调工具、MCP 前缀、会话、工作区、插件），做计划前不必猜本机有什么。
 - **不假装知道**：外层客户端有更短的超时上限时，本桥只如实说明并建议分段轮询，不让长任务看起来像失败。
 - **可托管外部 agent 任务（任务中心，`tasksEnabled` 默认关闭）**：内置 15 表 SQLite 账本、11 态状态机与能力卡/只读探测，统一调度 DSH 自身、Antigravity 与 Codex App Server，详情见 [任务中心手册](./docs/task-center.md)。
-- **关键行为有回归用例守着**：50 个测试文件共 448 例 + catalog smoke（本机实测 448/448 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
+- **关键行为有回归用例守着**：50 个测试文件共 451 例 + catalog smoke（本机实测 451/451 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
 
 ## 安装与更新
 
@@ -448,7 +448,7 @@ trace:
 | `tasksEnabled` | `false` | 布尔总开关；`false` 时不开库、不起定时器、MCP 隐藏任务工具 |
 | `tasksMaxConcurrent` | `1` | 整数 `1..32`；全局活跃任务并发上限，超限在 `dispatch` 报 `STATE_CONFLICT` |
 | `tasksRequireReconcileOnUnknown` | `true` | 布尔；不可识别状态或无 `attention` 的 `blocked` 是否强制转 `needs_reconcile` |
-| `tasksExternalAdapter` | `"none"` | `"none" \| "antigravity" \| "codex"`；除内建 DSH 基准适配器外额外装配的外部执行方。留 `"none"` 时，注册成 `antigravity`/`codex` 的代理会在派发时被拒（`ADAPTER_UNAVAILABLE`），任务停在 `queued` |
+| `tasksWorkspaceRoot` | `""`（继承宿主 cwd） | 这个桥的任务属于哪棵树。外部执行方的会话用它当 `cwd`，因此会落在对方窗口的同名项目下；设置后 `local` 工作区的根会被替换，未设置则不动 || `tasksExternalAdapter` | `"none"` | `"none" \| "antigravity" \| "codex"`；除内建 DSH 基准适配器外额外装配的外部执行方。留 `"none"` 时，注册成 `antigravity`/`codex` 的代理会在派发时被拒（`ADAPTER_UNAVAILABLE`），任务停在 `queued` |
 | `tasksPreviewTtlMs` | `300000` | 整数 `1000..3600000`；`dsh.tasks.preview` 预览凭证有效时长（毫秒） |
 | `tasksDbPath` | `null` | 字符串或 `null`；自定义 SQLite 路径，留空使用 `$DSH_HOME/storages/task-center/tasks.db` |
 | `tasksProbeTimeoutMs` | `5000` | 整数 `100..60000`；`dsh.agents.probe` 只读探测的单次超时 |
@@ -789,7 +789,7 @@ npm run verify                 # 构建 + 入口一致性 + npm test + check:pac
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 50 个测试文件，共 448 例，另有 catalog smoke；无需运行中的 Harness
+npm test                       # 50 个测试文件，共 451 例，另有 catalog smoke；无需运行中的 Harness
 node test/host.test.ts        # 1 例：真实 WebServer 集成（需先 npm ci）
 node test/e2e.mjs              # 14 例：端到端，打真实 Harness（--cwd 只接受绝对路径）
 node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harness
@@ -881,7 +881,7 @@ npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案
 - **边界**检查协议层：batch、通知、id 形态、鉴权头、超大 body（应得真正的 413 而不是断连）、参数注入防护、超时钳制、并发 ask、`limit` 语义。
 - **端口漂移**（手工）：把 `endpoint.json` 的 url 改成死端口再跑 `dsh-rpc ping`，应得退出码 3 与含 `nothing is listening`、`pid`、`health --wait` 的可读报错。
 
-本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 50 个测试文件 **448/448** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.ts` 输出 `methods: 34` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
+本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 50 个测试文件 **451/451** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.ts` 输出 `methods: 34` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
 
 ## 许可证
 

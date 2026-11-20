@@ -167,3 +167,35 @@ test("a request without an agent or workspace never touches the map", async () =
   );
   assert.deepEqual(createStickySessions({ file: stickyFile }).entries(), {});
 });
+
+test("a second turn on the same adapter reuses the live app-server", async () => {
+  const stickyFile = tempSticky();
+  const fake = makeFakeSpawn();
+  const adapter = build(fake, stickyFile);
+
+  const first = await adapter.start(request());
+  const second = await adapter.start(request());
+
+  assert.equal(first.locator.threadId, second.locator.threadId, "both turns land on one thread");
+  assert.deepEqual(
+    fake.sent.map((m) => m.method),
+    ["initialize", "initialized", "thread/start", "turn/start", "turn/start"],
+    "the live session is reused instead of spawning a second process beside it",
+  );
+});
+
+test("dispose releases the threads the adapter was holding", async () => {
+  const stickyFile = tempSticky();
+  const fake = makeFakeSpawn();
+  const adapter = build(fake, stickyFile);
+
+  await adapter.start(request());
+  await adapter.dispose();
+  await adapter.start(request());
+
+  assert.equal(
+    fake.sent.filter((m) => m.method === "initialize").length,
+    2,
+    "after dispose the next turn needs a fresh process",
+  );
+});

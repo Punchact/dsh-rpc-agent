@@ -934,3 +934,30 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 **边界**：①只记 id，不记内容；映射丢了最坏结果是新开一个会话，不会丢任务；②上限 200 条、按最近使用裁剪；③读坏文件按空处理，因为这不是事实来源，是加速器；④`agentId` 或工作区缺失时不落表（无主键的粘性没有意义），显式 `cascadeId` 永远优先于记忆。
 
 **怎么钉住**：`test/adapters-sticky.test.ts` 七例（跨实例持久化、键隔离、坏文件、禁用、上限、空 id、默认路径），`test/adapters-codex-sticky.test.ts` 三例（续用 `thread/resume`、`resume` 失败回落、无身份不落表），`test/adapters-antigravity-sticky.test.ts` 两例（cascade 续用、显式 id 优先）。
+
+## 67. 决策 0.9.5-f：线程锁在进程里，在哪个窗口看得见由两件事决定
+
+**现象**：给执行端加了会话粘性之后，A10 探针在真机上第二轮拿到了新的 `threadId`；另一头，
+桥派的 Codex 会话明明写了 rollout，回读 Codex 自己的库却归不到 `dsh-rpc-plugin` 项目下。
+
+**取证**：
+- 对「刚建、还没跑过 turn」的线程 resume → `no rollout found for thread id ...`；对跑过 turn 的既有线程 resume →
+  `thread ... already has an active writer`，stderr 是 `thread-store conflict`。后者说明桥没有关掉第一轮占的
+  app-server——它一直开着，握着那个线程的锁。
+- `state_5.sqlite.threads` 里桥的行走的是 `cwd = C:\Users\Andy\.dsh\profiles\desktop`，而 Codex 窗口按
+  cwd 与登记的项目根匹配，profile 目录不在任何项目根下，于是「会话存在但归不进项目」。
+
+**决定**：
+1. **同一线程复用同一进程**：`start()` 先算「这个代理 + 这个工作区」记住的线程，若适配器自己还开着对应
+   app-server，就直接在这条会话上 `turn/start`，不再 spawn 第二个进程去抢锁。池子最多 8 个，超出按插入
+   顺序关最旧的；新增 `dispose()` 在停机时全部释放。
+2. **桥的能量边界显式化**：新增 `tasksWorkspaceRoot`，显式说了「这个桥的任务属于哪棵树」时替换 `local`
+   工作区的根（`replaceRoot`），没说就不动——二次启动不许悄悄搬走已有工作区。
+
+**边界**：①别的进程（例如桌面应用自己）若持有同一线程，resume 仍会失败，这时只回落新建并 `forget`，
+不重试抢锁；②`tasksWorkspaceRoot` 只影响本桥的 `local` 工作区与外部执行方的 cwd，不改宿主工作目录；
+③池子上限是常数而非配置——它是保护，不是旋钮。
+
+**怎么钉住**：`test/adapters-codex-sticky.test.ts` 五例（续用、失败回落、无身份不落表、同适配器复用、
+`dispose` 后重开），`test/tasks-engine.test.ts` 一例（`replaceRoot` 才改根）。真机判据在 A10 探针：
+两轮拿到同一 `threadId`，且该线程在 Codex 库里落在登记的项目根下。

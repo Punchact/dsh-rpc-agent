@@ -76,7 +76,7 @@ Repository and package name are both `dsh-rpc-agent`; the commands (`dsh-rpc`, `
 - **Self-describing**: `dsh_capabilities` returns an eight-section snapshot (runtime, permission presets, callable tools, MCP prefixes, sessions, workspaces, plugins), so a planner does not have to guess what this machine offers.
 - **No pretend knowledge**: when an outer client caps tool calls below the bridge budget, the bridge says so and recommends polling in slices instead of letting a long job look like a failure.
 - **Managed external agent tasks (Task centre, `tasksEnabled: false` by default)**: a 15-table SQLite ledger, 11-state machine, and capability cards/read-only probes driving DSH itself, Antigravity, and Codex App Server; see [docs/task-center.md](./docs/task-center.md).
-- **Regression tests guard the sharp edges**: 50 test files (448 cases) + catalog smoke (448/448 pass locally, including the 15 `approvals` cases) + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
+- **Regression tests guard the sharp edges**: 50 test files (451 cases) + catalog smoke (451/451 pass locally, including the 15 `approvals` cases) + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
 
 ## Install and update
 
@@ -448,7 +448,7 @@ Asynchronous work delegated to external agents (DSH itself, Antigravity, or Code
 | `tasksEnabled` | `false` | Boolean master switch; when `false`, no DB is opened, no timer starts, and MCP hides task tools |
 | `tasksMaxConcurrent` | `1` | Integer `1..32`; global active-task concurrency cap enforced atomically at `dispatch` (`STATE_CONFLICT`) |
 | `tasksRequireReconcileOnUnknown` | `true` | Boolean; unrecognized statuses or `blocked` reports without `attention` transition to `needs_reconcile` |
-| `tasksExternalAdapter` | `"none"` | `"none" \| "antigravity" \| "codex"`; external adapter wired alongside the built-in DSH baseline adapter. While it stays `"none"`, an agent registered as `antigravity`/`codex` is refused at dispatch (`ADAPTER_UNAVAILABLE`) and its task sits in `queued` |
+| `tasksWorkspaceRoot` | `""` (inherits the Host cwd) | Which tree this bridge's tasks belong to. External executors start their sessions there, which is what files them under the matching project in their own window; setting it replaces the root of the `local` workspace, leaving it alone when unset || `tasksExternalAdapter` | `"none"` | `"none" \| "antigravity" \| "codex"`; external adapter wired alongside the built-in DSH baseline adapter. While it stays `"none"`, an agent registered as `antigravity`/`codex` is refused at dispatch (`ADAPTER_UNAVAILABLE`) and its task sits in `queued` |
 | `tasksPreviewTtlMs` | `300000` | Integer `1000..3600000`; lifetime of one-shot `dsh.tasks.preview` tokens in ms |
 | `tasksDbPath` | `null` | String or `null`; custom SQLite file path (defaults to `$DSH_HOME/storages/task-center/tasks.db`) |
 | `tasksProbeTimeoutMs` | `5000` | Integer `100..60000`; per-probe timeout for `dsh.agents.probe` |
@@ -789,7 +789,7 @@ npm run verify                 # build + entry parity + npm test + check:package
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 50 test files, 448 cases, plus catalog smoke; no running Harness needed
+npm test                       # 50 test files, 451 cases, plus catalog smoke; no running Harness needed
 node test/host.test.ts        # 1 case: real WebServer integration (needs npm ci first)
 node test/e2e.mjs              # 14 cases: end to end against a real Harness (--cwd takes an absolute path only)
 node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a real Harness
@@ -881,7 +881,7 @@ A few worth calling out:
 - **Edge** probes the protocol layer: batches, notifications, id shapes, auth headers, oversized bodies (a genuine 413, not a dropped connection), parameter-injection defences, timeout clamping, concurrent asks, `limit` semantics.
 - **Port drift** (manual): point `endpoint.json` at a dead port and run `dsh-rpc ping`; expect exit code 3 and a readable error mentioning `nothing is listening`, `pid` and `health --wait`.
 
-Local verification (2026-11-19, 0.9.0, real repository): all 50 test files in the `npm test` chain pass (**448/448** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.ts` (`methods: 34` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`). Formatting (UTF-8 without BOM, LF) is a review convention here, not an automated gate.
+Local verification (2026-11-19, 0.9.0, real repository): all 50 test files in the `npm test` chain pass (**451/451** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.ts` (`methods: 34` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`). Formatting (UTF-8 without BOM, LF) is a review convention here, not an automated gate.
 
 ## License
 

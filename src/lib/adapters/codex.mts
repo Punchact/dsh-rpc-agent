@@ -24,6 +24,8 @@ const WINDOWS_APPS_ROOT = "C:\\Program Files\\WindowsApps";
 export const MAX_FRAME_CHARS = 4 * 1024 * 1024;
 export const MAX_EVENT_QUEUE = 500;
 export const MAX_PENDING_APPROVALS = 200;
+// One app-server process per live thread; each holds that thread's store lock.
+const MAX_OPEN_SESSIONS = 8;
 const MAX_STDERR_CHARS = 4096;
 
 export interface CodexFsOps {
@@ -97,6 +99,8 @@ export interface CreateCodexAdapterOptions {
 
 export interface CodexAdapter extends RuntimeAdapter {
   kind: "codex";
+  /** Close every app-server process this adapter owns (releases their thread locks). */
+  dispose(): Promise<void>;
 }
 
 interface PendingRequest {
@@ -129,6 +133,59 @@ interface CodexSession {
   sendRequest(method: string, params?: Record<string, unknown>): Promise<any>;
   waitForInterrupt(turnId: string | null, timeoutMs: number): Promise<boolean>;
   close(): void;
+  isClosed(): boolean;
+}
+
+/**
+ * Start one turn on an already-attached thread.
+ *
+ * A thread is owned by a single app-server process: a second process that calls
+ * `thread/resume` on it gets `thread ... already has an active writer`. So "continue the
+ * previous session" means reuse the live process, not spawn a new one next to it.
+ */
+async function beginTurnOn(
+  session: CodexSession,
+  threadId: string,
+  req: any,
+  summary: any,
+  resolved: { path: string; source: string },
+  version: string | null,
+) {
+  const promptText =
+    req.prompt ??
+    req.text ??
+    summary.prompt ??
+    summary.input?.prompt ??
+    summary.input?.text ??
+    JSON.stringify(summary.input ?? {});
+
+  const turnResp = await session.sendRequest("turn/start", {
+    threadId,
+    input: [{ type: "text", text: String(promptText) }],
+  });
+  const turnId = turnResp?.turn?.id ?? turnResp?.turnId ?? null;
+  if (turnId) {
+    session.pushEvent({
+      adapterEventId: `codex:0:turn/start`,
+      report: reportOf("progress", {
+        observedMethod: "turn/start",
+        turnId,
+        evidence: { method: "turn/start", turnId },
+      }),
+    });
+  }
+
+  return {
+    accepted: true,
+    locator: {
+      kind: "codex",
+      threadId,
+      turnId,
+      binary: resolved.path,
+      binarySource: resolved.source,
+      ...(version ? { version } : {}),
+    },
+  };
 }
 
 const ALLOWED_CODEX_METHODS = new Set([
@@ -449,6 +506,10 @@ export function createCodexAdapter({
         } catch {
           // best effort
         }
+      },
+
+      isClosed() {
+        return closed;
       },
     };
 
@@ -778,6 +839,20 @@ export function createCodexAdapter({
         }
       }
 
+      // Which session does this agent+workspace already own? If its app-server is still
+      // running, the thread lives there and a second process must not try to take it.
+      const stickyKey = {
+        kind: "codex",
+        agentId: String(agent.agentId ?? ""),
+        workspaceId: String(workspace.workspaceId ?? workspace.workspace_id ?? workspace.rootPath ?? workspace.root_path ?? ""),
+      };
+      const stickyUsable = stickyKey.agentId.length > 0 && stickyKey.workspaceId.length > 0;
+      const rememberedEarly = stickyUsable && sticky ? sticky.get(stickyKey) : null;
+      const liveSession = rememberedEarly ? sessions.get(rememberedEarly) : null;
+      if (liveSession && !liveSession.isClosed() && liveSession.threadId) {
+        return await beginTurnOn(liveSession, liveSession.threadId, req, summary, resolved, version);
+      }
+
       let child: any;
       try {
         child = spawn(resolved.path, ["app-server", "--listen", "stdio://"], {
@@ -804,12 +879,8 @@ export function createCodexAdapter({
         // Session stickiness: if this agent already has a thread in this workspace, continue
         // it. `thread/resume` fails when the thread was archived or removed, and that failure
         // is a normal outcome rather than an error — fall through to a fresh thread.
-        const stickyKey = {
-          kind: "codex",
-          agentId: String(agent.agentId ?? ""),
-          workspaceId: String(workspace.workspaceId ?? workspace.workspace_id ?? workspace.rootPath ?? workspace.root_path ?? ""),
-        };
-        const stickyUsable = stickyKey.agentId.length > 0 && stickyKey.workspaceId.length > 0;
+        // (`stickyKey`/`stickyUsable` are computed before the spawn: a live session for the
+        // remembered thread is reused there instead of being fought over.)
         let threadId: string | null = null;
         let resumed = false;
         if (stickyUsable && sticky) {
@@ -849,42 +920,15 @@ export function createCodexAdapter({
         }
         session.threadId = threadId;
         sessions.set(threadId, session);
-
-        const promptText =
-          req.prompt ??
-          req.text ??
-          summary.prompt ??
-          summary.input?.prompt ??
-          summary.input?.text ??
-          JSON.stringify(summary.input ?? {});
-
-        const turnResp = await session.sendRequest("turn/start", {
-          threadId,
-          input: [{ type: "text", text: String(promptText) }],
-        });
-        const turnId = turnResp?.turn?.id ?? turnResp?.turnId ?? null;
-        if (turnId) {
-          session.pushEvent({
-            adapterEventId: `codex:0:turn/start`,
-            report: reportOf("progress", {
-              observedMethod: "turn/start",
-              turnId,
-              evidence: { method: "turn/start", turnId },
-            }),
-          });
+        // Keep the pool bounded: an idle process is a lock on its thread, not a free resource.
+        while (sessions.size > MAX_OPEN_SESSIONS) {
+          const oldest = sessions.keys().next();
+          if (oldest.done) break;
+          sessions.get(oldest.value)?.close();
+          sessions.delete(oldest.value);
         }
 
-        return {
-          accepted: true,
-          locator: {
-            kind: "codex",
-            threadId,
-            turnId,
-            binary: resolved.path,
-            binarySource: resolved.source,
-            ...(version ? { version } : {}),
-          },
-        };
+        return await beginTurnOn(session, threadId, req, summary, resolved, version);
       } catch (error) {
         session.close();
         throw error;
@@ -1010,6 +1054,17 @@ export function createCodexAdapter({
       });
       session.child.stdin.write(`${line}\n`);
       return { accepted: true, threadId, approvalId };
+    },
+
+    /**
+     * Release every app-server process this adapter owns. A thread's store lock lives in its
+     * process, so leaving them running keeps those threads un-resumable for everyone else.
+     */
+    async dispose() {
+      for (const [threadId, session] of sessions) {
+        session.close();
+        sessions.delete(threadId);
+      }
     },
   };
 

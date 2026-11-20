@@ -60,6 +60,7 @@ export interface ResolvedConfig {
   tasksAutopilotIntervalMs: number;
   tasksAutopilotMaxStart: number;
   tasksAutopilotMaxPump: number;
+  tasksWorkspaceRoot: string;
 }
 
 export interface DescribedConfig {
@@ -97,6 +98,7 @@ export interface DescribedConfig {
   tasksAutopilotIntervalMs: number;
   tasksAutopilotMaxStart: number;
   tasksAutopilotMaxPump: number;
+  tasksWorkspaceRoot: string | null;
 }
 
 const DEFAULTS: ResolvedConfig = {
@@ -143,6 +145,10 @@ const DEFAULTS: ResolvedConfig = {
   tasksAutopilotIntervalMs: 5_000,
   tasksAutopilotMaxStart: 2,
   tasksAutopilotMaxPump: 4,
+  // Which tree this bridge's tasks belong to. Sessions started by an external executor
+  // inherit it as their cwd, which is what decides the project they show up under in that
+  // executor's own window. Empty keeps the historical behaviour (the Host's cwd).
+  tasksWorkspaceRoot: "",
 };
 
 /**
@@ -362,6 +368,7 @@ export function resolveConfig(input: Record<string, unknown> | null | undefined 
       asBoundedInt(MIN_TASKS_AUTOPILOT_MAX_PUMP, MAX_TASKS_AUTOPILOT_MAX_PUMP),
       `expected an integer between ${MIN_TASKS_AUTOPILOT_MAX_PUMP} and ${MAX_TASKS_AUTOPILOT_MAX_PUMP}`,
     ),
+    tasksWorkspaceRoot: take("tasksWorkspaceRoot", asString, "expected a string"),
   };
 
   // Clamp rather than fail: see MAX_WAIT_SLICE_MS. The requested value is kept
@@ -439,6 +446,7 @@ export function describeConfig(config: Partial<ResolvedConfig>): DescribedConfig
     tasksProbeTimeoutMs: config.tasksProbeTimeoutMs ?? DEFAULTS.tasksProbeTimeoutMs,
     tasksPreviewTtlMs: config.tasksPreviewTtlMs ?? DEFAULTS.tasksPreviewTtlMs,
     tasksAdapters: config.tasksAdapters ?? {},
+    tasksWorkspaceRoot: config.tasksWorkspaceRoot || null,
     tasksDispatchMaxSteps: config.tasksDispatchMaxSteps ?? DEFAULTS.tasksDispatchMaxSteps,
     tasksEnabled: config.tasksEnabled ?? DEFAULTS.tasksEnabled,
     tasksMaxConcurrent: config.tasksMaxConcurrent ?? DEFAULTS.tasksMaxConcurrent,
