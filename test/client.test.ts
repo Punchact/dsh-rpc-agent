@@ -70,6 +70,13 @@ test("the transport code is recovered from the undici cause chain", () => {
   assert.equal(transportCode(new Error("plain failure")), undefined);
 });
 
+interface ClientErrorLike {
+  code?: unknown;
+  status?: number;
+  name?: string;
+  message?: string;
+}
+
 test("a blocked port is named instead of left as an undefined code", async () => {
   // fetch refuses the ports the standard calls "bad" (5060, 6667, ...) before it
   // opens a socket, so no errno survives anywhere in the chain — only a cause
@@ -85,11 +92,11 @@ test("a blocked port is named instead of left as an undefined code", async () =>
 
   // Unchanged blocked endpoint: must rethrow EBADPORT directly without "nothing is listening".
   publishEndpoint("http://127.0.0.1:5060/dsh-rpc");
-  await assert.rejects(rpcCall("dsh.ping", {}, { timeoutMs: 8000 }), (error) => {
+  await assert.rejects(rpcCall("dsh.ping", {}, { timeoutMs: 8000 }), (error: ClientErrorLike) => {
     assert.equal(error.code, "EBADPORT");
-    assert.match(error.message, /bad port/);
-    assert.match(error.message, /--url/);
-    assert.doesNotMatch(error.message, /nothing is listening/);
+    assert.match(error.message ?? "", /bad port/);
+    assert.match(error.message ?? "", /--url/);
+    assert.doesNotMatch(error.message ?? "", /nothing is listening/);
     return true;
   });
 
@@ -117,7 +124,7 @@ test("a blocked port is named instead of left as an undefined code", async () =>
 
 const endpointFile = join(home, "dsh-rpc", "endpoint.json");
 
-function publishEndpoint(url, extra = {}) {
+function publishEndpoint(url: string, extra: Record<string, unknown> = {}) {
   writeFileSync(
     endpointFile,
     `${JSON.stringify(
@@ -143,24 +150,24 @@ after(() => rmSync(home, { recursive: true, force: true }));
 
 test("listenSafe skips fetch-blocked ports and closes rejected sockets deterministically", async () => {
   const ports = [5060, 6667, 54321];
-  const closed = [];
+  const closed: number[] = [];
   let idx = 0;
   const res = await listen(() => {}, {
-    createServerImpl() {
+    createServerImpl: (() => {
       const assigned = ports[idx++];
       return {
-        listen(_p, _h, cb) {
+        listen(_p: number, _h: string, cb: () => void) {
           cb();
         },
         address() {
           return { port: assigned };
         },
-        close(cb) {
+        close(cb: () => void) {
           closed.push(assigned);
           cb();
         },
       };
-    },
+    }) as never,
   });
   assert.equal(res.port, 54321);
   assert.deepEqual(closed, [5060, 6667]);
@@ -204,7 +211,7 @@ test("a reset connection is reported, never replayed", async () => {
   try {
     await assert.rejects(
       () => rpcCall("dsh.ping", {}, { timeoutMs: 8000 }),
-      (error) => {
+      (error: ClientErrorLike) => {
         assert.equal(error.code, "ECONNRESET", "the transport code must survive the wrap");
         return true;
       },
@@ -228,7 +235,7 @@ test("an explicitly supplied url is never retried", async () => {
   try {
     await assert.rejects(
       () => rpcCall("dsh.ping", {}, { url: `http://127.0.0.1:${dead}/dsh-rpc`, timeoutMs: 8000 }),
-      (error) => {
+      (error: ClientErrorLike) => {
         assert.equal(error.code, "ECONNREFUSED");
         return true;
       },
@@ -254,9 +261,9 @@ test("a second failure that is not a refused handshake keeps its own meaning", a
     // The retry reached a live server that said 401. Reporting that as "nothing
     // is listening" would send the reader looking for a restart that never
     // happened.
-    await assert.rejects(pending, (error) => {
+    await assert.rejects(pending, (error: ClientErrorLike) => {
       assert.equal(error.code, -32001);
-      assert.doesNotMatch(error.message, /nothing is listening/);
+      assert.doesNotMatch(error.message ?? "", /nothing is listening/);
       return true;
     });
   } finally {
@@ -275,7 +282,7 @@ test("a caller signal does not disable the request timeout", async () => {
     const started = Date.now();
     await assert.rejects(
       () => rpcCall("dsh.ping", {}, { timeoutMs: 40, signal: controller.signal }),
-      (error) => error.name === "TimeoutError" || error.name === "AbortError",
+      (error: ClientErrorLike) => error.name === "TimeoutError" || error.name === "AbortError",
     );
     assert.ok(Date.now() - started < 220, "timeout must win before the server responds");
   } finally {
@@ -285,7 +292,7 @@ test("a caller signal does not disable the request timeout", async () => {
 });
 
 test("non-success HTTP and malformed success envelopes are errors", async () => {
-  const cases = [
+  const cases: Array<[number, Record<string, unknown>, number | null]> = [
     [503, { message: "fixture unavailable" }, -32000],
     [200, { jsonrpc: "2.0", id: 1, result: { ok: true } }, null],
     [200, { jsonrpc: "2.0", id: 2, result: { ok: true } }, -32000],
@@ -306,7 +313,7 @@ test("non-success HTTP and malformed success envelopes are errors", async () => 
       } else {
         await assert.rejects(
           () => rpcCall("dsh.ping", {}),
-          (error) => error.code === expectedCode && error.status === status,
+          (error: ClientErrorLike) => error.code === expectedCode && error.status === status,
         );
       }
     } finally {
@@ -324,11 +331,11 @@ test("an unchanged dead endpoint explains the restart and names the pid", async 
 
   await assert.rejects(
     () => rpcCall("dsh.ping", {}, { timeoutMs: 8000 }),
-    (error) => {
+    (error: ClientErrorLike) => {
       assert.equal(error.code, "ECONNREFUSED");
-      assert.match(error.message, /nothing is listening/);
-      assert.match(error.message, /pid 4242/);
-      assert.match(error.message, /health --wait/);
+      assert.match(error.message ?? "", /nothing is listening/);
+      assert.match(error.message ?? "", /pid 4242/);
+      assert.match(error.message ?? "", /health --wait/);
       return true;
     },
   );

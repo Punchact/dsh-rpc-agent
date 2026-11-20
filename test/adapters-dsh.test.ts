@@ -8,9 +8,113 @@ import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
 import { createPreview } from "../dist/lib/tasks/preview.mjs";
 import { openStore } from "../dist/lib/tasks/store.mjs";
 
-function makeOps(overrides = {}) {
-  const calls = [];
-  const ops = {
+interface DshSessionParams {
+  sessionId?: string;
+  probe?: boolean;
+  afterSeq?: number;
+  mode?: string;
+  approvalId?: string;
+  cwd?: string;
+  agentPreset?: string;
+  prompt?: string;
+  decision?: string;
+  reason?: string;
+  [key: string]: unknown;
+}
+
+interface DshStatusResponse {
+  ok: boolean;
+  sessionId?: string;
+  status?: string;
+  running?: boolean;
+  turn?: number;
+  reason?: string;
+  error?: string;
+  pendingApproval?: { approvalId: string; toolName: string; prompt: string };
+}
+
+interface DshHistoryResponse {
+  ok: boolean;
+  sessionId: string | undefined;
+  cursor: number;
+  records: Array<{ seq: number; type: string; data: Record<string, unknown> }>;
+}
+
+interface DshOps {
+  createSession: (params?: DshSessionParams) => Promise<{ ok: boolean; sessionId: string }>;
+  askSession: (params?: DshSessionParams) => Promise<{ ok: boolean; accepted: boolean; status: string; requestId: string }>;
+  promptSession: (params?: DshSessionParams) => Promise<{ ok: boolean; accepted: boolean; requestId: string }>;
+  cancelSession: (params?: DshSessionParams) => Promise<{ ok: boolean; accepted: boolean; stopped: boolean }>;
+  sessionStatus: (params?: DshSessionParams) => Promise<DshStatusResponse>;
+  sessionHistory: (params?: DshSessionParams) => Promise<DshHistoryResponse>;
+  resolveApproval?: (params: DshSessionParams) => Promise<{
+    ok: boolean;
+    resolved: boolean;
+    accepted: boolean;
+    approvalId: string | undefined;
+    decision: string;
+  }>;
+}
+
+type DshCallEntry = [string, DshSessionParams | undefined];
+
+interface DshAdapterView {
+  probe(): Promise<{ ok: boolean; reason: string; controls: { start: boolean } }>;
+  start(req: Record<string, unknown>): Promise<{ accepted: boolean; locator: { kind: string; sessionId: string } }>;
+  inspect(locator: { kind: string; sessionId: string }): Promise<{
+    adapterEventId: string;
+    report: {
+      state: string;
+      reason?: string;
+      droppedBy?: string;
+      failureClass?: string;
+      resultValid?: boolean;
+      attention: { kind: string; approvalId: string };
+    };
+  }>;
+  events(
+    locator: { kind: string; sessionId: string },
+    afterSeq: number,
+  ): Promise<{
+    nextCursor: number;
+    events: Array<{
+      adapterEventId: string;
+      report: {
+        state: string;
+        resultValid?: boolean;
+        attention?: { kind: string };
+        evidence: { isError?: boolean; policy?: string };
+      };
+    }>;
+  }>;
+  sendInput(
+    locator: { kind: string; sessionId: string },
+    input: { text: string },
+  ): Promise<{ accepted: boolean; mode: string }>;
+  cancel(locator: { kind: string; sessionId: string }): Promise<{ requestAccepted: boolean; stopped: boolean }>;
+  decideApproval(
+    locator: { kind: string; sessionId: string },
+    decision: { approvalId?: string; decision: string; reason?: string },
+  ): Promise<{ accepted: boolean; approvalId: string }>;
+}
+
+const buildDshAdapter = createDshAdapter as unknown as (opts: { ops?: Partial<DshOps> | null }) => DshAdapterView;
+const seedBaseline = seedBaselineEntities as unknown as (
+  store: unknown,
+  seed: Record<string, unknown>,
+) => Promise<void>;
+const buildDispatcher = createDispatcher as unknown as (opts: {
+  store: unknown;
+  engine: unknown;
+  adapters: Record<string, DshAdapterView>;
+}) => {
+  startTask(req: { taskId: string }): Promise<{ status: string; locator?: { kind: string; sessionId: string } }>;
+  pump(req: { taskId: string; maxSteps: number }): Promise<{ nextCursor: number; status: string }>;
+};
+
+function makeOps(overrides: Partial<DshOps> = {}) {
+  const calls: DshCallEntry[] = [];
+  const ops: DshOps = {
     async createSession(params) {
       calls.push(["createSession", params]);
       return { ok: true, sessionId: "sess_dsh_1" };
@@ -46,24 +150,24 @@ function makeOps(overrides = {}) {
 
 test("createDshAdapter rejects missing ops or missing required op with INVALID_ADAPTER", () => {
   assert.throws(
-    () => createDshAdapter({}),
+    () => buildDshAdapter({}),
     (err) => isTaskError(err, TASK_ERROR.INVALID_ADAPTER),
   );
   assert.throws(
-    () => createDshAdapter({ ops: null }),
+    () => buildDshAdapter({ ops: null }),
     (err) => isTaskError(err, TASK_ERROR.INVALID_ADAPTER),
   );
   const { ops } = makeOps();
   delete ops.resolveApproval;
   assert.throws(
-    () => createDshAdapter({ ops }),
+    () => buildDshAdapter({ ops }),
     (err) => isTaskError(err, TASK_ERROR.INVALID_ADAPTER),
   );
 });
 
 test("dsh adapter probe is read-only (never calls createSession or askSession) and reports failures", async () => {
   const { ops, calls } = makeOps();
-  const adapter = createDshAdapter({ ops });
+  const adapter = buildDshAdapter({ ops });
 
   const okRes = await adapter.probe();
   assert.equal(okRes.ok, true);
@@ -71,7 +175,7 @@ test("dsh adapter probe is read-only (never calls createSession or askSession) a
   assert.equal(calls.some(([fn]) => fn === "createSession" || fn === "askSession"), false);
   assert.deepEqual(calls[0], ["sessionStatus", { probe: true }]);
 
-  const failAdapter = createDshAdapter({
+  const failAdapter = buildDshAdapter({
     ops: makeOps({
       async sessionStatus() {
         return { ok: false, reason: "controller_offline" };
@@ -86,7 +190,7 @@ test("dsh adapter probe is read-only (never calls createSession or askSession) a
 
 test("dsh adapter start creates session, triggers ask, and returns secret-free locator", async () => {
   const { ops, calls } = makeOps();
-  const adapter = createDshAdapter({ ops });
+  const adapter = buildDshAdapter({ ops });
 
   const started = await adapter.start({
     task: { taskId: "t_1", requestSummary: { prompt: "summarize diff", model: "openai/gpt-5" } },
@@ -97,21 +201,21 @@ test("dsh adapter start creates session, triggers ask, and returns secret-free l
   assert.equal(started.accepted, true);
   assert.deepEqual(started.locator, { kind: "dsh", sessionId: "sess_dsh_1" });
   assert.equal(calls[0][0], "createSession");
-  assert.equal(calls[0][1].cwd, "C:\\work\\repo");
-  assert.equal(calls[0][1].agentPreset, "coder");
+  assert.equal(calls[0][1]?.cwd, "C:\\work\\repo");
+  assert.equal(calls[0][1]?.agentPreset, "coder");
   assert.equal(calls[1][0], "askSession");
-  assert.equal(calls[1][1].sessionId, "sess_dsh_1");
-  assert.equal(calls[1][1].prompt, "summarize diff");
+  assert.equal(calls[1][1]?.sessionId, "sess_dsh_1");
+  assert.equal(calls[1][1]?.prompt, "summarize diff");
 });
 
 test("dsh adapter inspect maps all session statuses to honest 6-state reports", async () => {
-  let nextStatus = { ok: true, status: "running", running: true, turn: 1 };
+  let nextStatus: DshStatusResponse = { ok: true, status: "running", running: true, turn: 1 };
   const { ops } = makeOps({
     async sessionStatus() {
       return nextStatus;
     },
   });
-  const adapter = createDshAdapter({ ops });
+  const adapter = buildDshAdapter({ ops });
   const locator = { kind: "dsh", sessionId: "sess_map_1" };
 
   const firstPoll = await adapter.inspect(locator);
@@ -160,7 +264,7 @@ test("dsh adapter events preserves exact cursor, adapterEventId, and maps turn/e
       calls.push(["sessionHistory", params]);
       return {
         ok: true,
-        sessionId: params.sessionId,
+        sessionId: params?.sessionId,
         cursor: 42,
         records: [
           { seq: 10, type: "tool/result", data: { toolName: "fs_read", isError: true, error: "ENOENT" } },
@@ -175,10 +279,10 @@ test("dsh adapter events preserves exact cursor, adapterEventId, and maps turn/e
       };
     },
   });
-  const adapter = createDshAdapter({ ops });
+  const adapter = buildDshAdapter({ ops });
   const res = await adapter.events({ kind: "dsh", sessionId: "sess_ev_1" }, 9);
 
-  assert.equal(calls[0][1].afterSeq, 9);
+  assert.equal(calls[0][1]?.afterSeq, 9);
   assert.equal(res.nextCursor, 42);
   assert.equal(res.events.length, 4);
 
@@ -188,7 +292,7 @@ test("dsh adapter events preserves exact cursor, adapterEventId, and maps turn/e
 
   assert.equal(res.events[1].adapterEventId, "sess_ev_1:11:approval/requested");
   assert.equal(res.events[1].report.state, "blocked");
-  assert.equal(res.events[1].report.attention.kind, "approval");
+  assert.equal(res.events[1].report.attention!.kind, "approval");
 
   assert.equal(res.events[2].adapterEventId, "sess_ev_1:12:turn/end");
   assert.equal(res.events[2].report.state, "ready");
@@ -206,13 +310,13 @@ test("dsh adapter sendInput uses steer mode, cancel stays honest about stopped, 
       return { ok: true, accepted: true, stopped: stopConfirmed };
     },
   });
-  const adapter = createDshAdapter({ ops });
+  const adapter = buildDshAdapter({ ops });
   const locator = { kind: "dsh", sessionId: "sess_ctl_1" };
 
   const steerRes = await adapter.sendInput(locator, { text: "continue cleanly" });
   assert.equal(steerRes.accepted, true);
   assert.equal(steerRes.mode, "steer");
-  assert.equal(calls.at(-1)[1].mode, "steer");
+  assert.equal(calls.at(-1)?.[1]?.mode, "steer");
 
   const cancelUnconfirmed = await adapter.cancel(locator);
   assert.equal(cancelUnconfirmed.requestAccepted, true);
@@ -239,7 +343,7 @@ test("dsh adapter integrates end-to-end with createTaskEngine and createDispatch
   const store = openStore({ path: ":memory:" });
   const engine = createTaskEngine(store);
   try {
-    await seedBaselineEntities(store, {
+    await seedBaseline(store, {
       principal: { principalId: "local-operator" },
       workspace: { workspaceId: "local", rootPath: "C:\\work\\repo" },
       agent: { agentId: "ag_dsh", adapterKind: "dsh", capabilities: { cancel: "supported" } },
@@ -272,10 +376,10 @@ test("dsh adapter integrates end-to-end with createTaskEngine and createDispatch
         };
       },
     });
-    const dispatcher = createDispatcher({
+    const dispatcher = buildDispatcher({
       store,
       engine,
-      adapters: { dsh: createDshAdapter({ ops }) },
+      adapters: { dsh: buildDshAdapter({ ops }) },
     });
 
     const disp = await dispatcher.startTask({ taskId: task.taskId });
@@ -295,7 +399,7 @@ test("approval records that need no decision never block a task (0.9.0 live: app
     async sessionHistory(params) {
       return {
         ok: true,
-        sessionId: params.sessionId,
+        sessionId: params?.sessionId,
         cursor: 4,
         records: [
           // The session's approval policy at start: `{ policy: "ask" }` records how approvals
@@ -308,7 +412,7 @@ test("approval records that need no decision never block a task (0.9.0 live: app
       };
     },
   });
-  const adapter = createDshAdapter({ ops });
+  const adapter = buildDshAdapter({ ops });
   const res = await adapter.events({ kind: "dsh", sessionId: "sess_policy_1" }, 1);
 
   assert.equal(res.events.length, 3);

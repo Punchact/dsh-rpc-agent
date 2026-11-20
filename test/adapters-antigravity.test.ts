@@ -7,12 +7,29 @@ import test from "node:test";
 import { createAntigravityAdapter, DEFAULT_ANTIGRAVITY_MODEL } from "../dist/lib/adapters/antigravity.mjs";
 import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
 
-function makeFakeFetch(handlers) {
-  const calls = [];
-  const fetch = async (url, init) => {
-    const method = url.split("/").pop();
-    const body = JSON.parse(init.body);
-    calls.push({ url, method, headers: init.headers, body });
+interface FakeFetchCall {
+  url: string;
+  method: string;
+  headers: Record<string, string> | undefined;
+  body: Record<string, unknown>;
+}
+
+type FakeFetchHandlers = Record<
+  string,
+  (body: Record<string, unknown>, init?: RequestInit) => unknown | Promise<unknown>
+>;
+
+interface AntigravityErrorLike {
+  message: string;
+  data?: { reason?: string };
+}
+
+function makeFakeFetch(handlers: FakeFetchHandlers) {
+  const calls: FakeFetchCall[] = [];
+  const fetchImpl = async (url: string, init: RequestInit = {}) => {
+    const method = url.split("/").pop() ?? "";
+    const body = JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>;
+    calls.push({ url, method, headers: init.headers as Record<string, string> | undefined, body });
     const handler = handlers[method];
     const resp = handler ? await handler(body, init) : {};
     return {
@@ -23,7 +40,7 @@ function makeFakeFetch(handlers) {
       },
     };
   };
-  return { fetch, calls };
+  return { fetch: fetchImpl as unknown as typeof globalThis.fetch, calls };
 }
 
 test("antigravity adapter sends projectEnvConfig.projectId, flat items[].text, resolved MODEL_PLACEHOLDER_*, and ForceStopCascadeTree", async () => {
@@ -34,7 +51,11 @@ test("antigravity adapter sends projectEnvConfig.projectId, flat items[].text, r
   );
 
   try {
-    let currentSummary = { status: "CASCADE_RUN_STATUS_RUNNING", stepCount: 2 };
+    let currentSummary: {
+      status: string;
+      stepCount?: number;
+      latestExecutorTerminationReason?: string;
+    } = { status: "CASCADE_RUN_STATUS_RUNNING", stepCount: 2 };
     const { fetch, calls } = makeFakeFetch({
       GetCascadeModelConfigData: () => ({
         clientModelConfigs: [
@@ -44,7 +65,7 @@ test("antigravity adapter sends projectEnvConfig.projectId, flat items[].text, r
       StartCascade: (b) => ({ cascadeId: b.cascadeId }),
       SendUserCascadeMessage: () => ({}),
       GetAllCascadeTrajectories: () => ({
-        trajectorySummaries: { [calls.find((c) => c.method === "StartCascade").body.cascadeId]: currentSummary },
+        trajectorySummaries: { [String(calls.find((c) => c.method === "StartCascade")?.body.cascadeId)]: currentSummary },
       }),
       GetCascadeTrajectorySteps: () => ({
         steps: [
@@ -77,15 +98,19 @@ test("antigravity adapter sends projectEnvConfig.projectId, flat items[].text, r
     assert.equal(started.accepted, true);
     assert.ok(!JSON.stringify(started).includes("csrf-test"), "csrfToken must never leak into locator");
 
-    const startCall = calls.find((c) => c.method === "StartCascade");
+    const startCall = calls.find((c) => c.method === "StartCascade")!;
     assert.equal(startCall.body.source, "CORTEX_TRAJECTORY_SOURCE_INTERACTIVE_CASCADE");
     assert.deepEqual(startCall.body.projectEnvConfig, { projectId: "proj-abc" });
-    assert.equal(startCall.headers["X-Codeium-Csrf-Token"], "csrf-test");
+    assert.equal(startCall.headers!["X-Codeium-Csrf-Token"], "csrf-test");
 
-    const sendCall = calls.find((c) => c.method === "SendUserCascadeMessage");
-    assert.deepEqual(sendCall.body.items, [{ text: "review diff" }]);
-    assert.equal(sendCall.body.items[0].chunk, undefined);
-    assert.equal(sendCall.body.cascadeConfig.plannerConfig.requestedModel.model, "MODEL_PLACEHOLDER_M777");
+    const sendCall = calls.find((c) => c.method === "SendUserCascadeMessage")!;
+    const sendBody = sendCall.body as {
+      items: Array<{ text: string; chunk?: unknown }>;
+      cascadeConfig: { plannerConfig: { requestedModel: { model: string } } };
+    };
+    assert.deepEqual(sendBody.items, [{ text: "review diff" }]);
+    assert.equal(sendBody.items[0].chunk, undefined);
+    assert.equal(sendBody.cascadeConfig.plannerConfig.requestedModel.model, "MODEL_PLACEHOLDER_M777");
 
     // Inspect status mappings
     const rProg = await adapter.inspect(started.locator);
@@ -140,7 +165,7 @@ test("antigravity adapter fails with ADAPTER_UNAVAILABLE when no alive hub descr
     const adapter = createAntigravityAdapter({ fetch, daemonDir: emptyDir });
     await assert.rejects(
       () => adapter.start({ task: { requestSummary: { prompt: "x" } } }),
-      (err) => isTaskError(err, TASK_ERROR.ADAPTER_UNAVAILABLE) && err.data?.reason === "no_alive_hub",
+      (err: AntigravityErrorLike) => isTaskError(err, TASK_ERROR.ADAPTER_UNAVAILABLE) && err.data?.reason === "no_alive_hub",
     );
 
     const missingAdapter = createAntigravityAdapter({
@@ -149,7 +174,8 @@ test("antigravity adapter fails with ADAPTER_UNAVAILABLE when no alive hub descr
     });
     await assert.rejects(
       () => missingAdapter.start({ task: { requestSummary: { prompt: "x" } } }),
-      (err) => isTaskError(err, TASK_ERROR.ADAPTER_UNAVAILABLE) && err.data?.reason === "daemon_dir_unreadable",
+      (err: AntigravityErrorLike) =>
+        isTaskError(err, TASK_ERROR.ADAPTER_UNAVAILABLE) && err.data?.reason === "daemon_dir_unreadable",
     );
   } finally {
     rmSync(emptyDir, { recursive: true, force: true });
@@ -163,13 +189,13 @@ test("antigravity adapter enforces redirect:error, timeout signal, response size
     JSON.stringify({ pid: process.pid, httpPort: 4035, lsVersion: "2.32.2", csrfToken: "csrf-secret" }),
   );
   try {
-    let seenInit = null;
+    let seenInit: RequestInit | null = null;
     const hugeAdapter = createAntigravityAdapter({
       daemonDir: dir,
       isPidAlive: () => true,
       maxResponseChars: 128,
       timeoutMs: 2_000,
-      fetch: async (_url, init) => {
+      fetch: (async (_url: string, init: RequestInit = {}) => {
         seenInit = init;
         return {
           ok: true,
@@ -178,33 +204,33 @@ test("antigravity adapter enforces redirect:error, timeout signal, response size
             return "x".repeat(256);
           },
         };
-      },
+      }) as unknown as typeof globalThis.fetch,
     });
     await assert.rejects(
       () => hugeAdapter.start({ task: { requestSummary: { prompt: "hi" } } }),
-      (err) =>
+      (err: AntigravityErrorLike) =>
         isTaskError(err, TASK_ERROR.ADAPTER_UNAVAILABLE) &&
         err.data?.reason === "response_too_large" &&
         !err.message.includes("4035") &&
         !err.message.includes("csrf-secret"),
     );
-    assert.equal(seenInit.redirect, "error");
-    assert.ok(seenInit.signal);
+    assert.equal((seenInit as RequestInit | null)?.redirect, "error");
+    assert.ok((seenInit as RequestInit | null)?.signal);
 
     const bodyErrAdapter = createAntigravityAdapter({
       daemonDir: dir,
       isPidAlive: () => true,
-      fetch: async () => ({
+      fetch: (async () => ({
         ok: true,
         status: 200,
         async text() {
           throw new Error("stream broken at http://127.0.0.1:4035/leak");
         },
-      }),
+      })) as unknown as typeof globalThis.fetch,
     });
     await assert.rejects(
       () => bodyErrAdapter.start({ task: { requestSummary: { prompt: "hi" } } }),
-      (err) =>
+      (err: AntigravityErrorLike) =>
         isTaskError(err, TASK_ERROR.ADAPTER_UNAVAILABLE) &&
         err.data?.reason === "body_read_error" &&
         !err.message.includes("4035") &&

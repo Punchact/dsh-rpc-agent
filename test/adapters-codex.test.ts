@@ -25,30 +25,114 @@ const fakeBinaryPath = (() => {
   writeFileSync(file, "#!/bin/sh\nexit 0\n");
   return file;
 })();
+interface SentRpcMessage {
+  jsonrpc?: string;
+  id?: number | string;
+  method?: string;
+  params?: {
+    threadId?: string;
+    clientInfo?: { name?: string };
+    [key: string]: unknown;
+  };
+}
+
+interface FakeChildProcess extends EventEmitter {
+  stdin: PassThrough;
+  stdout: PassThrough;
+  stderr: PassThrough;
+  kill(): boolean;
+}
+
+interface CodexFsOps {
+  readdirSync: (p?: string) => string[];
+  existsSync: (p: string) => boolean;
+  accessSync: (p?: string) => void;
+  statSync?: (p: string) => { isFile: () => boolean; size: number };
+}
+
+type CodexSpawnFn = (binPath?: string, args?: unknown, opts?: unknown) => FakeChildProcess;
+type CodexSpawnSyncFn = () => { status: number; stdout: string };
+
+interface CodexAdapterOptions {
+  spawn: CodexSpawnFn;
+  spawnSync: CodexSpawnSyncFn;
+  binary: string;
+  requestTimeoutMs?: number;
+  probeTimeoutMs?: number;
+}
+
+interface CodexEventRecord {
+  report: {
+    state: string;
+    resultValid?: boolean;
+    failureClass?: string;
+    observedMethod?: string;
+    item: { text?: string };
+  };
+}
+
+interface CodexAdapterView {
+  start(req: Record<string, unknown>): Promise<{
+    accepted: boolean;
+    locator: { threadId: string; turnId: string; version: string };
+  }>;
+  sendInput(locator: { threadId: string; turnId: string }, input: { text: string }): Promise<unknown>;
+  cancel(locator: { threadId: string; turnId: string }): Promise<unknown>;
+  events(
+    locator: { threadId: string; turnId: string },
+    cursor: number,
+  ): Promise<{
+    events: CodexEventRecord[];
+    nextCursor: number;
+    droppedEvents?: number;
+    protocolError?: string;
+    unknownMethods?: number;
+    droppedApprovals?: number;
+  }>;
+  decideApproval(
+    locator: { threadId: string; turnId: string },
+    decision: { approvalId: string; decision: string },
+  ): Promise<{ accepted: boolean }>;
+  probe(): Promise<{
+    ok: boolean;
+    handshake?: string;
+    version?: string;
+    reason?: string;
+    controls?: { start: boolean; events: boolean; approval: boolean };
+  }>;
+}
+
+const buildCodexAdapter = createCodexAdapter as unknown as (opts: CodexAdapterOptions) => CodexAdapterView;
+const resolveBinary = resolveCodexBinary as unknown as (opts: {
+  homedir: string;
+  fsOps: CodexFsOps;
+}) => { source: string; path: string };
+
 function makeFakeSpawn() {
-  const sentMessages = [];
-  let childRef = null;
+  const sentMessages: SentRpcMessage[] = [];
+  let childRef: FakeChildProcess | null = null;
   let holdReplies = false;
 
-  const spawn = () => {
+  const spawn: CodexSpawnFn = () => {
     const stdin = new PassThrough();
     const stdout = new PassThrough();
     const stderr = new PassThrough();
-    const child = new EventEmitter();
-    child.stdin = stdin;
-    child.stdout = stdout;
-    child.stderr = stderr;
-    child.kill = () => child.emit("exit", 0, null);
+    const child = Object.assign(new EventEmitter(), {
+      stdin,
+      stdout,
+      stderr,
+      kill: () => child.emit("exit", 0, null),
+    }) as FakeChildProcess;
     childRef = child;
 
     let buf = "";
-    stdin.on("data", (chunk) => {
+    stdin.on("data", (chunk: Buffer | string) => {
       buf += chunk.toString("utf8");
       const lines = buf.split("\n");
       buf = lines.pop() ?? "";
       for (const line of lines) {
         if (!line.trim()) continue;
-        const msg = JSON.parse(line);
+        const msg = JSON.parse(line) as SentRpcMessage;
         sentMessages.push(msg);
         if (holdReplies) continue;
 
@@ -73,13 +157,13 @@ function makeFakeSpawn() {
     spawn,
     sentMessages,
     getChild() {
-      return childRef;
+      return childRef!;
     },
-    setHoldReplies(v) {
+    setHoldReplies(v: boolean) {
       holdReplies = Boolean(v);
     },
-    emitServerLine(obj) {
-      childRef.stdout.write(`${JSON.stringify(obj)}\n`);
+    emitServerLine(obj: Record<string, unknown>) {
+      childRef!.stdout.write(`${JSON.stringify(obj)}\n`);
     },
   };
 }
@@ -88,7 +172,7 @@ test("resolveCodexBinary skips unreadable WindowsApps and falls back to .codex/.
   // Build the expected path with path.join so the assertion holds on every platform:
   // a literal Windows string silently stops matching when CI runs on Linux.
   const sandboxBin = join("C:\\Users\\Tester", ".codex", ".sandbox-bin", "codex.exe");
-  const res = resolveCodexBinary({
+  const res = resolveBinary({
     homedir: "C:\\Users\\Tester",
     fsOps: {
       readdirSync: () => {
@@ -103,7 +187,7 @@ test("resolveCodexBinary skips unreadable WindowsApps and falls back to .codex/.
 
   assert.throws(
     () =>
-      resolveCodexBinary({
+      resolveBinary({
         homedir: "C:\\Users\\Tester",
         fsOps: {
           readdirSync: () => [],
@@ -117,7 +201,7 @@ test("resolveCodexBinary skips unreadable WindowsApps and falls back to .codex/.
 
 test("codex adapter executes initialize -> initialized -> thread/start -> turn/start, maps turn/completed to ready, and emits turn/interrupt on cancel", async () => {
   const fake = makeFakeSpawn();
-  const adapter = createCodexAdapter({
+  const adapter = buildCodexAdapter({
     spawn: fake.spawn,
     spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0-alpha.5.1\n" }),
     binary: "C:\\fake\\codex.exe",
@@ -143,7 +227,7 @@ test("codex adapter executes initialize -> initialized -> thread/start -> turn/s
   await adapter.cancel(started.locator);
   assert.equal(fake.sentMessages[4].method, "turn/steer");
   assert.equal(fake.sentMessages[5].method, "turn/interrupt");
-  assert.equal(fake.sentMessages[5].params.threadId, "thr-1");
+  assert.equal(fake.sentMessages[5].params?.threadId, "thr-1");
 
   // Emit turn/completed notification and drain via events()
   fake.emitServerLine({
@@ -159,14 +243,14 @@ test("codex adapter executes initialize -> initialized -> thread/start -> turn/s
 });
 
 test("codex adapter ignores req/agent binary overrides and resolveCodexBinary skips 0-byte or non-file candidates", async () => {
-  const spawnPaths = [];
+  const spawnPaths: string[] = [];
   const fake = makeFakeSpawn();
-  const wrappedSpawn = (binPath, args, opts) => {
-    spawnPaths.push(binPath);
+  const wrappedSpawn: CodexSpawnFn = (binPath, args, opts) => {
+    if (binPath !== undefined) spawnPaths.push(binPath);
     return fake.spawn(binPath, args, opts);
   };
 
-  const adapter = createCodexAdapter({
+  const adapter = buildCodexAdapter({
     spawn: wrappedSpawn,
     spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
     binary: "C:\\trusted\\plugin-codex.exe",
@@ -183,7 +267,7 @@ test("codex adapter ignores req/agent binary overrides and resolveCodexBinary sk
   // 0-byte WindowsApps alias + directory must be skipped in favor of real sandbox binary (> 0 bytes)
   const zeroAlias = "C:\\Program Files\\WindowsApps\\OpenAI.Codex_1.0.0_x64__abc\\app\\resources\\codex.exe";
   const sandboxBin = join("C:\\Users\\Tester", ".codex", ".sandbox-bin", "codex.exe");
-  const resolved = resolveCodexBinary({
+  const resolved = resolveBinary({
     homedir: "C:\\Users\\Tester",
     fsOps: {
       readdirSync: () => ["OpenAI.Codex_1.0.0_x64__abc"],
@@ -199,7 +283,7 @@ test("codex adapter ignores req/agent binary overrides and resolveCodexBinary sk
   // Reject directory candidate even when size > 0
   assert.throws(
     () =>
-      resolveCodexBinary({
+      resolveBinary({
         homedir: "C:\\Users\\Tester",
         fsOps: {
           readdirSync: () => [],
@@ -214,7 +298,7 @@ test("codex adapter ignores req/agent binary overrides and resolveCodexBinary sk
 
 test("codex adapter enforces frame limit, non-object filtering, bounded event queue, and stderr drain", async () => {
   const fake = makeFakeSpawn();
-  const adapter = createCodexAdapter({
+  const adapter = buildCodexAdapter({
     spawn: fake.spawn,
     spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
     binary: "C:\\fake\\codex.exe",
@@ -274,7 +358,7 @@ test("codex adapter enforces strict frame validation, UTF-8 StringDecoder assemb
 
   for (const [badLine, expectedCode] of badCases) {
     const fake = makeFakeSpawn();
-    const adapter = createCodexAdapter({
+    const adapter = buildCodexAdapter({
       spawn: fake.spawn,
       spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
       binary: "C:\\fake\\codex.exe",
@@ -296,7 +380,7 @@ test("codex adapter enforces strict frame validation, UTF-8 StringDecoder assemb
   //    split UTF-8 multibyte character across chunks reassembles cleanly;
   //    pendingApprovals > 200 drops oldest and increments droppedApprovals.
   const fake = makeFakeSpawn();
-  const adapter = createCodexAdapter({
+  const adapter = buildCodexAdapter({
     spawn: fake.spawn,
     spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
     binary: "C:\\fake\\codex.exe",
@@ -322,7 +406,7 @@ test("codex adapter enforces strict frame validation, UTF-8 StringDecoder assemb
   const afterUtf8 = await adapter.events(started.locator, 0);
   assert.equal(afterUtf8.unknownMethods, 1);
   assert.equal(afterUtf8.protocolError, undefined);
-  const hanEvent = afterUtf8.events.find((e) => e.report.observedMethod === "item/agentMessage");
+  const hanEvent = afterUtf8.events.find((e) => e.report.observedMethod === "item/agentMessage")!;
   assert.equal(hanEvent.report.item.text, "汉");
 
   // Push MAX_PENDING_APPROVALS + 5 approval requests
@@ -351,7 +435,7 @@ test("probe only turns green after the app-server answers initialize", async () 
   // 0.9.2（复核 NOTES）：以前只看二进制在、--version 能跑就给六项全绿。现在必须真的握手，
   // 且 approval 不给绿——codex 的审批语义我们没在真机验过，能力卡要停在未证实。
   const fake = makeFakeSpawn();
-  const adapter = createCodexAdapter({
+  const adapter = buildCodexAdapter({
     spawn: fake.spawn,
     spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
     binary: fakeBinaryPath,
@@ -361,13 +445,13 @@ test("probe only turns green after the app-server answers initialize", async () 
   assert.equal(res.ok, true);
   assert.equal(res.handshake, "initialize");
   assert.equal(res.version, "codex-cli 0.166.0");
-  assert.equal(res.controls.start, true);
-  assert.equal(res.controls.events, true);
-  assert.equal(res.controls.approval, false, "no live evidence for codex approvals yet");
+  assert.equal(res.controls!.start, true);
+  assert.equal(res.controls!.events, true);
+  assert.equal(res.controls!.approval, false, "no live evidence for codex approvals yet");
 
   const initialized = fake.sentMessages.filter((msg) => msg.method === "initialize");
   assert.equal(initialized.length, 1, "a probe costs exactly one handshake");
-  assert.equal(initialized[0].params.clientInfo.name, "dsh-task-hub", "handshake identifies itself");
+  assert.equal(initialized[0].params!.clientInfo!.name, "dsh-task-hub", "handshake identifies itself");
   assert.equal(
     fake.sentMessages.some((msg) => msg.method === "thread/start" || msg.method === "turn/start"),
     false,
@@ -378,7 +462,7 @@ test("probe only turns green after the app-server answers initialize", async () 
 test("probe stays red when the app-server never answers", async () => {
   const fake = makeFakeSpawn();
   fake.setHoldReplies(true);
-  const adapter = createCodexAdapter({
+  const adapter = buildCodexAdapter({
     spawn: fake.spawn,
     spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
     binary: fakeBinaryPath,
@@ -392,9 +476,9 @@ test("probe stays red when the app-server never answers", async () => {
 });
 
 test("probe reports a spawn failure instead of claiming the executor is ready", async () => {
-  const adapter = createCodexAdapter({
+  const adapter = buildCodexAdapter({
     spawn: () => {
-      const error = new Error("spawn EPERM");
+      const error: Error & { code?: string } = new Error("spawn EPERM");
       error.code = "EPERM";
       throw error;
     },
