@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Verify that every file under `test/**/*.mjs` (including `test/helpers/**`) imports
+// Verify that every file under `test/**/*.ts` (including `test/helpers/**`) imports
 // built artifacts under `dist/` rather than pointing back to unbuilt source paths
 // (`../lib/`, `../bin/`, `../index.mjs`, `../client.js`, `../http-client.mjs`).
 
@@ -26,7 +26,7 @@ function walkMjs(absDir: string, relPrefix = ""): DiscoveredTestFile[] {
     const full = join(absDir, entry.name);
     if (entry.isDirectory()) {
       results.push(...walkMjs(full, rel));
-    } else if (entry.isFile() && entry.name.endsWith(".mjs")) {
+    } else if (entry.isFile() && entry.name.endsWith(".ts")) {
       results.push({ rel: posix.join("test", rel), full });
     }
   }

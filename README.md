@@ -776,7 +776,7 @@ npm run verify                 # 构建 + 入口一致性 + npm test + check:pac
 ```powershell
 cd dsh-rpc-plugin
 npm test                       # 47 个测试文件，共 434 例，另有 catalog smoke；无需运行中的 Harness
-node test/host.test.mjs        # 1 例：真实 WebServer 集成（需先 npm ci）
+node test/host.test.ts        # 1 例：真实 WebServer 集成（需先 npm ci）
 node test/e2e.mjs              # 14 例：端到端，打真实 Harness（--cwd 只接受绝对路径）
 node test/edge.mjs             # 24 例：协议/边界对抗，打真实 Harness
 ```
@@ -793,7 +793,7 @@ npm run check:surface   # 代码接口面 vs docs/api-surface.json（方案快�
 npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案文档，可用 PLAN_DOC 指路径；新增 implementationOnly 条目要加 --accept-new）
 ```
 
-`check:docs` 的计数口径是「能从代码算的现算」：RPC 方法数取 `lib/methods.mjs` 的目录、MCP 工具数取 `bin/dsh-rpc-mcp.mjs` 的两张表、测试文件数取 `package.json` 里 `test` 链上的 `node test/*.test.mjs`；只有用例总数要整跑才知道，记在 `docs/counts.json` 里当唯一来源。
+`check:docs` 的计数口径是「能从代码算的现算」：RPC 方法数取 `lib/methods.mjs` 的目录、MCP 工具数取 `bin/dsh-rpc-mcp.mjs` 的两张表、测试文件数取 `package.json` 里 `test` 链上的 `node test/*.test.ts`；只有用例总数要整跑才知道，记在 `docs/counts.json` 里当唯一来源。
 
 `check:surface` 查两个方向：方案写了的接口必须真实存在；代码里任务族/代理族的新接口必须要么在方案里、要么在快照的 `implementationOnly` 里如实记着。0.9.0 就是靠这一类对账才发现「方案写了 `dsh.tasks.resolve`、实现漏了」。
 
@@ -864,7 +864,7 @@ npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案
 - **边界**检查协议层：batch、通知、id 形态、鉴权头、超大 body（应得真正的 413 而不是断连）、参数注入防护、超时钳制、并发 ask、`limit` 语义。
 - **端口漂移**（手工）：把 `endpoint.json` 的 url 改成死端口再跑 `dsh-rpc ping`，应得退出码 3 与含 `nothing is listening`、`pid`、`health --wait` 的可读报错。
 
-本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 47 个测试文件 **434/434** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.mjs` 输出 `methods: 34` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
+本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 47 个测试文件 **434/434** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.ts` 输出 `methods: 34` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
 
 ## 许可证
 
