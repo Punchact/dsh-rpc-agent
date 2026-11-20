@@ -92,7 +92,7 @@ Or say it inside DSH:
 plugin_manager({ action: "install_bundle", target: "@punchact/dsh-rpc-agent" })
 ```
 
-For a non-default profile add `--profile <name>`; pin a version by writing `@punchact/dsh-rpc-agent@0.9.4` (omitting it means `latest`). The latest published release on npm is [`0.9.3`](https://www.npmjs.com/package/@punchact/dsh-rpc-agent); this file describes **the code in the repository (`0.9.3`)**, and differences are listed at the top of the [CHANGELOG](./CHANGELOG.md).
+For a non-default profile add `--profile <name>`; pin a version by writing `@punchact/dsh-rpc-agent@0.9.4` (omitting it means `latest`). The latest published release on npm is [`0.9.4`](https://www.npmjs.com/package/@punchact/dsh-rpc-agent); this file describes **the code in the repository (`0.9.5`, locked internally and not published yet)**, and differences are listed at the top of the [CHANGELOG](./CHANGELOG.md).
 
 Three things that bite on the npm route:
 
