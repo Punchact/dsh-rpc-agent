@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import ts from "typescript";
 
@@ -12,15 +13,45 @@ import { reconcileTask } from "../dist/lib/tasks/reconcile.mjs";
 import { transition } from "../dist/lib/tasks/state-machine.mjs";
 import { openStore } from "../dist/lib/tasks/store.mjs";
 
+interface SeedEntitiesInput {
+  principal?: { principalId: string; kind?: string; scopes?: string[] };
+  workspace?: { workspaceId: string; rootPath: string };
+  agent?: { agentId: string; adapterKind: string; capabilities?: Record<string, unknown> };
+  capabilityRevision?: { revisionId: string; capability: string };
+}
+
+interface TaskEvent {
+  type: string;
+  evidence?: { observedState?: string; note?: string };
+}
+
+const seedEntities = seedBaselineEntities as unknown as (
+  store: ReturnType<typeof openStore>,
+  entities: SeedEntitiesInput,
+) => Promise<void>;
+
+const buildRpcMethods = createMethods as unknown as (
+  deps: {
+    sessionController: Record<string, unknown>;
+    webServer: { getOrigin: () => string };
+    taskStore: ReturnType<typeof openStore>;
+    taskEngine: ReturnType<typeof createTaskEngine>;
+    agentProbes: Record<string, Record<string, () => Promise<boolean>>>;
+  },
+  config: ReturnType<typeof resolveConfig>,
+  extra: { get: () => undefined },
+  extra2: Record<string, unknown>,
+) => ReturnType<typeof createMethods>;
+
 async function setup() {
   const store = openStore({ path: ":memory:" });
-  await seedBaselineEntities(store, {
+  await seedEntities(store, {
     principal: { principalId: "local-operator" },
     workspace: { workspaceId: "ws-1", rootPath: "C:\\ws-1" },
     agent: { agentId: "ag-no-cancel", adapterKind: "legacy", capabilities: { cancel: "unsupported" } },
     capabilityRevision: { revisionId: "cap-1", capability: "review.diff@1" },
   });
-  await seedBaselineEntities(store, {
+  await seedEntities(store, {
     agent: { agentId: "ag-cancel", adapterKind: "antigravity", capabilities: { cancel: "supported" } },
   });
   return { store, engine: createTaskEngine(store) };
@@ -72,17 +103,17 @@ test("reconcileTask closes stale active attempt on needs_reconcile -> cancelled 
     assert.equal(reconciled.attemptsClosed, 1);
     assert.equal(reconciled.event.type, "reconcile.applied");
 
-    const attemptRow = store.read((db) =>
+    const attemptRow = store.read((db: DatabaseSync) =>
       db.prepare("SELECT status, side_effect_active FROM attempts WHERE attempt_id = ?").get(att.attemptId),
-    );
+    ) as { status: string; side_effect_active: number };
     assert.equal(attemptRow.side_effect_active, 0);
     assert.equal(attemptRow.status, "cancelled");
 
     const evts = await engine.events({ taskId: t.taskId, afterSeq: 0 });
-    const recEvt = evts.events.find((e) => e.type === "reconcile.applied");
+    const recEvt = (evts.events as TaskEvent[]).find((e) => e.type === "reconcile.applied");
     assert.ok(recEvt, "reconcile.applied event must be recorded");
-    assert.equal(recEvt.evidence.observedState, "cancelled");
-    assert.equal(recEvt.evidence.note, "verified child process exited");
+    assert.equal(recEvt.evidence?.observedState, "cancelled");
+    assert.equal(recEvt.evidence?.note, "verified child process exited");
   } finally {
     store.close();
   }
@@ -105,7 +136,7 @@ test("clearing side_effect_active on a needs_reconcile task unblocks resolve(req
       to: "needs_reconcile",
       reason: "dispatch receipt missing",
     });
-    await store.withWriteTx((db) => {
+    await store.withWriteTx((db: DatabaseSync) => {
       db.prepare("UPDATE attempts SET side_effect_active = 0, status = 'aborted' WHERE attempt_id = ?").run(
         att1.attemptId,
       );
@@ -182,13 +213,13 @@ test("RPC wiring covers dsh.agents.{register,list,probe}, dsh.tasks.{preview,rec
 
   const store = openStore({ path: ":memory:" });
   try {
-    await seedBaselineEntities(store, {
+    await seedEntities(store, {
       principal: { principalId: "local-operator" },
       workspace: { workspaceId: "ws-lab", rootPath: "C:\\ws-lab" },
       capabilityRevision: { revisionId: "cap-review-1", capability: "review.diff@1" },
     });
     const engine = createTaskEngine(store);
-    const methods = createMethods(
+    const methods = buildRpcMethods(
       {
         sessionController: {},
         webServer: { getOrigin: () => "http://127.0.0.1:0" },

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
+import type { DatabaseSync } from "node:sqlite";
 
 import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
 import { seedBaselineEntities } from "../dist/lib/tasks/engine.mjs";
@@ -14,9 +15,28 @@ import {
 } from "../dist/lib/tasks/state-machine.mjs";
 import { openStore } from "../dist/lib/tasks/store.mjs";
 
+interface SeedEntitiesInput {
+  principal?: { principalId: string; kind?: string; scopes?: string[] };
+  workspace?: { workspaceId: string; rootPath: string };
+  agent?: { agentId: string; adapterKind: string };
+  capabilityRevision?: { revisionId: string; capability: string };
+}
+
+interface TaskStatusRow {
+  status: string;
+  state_version: number;
+}
+
+const seedEntities = seedBaselineEntities as unknown as (
+  store: ReturnType<typeof openStore>,
+  entities: SeedEntitiesInput,
+) => Promise<void>;
+
+const ALLOWED_MAP = ALLOWED_TRANSITIONS as unknown as Record<string, readonly string[]>;
+
 async function createSeededStoreWithTask(initialStatus = "queued") {
   const store = openStore({ path: ":memory:" });
-  await seedBaselineEntities(store, {
+  await seedEntities(store, {
     principal: { principalId: "p-1" },
     workspace: { workspaceId: "ws-1", rootPath: "C:\\ws" },
     agent: { agentId: "ag-1", adapterKind: "dsh" },
@@ -24,7 +44,7 @@ async function createSeededStoreWithTask(initialStatus = "queued") {
   });
   const taskId = `task_${randomUUID()}`;
   const now = new Date().toISOString();
-  await store.withWriteTx((db) => {
+  await store.withWriteTx((db: DatabaseSync) => {
     db.prepare(
       `INSERT INTO tasks (
          task_id, principal_id, idempotency_key, request_hash,
@@ -40,17 +60,17 @@ test("ALLOWED_TRANSITIONS is frozen and matches all 11 states", () => {
   assert.equal(TASK_STATES.length, 11);
   assert.ok(Object.isFrozen(ALLOWED_TRANSITIONS));
   for (const state of TASK_STATES) {
-    assert.ok(Array.isArray(ALLOWED_TRANSITIONS[state]));
-    assert.ok(Object.isFrozen(ALLOWED_TRANSITIONS[state]));
+    assert.ok(Array.isArray(ALLOWED_MAP[state]));
+    assert.ok(Object.isFrozen(ALLOWED_MAP[state]));
   }
   for (const terminal of TERMINAL_STATES) {
-    assert.deepEqual(ALLOWED_TRANSITIONS[terminal], []);
+    assert.deepEqual(ALLOWED_MAP[terminal], []);
   }
 });
 
 test("every legal transition succeeds, increments state_version, and records an event", async () => {
   for (const from of TASK_STATES) {
-    for (const to of ALLOWED_TRANSITIONS[from]) {
+    for (const to of ALLOWED_MAP[from]) {
       assert.equal(canTransition(from, to), true);
       const { store, taskId } = await createSeededStoreWithTask(from);
       try {
@@ -65,7 +85,9 @@ test("every legal transition succeeds, increments state_version, and records an 
         assert.equal(res.stateVersion, 2);
         assert.equal(res.event.seq, 1);
 
-        const row = store.read((db) => db.prepare("SELECT status, state_version FROM tasks WHERE task_id = ?").get(taskId));
+        const row = store.read((db: DatabaseSync) =>
+          db.prepare("SELECT status, state_version FROM tasks WHERE task_id = ?").get(taskId),
+        ) as TaskStatusRow;
         assert.equal(row.status, to);
         assert.equal(row.state_version, 2);
       } finally {
@@ -76,7 +98,7 @@ test("every legal transition succeeds, increments state_version, and records an 
 });
 
 test("illegal transitions reject with STATE_CONFLICT", async () => {
-  const illegalPairs = [
+  const illegalPairs: Array<[string, string]> = [
     ["queued", "running"],
     ["queued", "succeeded"],
     ["queued", "review_pending"],
@@ -96,7 +118,9 @@ test("illegal transitions reject with STATE_CONFLICT", async () => {
         () => transition(store, { taskId, expectedStateVersion: 1, to }),
         (err) => isTaskError(err, TASK_ERROR.STATE_CONFLICT),
       );
-      const row = store.read((db) => db.prepare("SELECT status, state_version FROM tasks WHERE task_id = ?").get(taskId));
+      const row = store.read((db: DatabaseSync) =>
+        db.prepare("SELECT status, state_version FROM tasks WHERE task_id = ?").get(taskId),
+      ) as TaskStatusRow;
       assert.equal(row.status, from);
       assert.equal(row.state_version, 1);
     } finally {
@@ -111,7 +135,9 @@ test("optimistic lock rejects stale expectedStateVersion with STATE_CONFLICT", a
     await transition(store, { taskId, expectedStateVersion: 1, to: "dispatching" });
     await assert.rejects(
       () => transition(store, { taskId, expectedStateVersion: 1, to: "running" }),
-      (err) => isTaskError(err, TASK_ERROR.STATE_CONFLICT) && err.data?.actualStateVersion === 2,
+      (err: unknown) =>
+        isTaskError(err, TASK_ERROR.STATE_CONFLICT) &&
+        (err as { data?: { actualStateVersion?: number } }).data?.actualStateVersion === 2,
     );
   } finally {
     store.close();
@@ -137,7 +163,9 @@ test("terminal states reject all transitions and only allow appending events", a
       });
       assert.equal(evt.seq, 1);
 
-      const row = store.read((db) => db.prepare("SELECT status, state_version FROM tasks WHERE task_id = ?").get(taskId));
+      const row = store.read((db: DatabaseSync) =>
+        db.prepare("SELECT status, state_version FROM tasks WHERE task_id = ?").get(taskId),
+      ) as TaskStatusRow;
       assert.equal(row.status, terminal);
       assert.equal(row.state_version, 1);
     } finally {
