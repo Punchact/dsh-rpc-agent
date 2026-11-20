@@ -257,7 +257,7 @@ test("budgets enforce maxLines and maxChars across every level and never raise l
     endedAt: 1050,
   }));
 
-  const expectations = [
+  const expectations: Array<[string, number, number]> = [
     ["none", 0, 0],
     ["errors", 4, 600],
     ["summary", 20, 1200],
@@ -291,9 +291,10 @@ test("since filters lines and structured while keeping whole-turn total and erro
   const fullRes = describeTrace(tools, { level: "full", since: 4 });
   assert.equal(fullRes.total, 3);
   assert.equal(fullRes.errors, 1);
-  assert.equal(fullRes.structured.length, 1);
-  assert.equal(fullRes.structured[0].callId, "c3");
-  assert.equal(fullRes.structured[0].index, 2);
+  const structured = fullRes.structured!;
+  assert.equal(structured.length, 1);
+  assert.equal(structured[0].callId, "c3");
+  assert.equal(structured[0].index, 2);
 
   // errors level does not re-emit pre-cursor errors when delta has none
   const errRes = describeTrace(tools, { level: "errors", since: 4 });
@@ -302,19 +303,26 @@ test("since filters lines and structured while keeping whole-turn total and erro
   assert.deepEqual(errRes.lines, []);
 });
 
+interface ResolvedTraceConfig {
+  traceDefault: string;
+  traceDefaultRequested?: string;
+}
+
+const resolveTraceConfig = resolveConfig as (input: Record<string, unknown>) => ReturnType<typeof resolveConfig> & ResolvedTraceConfig;
+
 test("config resolves and describes traceDefault with traceDefaultRequested for unknown input", () => {
-  const def = resolveConfig({});
+  const def = resolveTraceConfig({});
   assert.equal(def.traceDefault, "errors");
   assert.equal(def.traceDefaultRequested, undefined);
   assert.equal(describeConfig(def).traceDefault, "errors");
   assert.equal("traceDefaultRequested" in describeConfig(def), false);
 
-  const valid = resolveConfig({ traceDefault: "  SUMMARY " });
+  const valid = resolveTraceConfig({ traceDefault: "  SUMMARY " });
   assert.equal(valid.traceDefault, "summary");
   assert.equal(valid.traceDefaultRequested, undefined);
   assert.equal(describeConfig(valid).traceDefault, "summary");
 
-  const invalid = resolveConfig({ traceDefault: "verbose" });
+  const invalid = resolveTraceConfig({ traceDefault: "verbose" });
   assert.equal(invalid.traceDefault, "errors");
   assert.equal(invalid.traceDefaultRequested, "verbose");
   assert.equal(describeConfig(invalid).traceDefault, "errors");

@@ -54,23 +54,29 @@ test("openStore creates all §5.1 tables, enables WAL and foreign_keys, and writ
   const dbPath = join(dir, "tasks.db");
   const store = openStore({ path: dbPath });
   try {
-    const tables = store.read((db) =>
+    const tables = store.read((db: DatabaseSync) =>
       db
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
         .all()
-        .map((r) => r.name),
+        .map((r) => (r as { name: string }).name),
     );
     for (const name of EXPECTED_TABLES) {
       assert.ok(tables.includes(name), `missing table: ${name}`);
     }
 
-    const journal = store.read((db) => db.prepare("PRAGMA journal_mode").get());
+    const journal = store.read((db: DatabaseSync) => db.prepare("PRAGMA journal_mode").get()) as {
+      journal_mode: string;
+    };
     assert.equal(String(journal.journal_mode).toLowerCase(), "wal");
 
-    const fk = store.read((db) => db.prepare("PRAGMA foreign_keys").get());
+    const fk = store.read((db: DatabaseSync) => db.prepare("PRAGMA foreign_keys").get()) as {
+      foreign_keys: number;
+    };
     assert.equal(fk.foreign_keys, 1);
 
-    const meta = store.read((db) => db.prepare("SELECT version FROM schema_meta LIMIT 1").get());
+    const meta = store.read((db: DatabaseSync) => db.prepare("SELECT version FROM schema_meta LIMIT 1").get()) as {
+      version: number;
+    };
     assert.equal(meta.version, SCHEMA_VERSION);
   } finally {
     store.close();
@@ -85,7 +91,7 @@ test("foreign_keys=ON rejects orphan tasks and readonly store refuses writes", a
   try {
     await assert.rejects(
       () =>
-        store.withWriteTx((db) => {
+        store.withWriteTx((db: DatabaseSync) => {
           db.prepare(
             `INSERT INTO tasks (
                task_id, principal_id, idempotency_key, request_hash,
@@ -101,7 +107,9 @@ test("foreign_keys=ON rejects orphan tasks and readonly store refuses writes", a
 
   const ro = openStore({ path: dbPath, readonly: true });
   try {
-    const meta = ro.read((db) => db.prepare("SELECT version FROM schema_meta").get());
+    const meta = ro.read((db: DatabaseSync) => db.prepare("SELECT version FROM schema_meta").get()) as {
+      version: number;
+    };
     assert.equal(meta.version, SCHEMA_VERSION);
     await assert.rejects(
       () => ro.withWriteTx(() => {}),
@@ -119,7 +127,7 @@ test("withWriteTx rolls back all changes when callback throws", async () => {
     const now = new Date().toISOString();
     await assert.rejects(
       () =>
-        store.withWriteTx((db) => {
+        store.withWriteTx((db: DatabaseSync) => {
           db.prepare(
             `INSERT INTO principals (principal_id, kind, scopes_json, created_at, updated_at)
              VALUES ('p-rollback', 'operator', '[]', ?, ?)`,
@@ -129,7 +137,7 @@ test("withWriteTx rolls back all changes when callback throws", async () => {
       /boom inside tx/,
     );
 
-    const row = store.read((db) =>
+    const row = store.read((db: DatabaseSync) =>
       db.prepare("SELECT * FROM principals WHERE principal_id = 'p-rollback'").get(),
     );
     assert.equal(row, undefined);
@@ -159,14 +167,14 @@ test("withWriteTx retries on SQLITE_BUSY across concurrent connections and seria
     }, 45);
 
     const res = await Promise.all([
-      storeA.withWriteTx((db) => {
+      storeA.withWriteTx((db: DatabaseSync) => {
         db.prepare(
           `INSERT INTO principals (principal_id, kind, scopes_json, created_at, updated_at)
            VALUES ('p-1', 'operator', '[]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
         ).run();
         return "w1";
       }),
-      storeA.withWriteTx((db) => {
+      storeA.withWriteTx((db: DatabaseSync) => {
         db.prepare(
           `INSERT INTO principals (principal_id, kind, scopes_json, created_at, updated_at)
            VALUES ('p-2', 'operator', '[]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
@@ -176,7 +184,9 @@ test("withWriteTx retries on SQLITE_BUSY across concurrent connections and seria
     ]);
 
     assert.deepEqual(res, ["w1", "w2"]);
-    const count = storeA.read((db) => db.prepare("SELECT COUNT(*) AS cnt FROM principals").get());
+    const count = storeA.read((db: DatabaseSync) => db.prepare("SELECT COUNT(*) AS cnt FROM principals").get()) as {
+      cnt: number;
+    };
     assert.equal(count.cnt, 3);
   } finally {
     try {
@@ -200,7 +210,10 @@ test("TABLE_NAMES covers all 15 tables, primaryKeyForTable matches SQLite schema
       assert.equal(isTableName(table), true);
       assert.equal(assertTableName(table), table);
       const pk = primaryKeyForTable(table);
-      const cols = store.read((db) => db.prepare(`PRAGMA table_info(${table})`).all());
+      const cols = store.read((db: DatabaseSync) => db.prepare(`PRAGMA table_info(${table})`).all()) as Array<{
+        pk: number;
+        name: string;
+      }>;
       const pkCols = cols.filter((c) => c.pk === 1).map((c) => c.name);
       assert.deepEqual(pkCols, [pk], `primary key mismatch for table ${table}`);
     }
@@ -221,7 +234,7 @@ test("rowTo* mappers convert snake_case rows across all 15 tables to camelCase p
   const store = openStore({ path: ":memory:" });
   const now = "2026-11-19T12:00:00.000Z";
   try {
-    await store.withWriteTx((db) => {
+    await store.withWriteTx((db: DatabaseSync) => {
       db.prepare(
         `INSERT INTO principals (principal_id, kind, scopes_json, created_at, updated_at)
          VALUES ('p1', 'operator', '["task:submit"]', ?, ?)`,
@@ -280,7 +293,7 @@ test("rowTo* mappers convert snake_case rows across all 15 tables to camelCase p
       ).run(now);
     });
 
-    const mapped = store.read((db) => ({
+    const mapped = store.read((db: DatabaseSync) => ({
       meta: rowToSchemaMeta(db.prepare("SELECT * FROM schema_meta LIMIT 1").get()),
       principal: rowToPrincipal(db.prepare("SELECT * FROM principals WHERE principal_id = 'p1'").get()),
       workspace: rowToWorkspace(db.prepare("SELECT * FROM workspaces WHERE workspace_id = 'w1'").get()),
