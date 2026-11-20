@@ -36,6 +36,8 @@ interface FakeChild extends EventEmitter {
 function makeFakeSpawn() {
   const sent: SentMessage[] = [];
   let failResume = false;
+  let turnCounter = 0;
+  let lastChild: FakeChild | null = null;
 
   const spawn = () => {
     const stdin = new PassThrough();
@@ -67,17 +69,25 @@ function makeFakeSpawn() {
         } else if (msg.method === "thread/start") {
           stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { thread: { id: "thr-new" } } })}\n`);
         } else if (msg.method === "turn/start") {
-          stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: "turn-1", status: "inProgress" } } })}\n`);
+          turnCounter += 1;
+          const turnId = `turn-${turnCounter}`;
+          stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: turnId, status: "inProgress" } } })}\n`);
         }
       }
     });
 
+    lastChild = child;
     return child;
   };
 
   return {
     spawn,
     sent,
+    /** Push a server notification as if the app-server had just sent it. */
+    notify(method: string, params: Record<string, unknown>) {
+      if (!lastChild) throw new Error("no child spawned yet");
+      lastChild.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
+    },
     setFailResume(value: boolean) {
       failResume = Boolean(value);
     },
@@ -182,6 +192,44 @@ test("a second turn on the same adapter reuses the live app-server", async () =>
     ["initialize", "initialized", "thread/start", "turn/start", "turn/start"],
     "the live session is reused instead of spawning a second process beside it",
   );
+});
+
+test("a reused session does not answer the new turn with the old turn's completion", async () => {
+  const stickyFile = tempSticky();
+  const fake = makeFakeSpawn();
+  const adapter = build(fake, stickyFile);
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 15));
+
+  const first = await adapter.start(request());
+  fake.notify("turn/completed", {
+    turn: { id: first.locator.turnId, status: "completed", items: [{ type: "agentMessage", text: "FIRST" }] },
+  });
+  await tick();
+  const firstReport = (await adapter.inspect({ locator: first.locator })) as { state: string };
+  assert.equal(firstReport.state, "ready", "the first turn's completion answers the first task");
+
+  const second = await adapter.start(request());
+  assert.equal(second.locator.threadId, first.locator.threadId, "the thread is reused");
+  const secondReport = (await adapter.inspect({ locator: second.locator })) as { state: string };
+  assert.equal(
+    secondReport.state,
+    "progress",
+    "the previous turn's completion must not answer the new task",
+  );
+
+  const replay = (await adapter.events(second.locator, 0)) as { events: Array<{ report?: { state?: string } }> };
+  assert.equal(
+    replay.events.filter((event) => event.report?.state === "ready").length,
+    0,
+    "replaying from 0 must not hand out an earlier turn's completion",
+  );
+
+  fake.notify("turn/completed", {
+    turn: { id: second.locator.turnId, status: "completed", items: [{ type: "agentMessage", text: "SECOND" }] },
+  });
+  await tick();
+  const finalReport = (await adapter.inspect({ locator: second.locator })) as { state: string };
+  assert.equal(finalReport.state, "ready", "the new turn's own completion still answers");
 });
 
 test("dispose releases the threads the adapter was holding", async () => {

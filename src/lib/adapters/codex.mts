@@ -122,6 +122,14 @@ interface CodexSession {
   threadId: string | null;
   readonly turnId: string | null;
   eventQueue: AdapterEventEntry[];
+  /**
+   * Absolute cursor of the first event that belongs to the turn now running.
+   *
+   * A reused session still holds the previous turn's events, and its `turn/completed` is a
+   * `ready` report — reporting it again would hand the new task the old turn's result in
+   * milliseconds. Everything before this cursor is another turn's history.
+   */
+  turnFloor: number;
   pendingApprovals: Map<string, PendingApproval>;
   droppedEvents: number;
   droppedApprovals: number;
@@ -159,10 +167,14 @@ async function beginTurnOn(
     summary.input?.text ??
     JSON.stringify(summary.input ?? {});
 
+  // Captured before the request so anything queued while it is in flight belongs to this turn;
+  // the cursor is absolute, because a trimmed queue shifts the index space.
+  const floorCursor = session.droppedEvents + session.eventQueue.length;
   const turnResp = await session.sendRequest("turn/start", {
     threadId,
     input: [{ type: "text", text: String(promptText) }],
   });
+  session.turnFloor = floorCursor;
   const turnId = turnResp?.turn?.id ?? turnResp?.turnId ?? null;
   if (turnId) {
     session.pushEvent({
@@ -414,6 +426,7 @@ export function createCodexAdapter({
         return latestTurnId;
       },
       eventQueue,
+      turnFloor: 0,
       pendingApprovals: new Map(),
       droppedEvents: 0,
       droppedApprovals: 0,
@@ -947,8 +960,12 @@ export function createCodexAdapter({
           evidence: { threadId },
         });
       }
-      if (session.eventQueue.length > 0) {
-        return session.eventQueue[session.eventQueue.length - 1].report!;
+      // Only this turn's events may answer for this task; the previous turn's completion is
+      // still in the queue when a live session is reused.
+      const fromFloor = Math.max(0, session.turnFloor - session.droppedEvents);
+      const own = session.eventQueue.slice(fromFloor);
+      if (own.length > 0) {
+        return own[own.length - 1].report!;
       }
       return reportOf("progress", {
         observedStatus: "inProgress",
@@ -1019,7 +1036,10 @@ export function createCodexAdapter({
         return { events: [], nextCursor: cursor, droppedEvents: 0, droppedApprovals: 0 };
       }
       const rawCursor = Number.isInteger(cursor) && cursor >= 0 ? cursor : 0;
-      const offset = Math.max(0, rawCursor - session.droppedEvents);
+      // A fresh attempt asks from 0, but a reused session still holds earlier turns; replaying
+      // them would let the previous `turn/completed` answer for this task.
+      const cursorAtLeastFloor = Math.max(rawCursor, session.turnFloor);
+      const offset = Math.max(0, cursorAtLeastFloor - session.droppedEvents);
       const sliced = session.eventQueue.slice(offset);
       return {
         events: sliced,
