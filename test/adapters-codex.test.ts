@@ -208,7 +208,7 @@ test("codex adapter executes initialize -> initialized -> thread/start -> turn/s
   const adapter = buildCodexAdapter({
     spawn: fake.spawn,
     spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0-alpha.5.1\n" }),
-    binary: "C:\\fake\\codex.exe",
+    binary: fakeBinaryPath,
     // No `turn/completed` is emitted in this test, so the cancel must report an
     // unconfirmed stop quickly rather than block the dispatcher.
     interruptConfirmMs: 40,
@@ -256,7 +256,7 @@ test("codex adapter confirms a cancel only after the server reports the turn as 
   const adapter = buildCodexAdapter({
     spawn: fake.spawn,
     spawnSync: () => ({ status: 0, stdout: "codex-cli 0.169.1\n" }),
-    binary: "C:\\fake\\codex.exe",
+    binary: fakeBinaryPath,
     interruptConfirmMs: 2_000,
   });
 
@@ -337,7 +337,7 @@ test("codex adapter enforces frame limit, non-object filtering, bounded event qu
   const adapter = buildCodexAdapter({
     spawn: fake.spawn,
     spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
-    binary: "C:\\fake\\codex.exe",
+    binary: fakeBinaryPath,
     requestTimeoutMs: 2_000,
   });
 
@@ -397,7 +397,7 @@ test("codex adapter enforces strict frame validation, UTF-8 StringDecoder assemb
     const adapter = buildCodexAdapter({
       spawn: fake.spawn,
       spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
-      binary: "C:\\fake\\codex.exe",
+      binary: fakeBinaryPath,
     });
     const started = await adapter.start({
       task: { taskId: `t-bad-${expectedCode}`, requestSummary: { prompt: "hi" } },
@@ -419,7 +419,7 @@ test("codex adapter enforces strict frame validation, UTF-8 StringDecoder assemb
   const adapter = buildCodexAdapter({
     spawn: fake.spawn,
     spawnSync: () => ({ status: 0, stdout: "codex-cli 0.166.0\n" }),
-    binary: "C:\\fake\\codex.exe",
+    binary: fakeBinaryPath,
   });
   const started = await adapter.start({
     task: { taskId: "t-utf8-apr", requestSummary: { prompt: "hi" } },
@@ -503,7 +503,7 @@ test("a configured serviceName replaces the desktop default on the wire", async 
   const adapter = buildCodexAdapter({
     spawn: fake.spawn,
     spawnSync: () => ({ status: 0, stdout: "codex-cli 0.169.1\n" }),
-    binary: "C:\\fake\\codex.exe",
+    binary: fakeBinaryPath,
     serviceName: "dsh-task-hub",
   });
   const probed = (await adapter.probe()) as { ok?: boolean };
