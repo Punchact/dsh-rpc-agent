@@ -31,7 +31,74 @@ import {
 } from "../dist/lib/owned.mjs";
 import { createStats } from "../dist/lib/stats.mjs";
 
-const exec = (sessionId, args = {}, extra = {}) => ({
+interface ToolExecContext {
+  agent?: { session?: { id?: string } };
+  name: string;
+  callId?: string;
+  arguments: Record<string, unknown>;
+}
+
+interface GateDecision {
+  kind: string;
+  reason?: string;
+  info?: { name?: string; code?: string };
+}
+
+interface DenialEvent {
+  sessionId: string;
+  toolName: string;
+  callId: string;
+  escalation: string;
+}
+
+interface ApprovalGateOptions {
+  mode?: string;
+  isOwned?: (id: string) => boolean;
+  onDeny?: (decision: DenialEvent) => void;
+  log?: { info: (line: string) => void };
+  store?: {
+    open(): { approvalId: string; promise: Promise<{ decision: string }> };
+    cancelAll?: () => void;
+    resolve?: (decision: { decision: string }) => void;
+    answer?: (decision: { decision: string }) => void;
+  };
+  state?: Map<unknown, unknown>;
+  currentPreset?: () => string;
+  applyPreset?: (id: string, value: string) => Promise<void>;
+}
+
+interface ApprovalGateView {
+  pre(execCtx: ToolExecContext, next: () => Promise<GateDecision>): Promise<GateDecision>;
+  dispose(): Promise<void>;
+}
+
+interface ProbeWaterfallContext {
+  on(
+    name: string,
+    handler: (execCtx: ToolExecContext, next: () => Promise<GateDecision>) => Promise<GateDecision>,
+    opts?: { prepend?: boolean },
+  ): void;
+  waterfall(
+    ctx: unknown,
+    name: string,
+    execCtx: ToolExecContext,
+    next: () => Promise<GateDecision>,
+  ): Promise<GateDecision>;
+}
+
+const buildApprovalGate = createApprovalGate as unknown as (opts?: ApprovalGateOptions) => ApprovalGateView | null;
+const buildApprovalsMethods = createMethods as unknown as (
+  deps: Record<string, unknown>,
+  config: unknown,
+  services: { get: (name: string) => unknown },
+  extra: Record<string, unknown>,
+) => { createSession(params: Record<string, unknown>): Promise<{ sessionId: string }> };
+
+const exec = (
+  sessionId: string,
+  args: Record<string, unknown> = {},
+  extra: Record<string, unknown> = {},
+): ToolExecContext => ({
   agent: { session: { id: sessionId } },
   name: "bash",
   callId: "call-1",
@@ -39,9 +106,9 @@ const exec = (sessionId, args = {}, extra = {}) => ({
   ...extra,
 });
 
-const allow = (sessionId, extra = {}) => exec(sessionId, {}, extra);
+const allow = (sessionId: string, extra: Record<string, unknown> = {}) => exec(sessionId, {}, extra);
 
-const delegateTo = (decision) => {
+const delegateTo = (decision: GateDecision) => {
   let calls = 0;
   const next = () => {
     calls += 1;
@@ -94,28 +161,28 @@ test("only a string sandbox_permissions counts as an escalation", () => {
 // ------------------------------------------------------------------ gate ----
 
 test("mode off installs no gate at all", () => {
-  assert.equal(createApprovalGate({ mode: "off", isOwned: () => true }), null);
-  assert.equal(createApprovalGate({ isOwned: () => true }), null);
+  assert.equal(buildApprovalGate({ mode: "off", isOwned: () => true }), null);
+  assert.equal(buildApprovalGate({ isOwned: () => true }), null);
 });
 
 test("an escalation from a bridge-owned session is refused before it becomes a prompt", async () => {
-  const denied = [];
-  const lines = [];
-  const gate = createApprovalGate({
+  const denied: DenialEvent[] = [];
+  const lines: string[] = [];
+  const gate = buildApprovalGate({
     mode: "deny",
     isOwned: (id) => id === "session-owned",
     onDeny: (decision) => denied.push(decision),
     log: { info: (line) => lines.push(line) },
-  });
+  })!;
 
   const next = delegateTo({ kind: "allow" });
   const decision = await gate.pre(exec("session-owned", { sandbox_permissions: "danger-full-access" }), next);
 
   assert.equal(decision.kind, "deny");
-  assert.match(decision.reason, /danger-full-access/);
-  assert.match(decision.reason, /nobody is attached to this session to approve one/);
-  assert.equal(decision.info.name, "DshRpcApprovalDenied");
-  assert.equal(decision.info.code, "APPROVAL_DENIED_BY_BRIDGE");
+  assert.match(decision.reason ?? "", /danger-full-access/);
+  assert.match(decision.reason ?? "", /nobody is attached to this session to approve one/);
+  assert.equal(decision.info!.name, "DshRpcApprovalDenied");
+  assert.equal(decision.info!.code, "APPROVAL_DENIED_BY_BRIDGE");
   assert.equal(next.calls(), 0, "refusing the call means the tool body never runs");
   assert.deepEqual(denied, [
     { sessionId: "session-owned", toolName: "bash", callId: "call-1", escalation: "danger-full-access" },
@@ -125,22 +192,22 @@ test("an escalation from a bridge-owned session is refused before it becomes a p
 });
 
 test("an ordinary call from a bridge-owned session runs untouched", async () => {
-  const gate = createApprovalGate({
+  const gate = buildApprovalGate({
     mode: "deny",
     isOwned: () => true,
     onDeny: () => assert.fail("nothing was escalated, so nothing may be counted"),
-  });
+  })!;
   const next = delegateTo({ kind: "allow" });
   assert.deepEqual(await gate.pre(allow("session-owned"), next), { kind: "allow" });
   assert.equal(next.calls(), 1);
 });
 
 test("a session this bridge did not create keeps its own answerer", async () => {
-  const gate = createApprovalGate({
+  const gate = buildApprovalGate({
     mode: "deny",
     isOwned: (id) => id === "session-owned",
     onDeny: () => assert.fail("must not count a denial it never made"),
-  });
+  })!;
   const next = delegateTo({ kind: "allow" });
   assert.deepEqual(await gate.pre(exec("session-human", { sandbox_permissions: "danger-full-access" }), next), {
     kind: "allow",
@@ -149,7 +216,7 @@ test("a session this bridge did not create keeps its own answerer", async () => 
 });
 
 test("an unreadable call is delegated instead of guessed at", async () => {
-  const gate = createApprovalGate({ mode: "deny", isOwned: () => true });
+  const gate = buildApprovalGate({ mode: "deny", isOwned: () => true })!;
   const next = delegateTo({ kind: "allow" });
   // No agent, no session id: ownership cannot be established, so the safe
   // direction is silence.
@@ -160,25 +227,45 @@ test("an unreadable call is delegated instead of guessed at", async () => {
 });
 
 test("real Cordis waterfall does not retry or skip a throwing downstream listener", async () => {
-  const ctx = new Context();
+  const ctx = new Context() as unknown as ProbeWaterfallContext;
   const state = new Map();
   let preset = "workspace-write";
-  let answerId;
-  const store = {
+  let answerId: string;
+  const store: NonNullable<ApprovalGateOptions["store"]> = {
     open() {
       answerId = "approval";
-      let settle;
-      const promise = new Promise((resolve) => { settle = resolve; });
+      let settle!: (decision: { decision: string }) => void;
+      const promise = new Promise<{ decision: string }>((resolve) => {
+        settle = resolve;
+      });
       store.resolve = settle;
       return { approvalId: answerId, promise };
     },
   };
-  const gate = createApprovalGate({ mode: "delegate", isOwned: () => true, store, state, currentPreset: () => preset, applyPreset: async (_id, value) => { preset = value; } });
-  const trace = [];
+  const gate = buildApprovalGate({
+    mode: "delegate",
+    isOwned: () => true,
+    store,
+    state,
+    currentPreset: () => preset,
+    applyPreset: async (_id, value) => {
+      preset = value;
+    },
+  })!;
+  const trace: string[] = [];
   ctx.on("probe", gate.pre, { prepend: true });
-  ctx.on("probe", async (_exec, next) => { trace.push("throw"); throw new Error("downstream failure"); });
-  ctx.on("probe", async (_exec, next) => { trace.push("allow"); return next(); });
-  const run = ctx.waterfall(ctx, "probe", exec("session-cordis", { sandbox_permissions: "danger-full-access" }), async () => { trace.push("inner"); return { kind: "allow" }; });
+  ctx.on("probe", async (_exec, _next) => {
+    trace.push("throw");
+    throw new Error("downstream failure");
+  });
+  ctx.on("probe", async (_exec, next) => {
+    trace.push("allow");
+    return next();
+  });
+  const run = ctx.waterfall(ctx, "probe", exec("session-cordis", { sandbox_permissions: "danger-full-access" }), async () => {
+    trace.push("inner");
+    return { kind: "allow" };
+  });
   while (!store.resolve) await new Promise((resolve) => setTimeout(resolve, 0));
   store.resolve({ decision: "allow-once" });
   await assert.rejects(run, /downstream failure/);
@@ -187,11 +274,31 @@ test("real Cordis waterfall does not retry or skip a throwing downstream listene
 });
 
 test("dispose cancels pending approvals and prevents late widening", async () => {
-  let settle;
+  let settle: ((decision: { decision: string }) => void) | undefined;
   let preset = "workspace-write";
-  const store = { open() { const promise = new Promise((resolve) => { settle = resolve; }); return { approvalId: "pending", promise }; }, cancelAll() { settle?.({ decision: "cancelled" }); } };
-  const gate = createApprovalGate({ mode: "delegate", isOwned: () => true, store, currentPreset: () => preset, applyPreset: async (_id, value) => { preset = value; } });
-  const pending = gate.pre(exec("session-close", { sandbox_permissions: "danger-full-access" }), async () => ({ kind: "allow" }));
+  const store: NonNullable<ApprovalGateOptions["store"]> = {
+    open() {
+      const promise = new Promise<{ decision: string }>((resolve) => {
+        settle = resolve;
+      });
+      return { approvalId: "pending", promise };
+    },
+    cancelAll() {
+      settle?.({ decision: "cancelled" });
+    },
+  };
+  const gate = buildApprovalGate({
+    mode: "delegate",
+    isOwned: () => true,
+    store,
+    currentPreset: () => preset,
+    applyPreset: async (_id, value) => {
+      preset = value;
+    },
+  })!;
+  const pending = gate.pre(exec("session-close", { sandbox_permissions: "danger-full-access" }), async () => ({
+    kind: "allow",
+  }));
   while (!settle) await new Promise((resolve) => setTimeout(resolve, 0));
   await gate.dispose();
   settle({ decision: "allow-once" });
@@ -201,18 +308,20 @@ test("dispose cancels pending approvals and prevents late widening", async () =>
 });
 
 test("dispose waits for an approved downstream continuation and denies it after closing", async () => {
-  let answer;
-  let continueDownstream;
+  let answer: ((decision: { decision: string }) => void) | undefined;
+  let continueDownstream: ((decision: GateDecision) => void) | undefined;
   let continuationStarted = false;
   let preset = "workspace-write";
-  const appliedPresets = [];
-  const store = {
+  const appliedPresets: string[] = [];
+  const store: NonNullable<ApprovalGateOptions["store"]> = {
     open() {
-      const promise = new Promise((resolve) => { answer = resolve; });
+      const promise = new Promise<{ decision: string }>((resolve) => {
+        answer = resolve;
+      });
       return { approvalId: "pending-downstream", promise };
     },
   };
-  const gate = createApprovalGate({
+  const gate = buildApprovalGate({
     mode: "delegate",
     isOwned: () => true,
     store,
@@ -221,8 +330,10 @@ test("dispose waits for an approved downstream continuation and denies it after 
       preset = value;
       appliedPresets.push(value);
     },
+  })!;
+  const downstream = new Promise<GateDecision>((resolve) => {
+    continueDownstream = resolve;
   });
-  const downstream = new Promise((resolve) => { continueDownstream = resolve; });
   const pending = gate.pre(
     exec("session-dispose-downstream", { sandbox_permissions: "danger-full-access" }),
     () => {
@@ -238,7 +349,7 @@ test("dispose waits for an approved downstream continuation and denies it after 
   const disposing = gate.dispose().then(() => { disposed = true; });
   await new Promise((resolve) => setImmediate(resolve));
   const disposedBeforeContinuationResolved = disposed;
-  continueDownstream({ kind: "allow" });
+  continueDownstream!({ kind: "allow" });
   const [decision] = await Promise.all([pending, disposing]);
 
   assert.equal(disposedBeforeContinuationResolved, false, "dispose must wait for the in-flight waterfall continuation");
@@ -248,27 +359,35 @@ test("dispose waits for an approved downstream continuation and denies it after 
 });
 
 test("dispose waits for an in-flight preset change and restores it before returning", async () => {
-  let releasePreset;
+  let releasePreset: (() => void) | undefined;
   let preset = "workspace-write";
-  const store = {
+  const store: NonNullable<ApprovalGateOptions["store"]> = {
     open() {
-      let resolve;
-      const promise = new Promise((done) => { resolve = done; });
+      let resolve!: (decision: { decision: string }) => void;
+      const promise = new Promise<{ decision: string }>((done) => {
+        resolve = done;
+      });
       store.answer = resolve;
       return { approvalId: "in-flight", promise };
     },
   };
-  const gate = createApprovalGate({
+  const gate = buildApprovalGate({
     mode: "delegate",
     isOwned: () => true,
     store,
     currentPreset: () => preset,
     applyPreset: async (_id, value) => {
-      if (value === "danger-full-access") await new Promise((resolve) => { releasePreset = resolve; });
+      if (value === "danger-full-access") {
+        await new Promise<void>((resolve) => {
+          releasePreset = resolve;
+        });
+      }
       preset = value;
     },
-  });
-  const pending = gate.pre(exec("session-dispose-race", { sandbox_permissions: "danger-full-access" }), async () => ({ kind: "allow" }));
+  })!;
+  const pending = gate.pre(exec("session-dispose-race", { sandbox_permissions: "danger-full-access" }), async () => ({
+    kind: "allow",
+  }));
   while (!store.answer) await new Promise((resolve) => setTimeout(resolve, 0));
   store.answer({ decision: "allow-once" });
   while (!releasePreset) await new Promise((resolve) => setTimeout(resolve, 0));
@@ -280,13 +399,13 @@ test("dispose waits for an in-flight preset change and restores it before return
 });
 
 test("accounting cannot change the answer", async () => {
-  const gate = createApprovalGate({
+  const gate = buildApprovalGate({
     mode: "deny",
     isOwned: () => true,
     onDeny: () => {
       throw new Error("counter exploded");
     },
-  });
+  })!;
   const decision = await gate.pre(
     exec("session-owned", { sandbox_permissions: "danger-full-access" }),
     delegateTo({ kind: "allow" }),
@@ -302,7 +421,7 @@ test("creation marks ownership; nothing else does", async () => {
     create: async () => ({ sessionId: "session-created", agentPreset: null }),
     inspect: async () => ({ meta: { cwd: "/tmp/work" } }),
   };
-  const methods = createMethods(
+  const methods = buildApprovalsMethods(
     { sessionController: controller, webServer: { getOrigin: () => "http://127.0.0.1:0" } },
     resolveConfig({ tasksEnabled: true }),
     { get: () => undefined },

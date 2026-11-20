@@ -37,12 +37,22 @@ import { createInflight } from "../dist/lib/inflight.mjs";
 const TOKEN = "b".repeat(48);
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 
+import type { IncomingMessage, ServerResponse } from "node:http";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+
+type HttpRouteHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void> | void;
+type DispatchHandler = (
+  method: string,
+  params: Record<string, unknown>,
+  context?: { signal?: AbortSignal },
+) => Promise<unknown>;
+
 function fakeServer() {
-  const routes = new Map();
+  const routes = new Map<string, HttpRouteHandler>();
   return {
     routes,
     getOrigin: () => "http://127.0.0.1:1",
-    register({ kind, path, handler }) {
+    register({ kind, path, handler }: { kind: string; path: string; handler: HttpRouteHandler }) {
       assert.equal(kind, "exact");
       routes.set(path, handler);
       return () => routes.delete(path);
@@ -50,10 +60,10 @@ function fakeServer() {
   };
 }
 
-async function serve(dispatch, stats = createStats()) {
+async function serve(dispatch: DispatchHandler, stats = createStats()) {
   const server = fakeServer();
   const routes = registerRoutes({
-    webServer: server,
+    webServer: server as never,
     config: resolveConfig({}),
     dispatch,
     methods: {},
@@ -62,9 +72,9 @@ async function serve(dispatch, stats = createStats()) {
     log: { info() {}, warn() {} },
     stats,
   });
-  const rpc = server.routes.get("/dsh-rpc");
-  const { server: http, port } = await listenSafe((req, res) => {
-    rpc(req, res).catch(() => res.destroy());
+  const rpc = server.routes.get("/dsh-rpc")!;
+  const { server: http, port } = await listenSafe((req: IncomingMessage, res: ServerResponse) => {
+    Promise.resolve(rpc(req, res)).catch(() => res.destroy());
   });
   return {
     port,
@@ -78,9 +88,9 @@ async function serve(dispatch, stats = createStats()) {
 }
 
 /** Fire one JSON-RPC request. Returns the ClientRequest so a test can hang up. */
-function post(port, body) {
-  let settle;
-  const done = new Promise((resolve, reject) => {
+function post(port: number, body: string) {
+  let settle!: { resolve: (value: { status: number | undefined; text: string }) => void; reject: (err: unknown) => void };
+  const done = new Promise<{ status: number | undefined; text: string }>((resolve, reject) => {
     settle = { resolve, reject };
   });
   done.catch(() => {});
@@ -98,16 +108,16 @@ function post(port, body) {
     (res) => {
       let text = "";
       res.setEncoding("utf8");
-      res.on("data", (chunk) => (text += chunk));
+      res.on("data", (chunk: string) => (text += chunk));
       res.on("end", () => settle.resolve({ status: res.statusCode, text }));
     },
   );
-  req.on("error", (error) => settle.reject(error));
+  req.on("error", (error: Error) => settle.reject(error));
   req.end(body);
   return { req, done };
 }
 
-async function waitFor(predicate, budgetMs, what) {
+async function waitFor(predicate: () => unknown, budgetMs: number, what: string): Promise<void> {
   const deadline = Date.now() + budgetMs;
   while (Date.now() < deadline) {
     if (predicate()) return;
@@ -117,10 +127,10 @@ async function waitFor(predicate, budgetMs, what) {
 }
 
 test("a caller that hangs up aborts the call it started", { timeout: 20_000 }, async () => {
-  let seen = null;
+  let seen: AbortSignal | null = null;
   let aborted = false;
   const bridge = await serve(
-    (method, params, context) =>
+    (_method, _params, context) =>
       new Promise((resolve) => {
         seen = context?.signal ?? null;
         context?.signal?.addEventListener("abort", () => {
@@ -132,7 +142,7 @@ test("a caller that hangs up aborts the call it started", { timeout: 20_000 }, a
   try {
     const { req } = post(bridge.port, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "dsh.ping" }));
     await waitFor(() => seen !== null, 5_000, "dispatch to receive a signal");
-    assert.equal(seen.aborted, false);
+    assert.equal(seen!.aborted, false);
     // This is what a killed client looks like from the server side.
     req.destroy();
     await waitFor(() => aborted, 5_000, "the signal to abort");
@@ -142,8 +152,8 @@ test("a caller that hangs up aborts the call it started", { timeout: 20_000 }, a
 });
 
 test("a completed request keeps its signal clean and counts as neither outcome", { timeout: 20_000 }, async () => {
-  let seen = null;
-  const bridge = await serve(async (method, params, context) => {
+  let seen = null as AbortSignal | null;
+  const bridge = await serve(async (_method, _params, context) => {
     seen = context?.signal ?? null;
     return { status: "completed" };
   });
@@ -151,7 +161,7 @@ test("a completed request keeps its signal clean and counts as neither outcome",
     const answer = await post(bridge.port, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "dsh.ping" })).done;
     assert.equal(answer.status, 200);
     assert.ok(seen, "dispatch still receives a context");
-    assert.equal(seen.aborted, false);
+    assert.equal((seen as AbortSignal).aborted, false);
     assert.deepEqual(bridge.stats.snapshot().outcomes, { timeouts: 0, cancelledByClient: 0 });
   } finally {
     await bridge.close();
@@ -160,32 +170,46 @@ test("a completed request keeps its signal clean and counts as neither outcome",
 
 test("the counters separate a timed-out turn from a client that hung up", () => {
   const stats = createStats();
-  stats.record("dsh.sessions.wait", 12, true, null, "timeouts");
-  stats.record("dsh.sessions.ask", 30, false, -32006, "cancelledByClient");
-  stats.record("dsh.ping", 1, true);
+  const record = stats.record as (
+    method: string,
+    durationMs: number,
+    ok: boolean,
+    code?: number | null,
+    outcome?: string | null,
+  ) => void;
+  record("dsh.sessions.wait", 12, true, null, "timeouts");
+  record("dsh.sessions.ask", 30, false, -32006, "cancelledByClient");
+  record("dsh.ping", 1, true);
   const snapshot = stats.snapshot();
   assert.deepEqual(snapshot.outcomes, { timeouts: 1, cancelledByClient: 1 });
   assert.equal(snapshot.total, 3);
   assert.equal(snapshot.errors, 1);
   // An unknown outcome string must not invent a counter.
-  stats.record("dsh.ping", 1, true, null, "not-a-counter");
+  record("dsh.ping", 1, true, null, "not-a-counter");
   assert.deepEqual(stats.snapshot().outcomes, { timeouts: 1, cancelledByClient: 1 });
 });
 
 // ------------------------------------------------------------- stdio MCP ---
 
-function talk(child) {
-  let waiting = null;
+interface McpResponseMessage {
+  jsonrpc?: string;
+  id?: number;
+  result?: { serverInfo?: unknown; [key: string]: unknown };
+  [key: string]: unknown;
+}
+
+function talk(child: ChildProcessWithoutNullStreams) {
+  let waiting: ((message: McpResponseMessage) => void) | null = null;
   let buffer = "";
   child.stdout.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => {
+  child.stdout.on("data", (chunk: string) => {
     buffer += chunk;
     let at = buffer.indexOf("\n");
     while (at >= 0) {
       const line = buffer.slice(0, at).trim();
       buffer = buffer.slice(at + 1);
       if (line.length > 0) {
-        const message = JSON.parse(line);
+        const message = JSON.parse(line) as McpResponseMessage;
         const resolve = waiting;
         waiting = null;
         resolve?.(message);
@@ -194,13 +218,13 @@ function talk(child) {
     }
   });
   return {
-    send(message) {
+    send(message: Record<string, unknown>) {
       child.stdin.write(`${JSON.stringify(message)}\n`);
     },
-    next(timeoutMs = 5_000) {
+    next(timeoutMs = 5_000): Promise<McpResponseMessage> {
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error("no MCP message arrived")), timeoutMs);
-        waiting = (message) => {
+        waiting = (message: McpResponseMessage) => {
           clearTimeout(timer);
           resolve(message);
         };
@@ -240,7 +264,7 @@ test("notifications/cancelled is accepted, and an unknown id is a no-op", { time
     assert.deepEqual(pong.result, {});
   } finally {
     child.stdin.end();
-    await new Promise((resolve) => {
+    await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
         child.kill();
         resolve();

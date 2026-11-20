@@ -14,7 +14,35 @@ import {
 } from "../dist/lib/agents/card.mjs";
 import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
 
-function validCard(overrides = {}) {
+interface ControlSpec {
+  support: string;
+  evidence: unknown;
+  verified?: boolean;
+}
+
+interface ValidCardFixture {
+  cardVersion?: string;
+  declared?: boolean;
+  verified?: boolean;
+  identity?: Record<string, unknown>;
+  controls?: Record<string, ControlSpec>;
+  limits?: Record<string, unknown>;
+  limitations?: unknown;
+  capabilities?: string[];
+}
+
+interface NormalizedCardView {
+  cardVersion: string;
+  declared: boolean;
+  verified: boolean;
+  identity: Record<string, unknown>;
+  controls: Record<string, ControlSpec>;
+  limits: Record<string, unknown>;
+  limitations: string[];
+  capabilities: string[];
+}
+
+function validCard(overrides: ValidCardFixture = {}): ValidCardFixture {
   return {
     identity: {
       agentId: "ag-codex-1",
@@ -46,11 +74,12 @@ test("normalizeCard returns canonical card with declared=true and verified=false
   // A17: a card must name at least one known weakness; advertising only is not a declaration
   assert.throws(
     () => normalizeCard(validCard({ limitations: [] })),
-    (err) => err?.data?.kind === "INVALID_CARD" && err?.data?.path === "limitations",
+    (err: { data?: { kind?: string; path?: string } }) =>
+      err?.data?.kind === "INVALID_CARD" && err?.data?.path === "limitations",
   );
   assert.throws(
     () => normalizeCard(validCard({ limitations: ["   "] })),
-    (err) => err?.data?.kind === "INVALID_CARD",
+    (err: { data?: { kind?: string } }) => err?.data?.kind === "INVALID_CARD",
   );
 });
 
@@ -64,22 +93,22 @@ test("normalizeCard rejects every invalid shape with INVALID_CARD", () => {
     validCard({ controls: undefined }),
     (() => {
       const c = validCard();
-      delete c.controls.cancel;
+      delete c.controls!.cancel;
       return c;
     })(),
     (() => {
       const c = validCard();
-      c.controls.bogus = { support: "optional", evidence: "x" };
+      c.controls!.bogus = { support: "optional", evidence: "x" };
       return c;
     })(),
     (() => {
       const c = validCard();
-      c.controls.cancel = { support: "maybe", evidence: "x" };
+      c.controls!.cancel = { support: "maybe", evidence: "x" };
       return c;
     })(),
     (() => {
       const c = validCard();
-      c.controls.cancel = { support: "required", evidence: 123 };
+      c.controls!.cancel = { support: "required", evidence: 123 };
       return c;
     })(),
     validCard({ limits: { maxConcurrent: 0 } }),
@@ -102,7 +131,7 @@ test("normalizeCard rejects every invalid shape with INVALID_CARD", () => {
 });
 
 test("hashCard is deterministic regardless of object key order", () => {
-  const c1 = normalizeCard(validCard());
+  const c1 = normalizeCard(validCard()) as unknown as NormalizedCardView;
   const c2 = {
     verified: c1.verified,
     limitations: [...c1.limitations],

@@ -20,12 +20,12 @@ test("redactSecrets redacts Bearer, GitHub, sk- keys, and CSRF tokens while trun
     'json "csrfToken": "csrf-json-secret-88"',
   ].join(" | ");
 
-  const redacted = redactSecrets(input);
+  const redacted = redactSecrets(input)!;
   assert.doesNotMatch(redacted, /eyJhbGciOiJIUzI1NiJ9|ghp_1234|sk-proj_|csrf-hdr-secret-99|csrf-json-secret-88/);
-  assert.equal(redacted.match(/\[redacted\]/g).length, 5);
+  assert.equal(redacted.match(/\[redacted\]/g)!.length, 5);
 
   const long = "a".repeat(2050);
-  const clipped = redactSecrets(long, { maxChars: 2000 });
+  const clipped = redactSecrets(long, { maxChars: 2000 })!;
   assert.ok(clipped.startsWith("a".repeat(2000)));
   assert.ok(clipped.endsWith("… (truncated)"));
 });
@@ -66,7 +66,7 @@ test("redactSecrets covers Basic auth, cookies, URL userinfo, GitHub PATs and AW
     "aws AKIAIOSFODNN7EXAMPLE",
   ].join(" | ");
 
-  const redacted = redactSecrets(input);
+  const redacted = redactSecrets(input)!;
   assert.doesNotMatch(redacted, /dXNlcjpwYXNzd29yZA|session=abc123|hunter2|github_pat_11ABCDEFG|AKIAIOSFODNN7EXAMPLE/);
   assert.ok(redacted.includes("registry.example/v1"));
 });
@@ -76,13 +76,13 @@ test("redactSecrets masks every cookie pair without breaking the surrounding JSO
   // captured groups, which dropped the opening quote of a JSON key and left
   // {"Cookie":"a=[redacted]... unparseable. Only values may change.
   const input = JSON.stringify({ Cookie: "a=1; b=2", next: "ok" });
-  const redacted = redactSecrets(input);
-  const parsed = JSON.parse(redacted);
+  const redacted = redactSecrets(input)!;
+  const parsed = JSON.parse(redacted) as { next: string; Cookie: string };
   assert.equal(parsed.next, "ok");
   assert.doesNotMatch(redacted, /a=1|b=2/);
   assert.match(parsed.Cookie, /^a=\[redacted\]; b=\[redacted\]$/);
 
-  const quoted = redactSecrets('Cookie: "sid=deadbeef; theme=dark"');
+  const quoted = redactSecrets('Cookie: "sid=deadbeef; theme=dark"')!;
   assert.doesNotMatch(quoted, /deadbeef|theme=dark/);
   assert.ok(quoted.includes('"'), "the quoting of the header value survives");
 });
