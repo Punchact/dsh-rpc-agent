@@ -1,10 +1,10 @@
 name: test
 
-# Only the checks that need nothing but Node. `test/e2e.mjs` and `test/edge.mjs`
+# Only the checks that need nothing but Node. `test/e2e.ts` and `test/edge.ts`
 # drive a live DeepSeek Harness instance and cannot run on a hosted runner, so
 # they stay a local, manual gate (see README "验证" / "Verify").
 #
-# `test/host.test.mjs` is different: it needs no Harness process, only the real
+# `test/host.test.ts` is different: it needs no Harness process, only the real
 # `@deepseek-ai/dsh-host-webserver` package, so it runs here too — that is the
 # whole point of keeping it a normal devDependency.
 on:
@@ -47,7 +47,7 @@ jobs:
           # Source is TypeScript now; what actually ships is dist/ (built two steps up).
           # client.js is still the browser-side script, so it is checked from the source tree.
           shopt -s globstar nullglob
-          for file in dist/**/*.mjs client.js test/*.mjs scripts/*.ts; do
+          for file in dist/**/*.mjs client.js test/*.ts scripts/*.ts; do
             node --check "$file"
           done
 

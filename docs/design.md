@@ -886,3 +886,15 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 **代价与边界**。①剥离只擦类型、不做转译，所以脚本里不能出现 `enum`、`namespace`、参数属性这类不可擦语法——本仓库 9 个脚本没有用到，将来要用得先改写法。②`.ts` 脚本只能在 `node_modules` 之外运行（`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`），这对本仓成立，但不适合被别的包 `import`。③`node --check` 对 `.ts` 可用（实测 Node 24.22、CI 22.x/24.x 双绿），所以 CI 的语法检查 glob 直接换成 `scripts/*.ts`。
 
 **怎么钉住**。`npm run check:types` = `tsc -p tsconfig.client.json && tsc -p tsconfig.scripts.json`，`verify`（以及 `npm test` 链尾）必然跑到；strict 报错本来是 93 条，全部补齐后为 0——中间没有"先关掉再慢慢来"的过渡态。九处脚本的输出文案在这个过程里逐字未变，改完用同一批 gate 与 `npm run verify` 复核。
+
+## 63. 决策 0.9.5-b：测试也用 TypeScript，由 Node 直接跑
+
+**现象**。`scripts/` 迁完之后 `test/` 仍是 52 个 `.mjs`（15,537 行）。这些文件是唯一真正读过全部 `dist/**` 产物的代码，却既不在任何 `tsconfig` 的 `include` 里，也没有类型检查——断言写错字段名只会在运行时炸，或者更糟：因为拿 `undefined` 与 `undefined` 比较而静默通过。
+
+**决定**。`test/` 全部改 `.ts`，由 Node 的原生类型剥离直接运行（`node test/xxx.test.ts`），并用独立的 `tsconfig.test.json` 做 `strict` 检查；`npm run check:types` 串上它，`verify` 必然跑到。
+
+**为什么 `allowJs: true` + `checkJs: false`**。测试 import 的是 `../dist/*.mjs`（构建产物，仓库不产出 `.d.mts`）。`allowJs: false` 会让每个产物 import 都变成 TS7016（148 条），而给 `dist/` 造声明文件等于把一份发布契约变成两份。边界由运行时证据负责：`entry-parity` 比对入口导出与 shebang，全链 434 例真的去调那些函数。测试**内部**仍 `strict`——1,381 条报错都得改掉，不许靠 `any` 或 `@ts-expect-error` 糊过去。
+
+**代价与边界**。①`test/` 的 `.ts` 同样受“不可擦语法”限制（`enum`/`namespace`/参数属性），将来要用得先改写法。②`count-cases` 的 `testChainDigest` 会随文件内容变化，每次迁一批必须 `npm run count:cases` 刷一遍，否则 `check-docs` 报过期——这是设计使然，不是噪声。③`.ts` 测试只能在仓库内跑（`node_modules` 里的 `.ts` 会被拒绝剥类型），装到 profile 的那份包不含 `test/`，两者互不影响。
+
+**怎么钉住**。`tsconfig.test.json`（`strict`、`noEmit`）+ `check:types` 串进 `verify` + `check-test-targets` 只认 `.ts`（有 `.mjs` 溜回来就不会被扫到，等于立刻暴露）+ 三条不变量在迁移过程中逐批核对（`test(` 435、`assert` 2,241、忽略指令 0）。

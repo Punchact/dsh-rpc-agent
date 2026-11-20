@@ -776,7 +776,7 @@ npm run verify                 # build + entry parity + npm test + check:package
 ```powershell
 cd dsh-rpc-plugin
 npm test                       # 47 test files, 434 cases, plus catalog smoke; no running Harness needed
-node test/host.test.mjs        # 1 case: real WebServer integration (needs npm ci first)
+node test/host.test.ts        # 1 case: real WebServer integration (needs npm ci first)
 node test/e2e.mjs              # 14 cases: end to end against a real Harness (--cwd takes an absolute path only)
 node test/edge.mjs             # 24 cases: protocol/edge adversarial, against a real Harness
 ```
@@ -793,7 +793,7 @@ npm run check:surface   # code surface vs docs/api-surface.json (plan snapshot),
 npm run docs:surface    # re-extract the snapshot after editing the plan doc (new implementationOnly entries need --accept-new) (needs it locally; PLAN_DOC overrides the path)
 ```
 
-`check:docs` derives what it can: the RPC method count comes from the catalog in `lib/methods.mjs`, the MCP tool count from the two tables in `bin/dsh-rpc-mcp.mjs`, and the test-file count from the `node test/*.test.mjs` entries in `package.json`'s `test` chain. Only the case total needs a full run, so `docs/counts.json` is its single source.
+`check:docs` derives what it can: the RPC method count comes from the catalog in `lib/methods.mjs`, the MCP tool count from the two tables in `bin/dsh-rpc-mcp.mjs`, and the test-file count from the `node test/*.test.ts` entries in `package.json`'s `test` chain. Only the case total needs a full run, so `docs/counts.json` is its single source.
 
 `check:surface` looks both ways: everything the plan promised must exist, and any new task/agent-family interface in code must be either in the plan or recorded in the snapshot's `implementationOnly`. That is the check that would have caught 0.9.0's "plan promised `dsh.tasks.resolve`, implementation missed it".
 
@@ -864,7 +864,7 @@ A few worth calling out:
 - **Edge** probes the protocol layer: batches, notifications, id shapes, auth headers, oversized bodies (a genuine 413, not a dropped connection), parameter-injection defences, timeout clamping, concurrent asks, `limit` semantics.
 - **Port drift** (manual): point `endpoint.json` at a dead port and run `dsh-rpc ping`; expect exit code 3 and a readable error mentioning `nothing is listening`, `pid` and `health --wait`.
 
-Local verification (2026-11-19, 0.9.0, real repository): all 47 test files in the `npm test` chain pass (**434/434** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.mjs` (`methods: 34` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`). Formatting (UTF-8 without BOM, LF) is a review convention here, not an automated gate.
+Local verification (2026-11-19, 0.9.0, real repository): all 47 test files in the `npm test` chain pass (**434/434** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.ts` (`methods: 34` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`). Formatting (UTF-8 without BOM, LF) is a review convention here, not an automated gate.
 
 ## License
 

@@ -64,9 +64,10 @@
     "docs:surface": "node scripts/check-surface.ts --write",
     "prepublishOnly": "npm run check:version && npm run check:docs && npm run check:surface && npm run check:package && npm test",
     "check:version": "node --input-type=module -e \"import {readFileSync} from 'node:fs'; const {PLUGIN_VERSION} = await import('./dist/lib/version.mjs'); const v = JSON.parse(readFileSync('package.json','utf8')).version; if (PLUGIN_VERSION !== v) { console.error('PLUGIN_VERSION ' + PLUGIN_VERSION + ' != package.json ' + v); process.exit(1); } console.log('version ok: ' + v);\"",
-    "check:types": "tsc -p tsconfig.client.json && tsc -p tsconfig.scripts.json",
+    "check:types": "tsc -p tsconfig.client.json && tsc -p tsconfig.scripts.json && tsc -p tsconfig.test.json",
     "check:types:client": "tsc -p tsconfig.client.json",
     "check:types:scripts": "tsc -p tsconfig.scripts.json",
+    "check:types:test": "tsc -p tsconfig.test.json",
     "release:local": "npm run verify && npm pack ./dist"
   },
   "engines": {
