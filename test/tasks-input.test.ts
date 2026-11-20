@@ -6,18 +6,47 @@ import { createTaskEngine, seedBaselineEntities } from "../dist/lib/tasks/engine
 import { createDispatcher } from "../dist/lib/tasks/dispatch.mjs";
 import { openStore } from "../dist/lib/tasks/store.mjs";
 
+interface InputSentRecord {
+  target: unknown;
+  input: { text?: string; questionId?: string };
+}
+
+interface InputEngineView {
+  submit(p: Record<string, unknown>): Promise<{ taskId: string }>;
+  applyReport(p: Record<string, unknown>): Promise<unknown>;
+  get(p: { taskId: string }): Promise<{ status: string; phase: string; stateVersion: number }>;
+  input(p: Record<string, unknown>): Promise<{
+    taskId: string;
+    deliveryStatus: string;
+    deduplicated: boolean;
+  }>;
+  events(p: { taskId: string }): Promise<{ events: Array<{ type: string }> }>;
+  resolve(p: Record<string, unknown>): Promise<unknown>;
+}
+
+interface InputDispatcherView {
+  startTask(p: { taskId: string }): Promise<{ attemptId?: string; attempt?: { attemptId?: string } }>;
+  drainEffects(p: { limit: number }): Promise<{ processed: number; completed: number }>;
+}
+
+const seedBaseline = seedBaselineEntities as unknown as (
+  store: unknown,
+  seed: Record<string, unknown>,
+) => Promise<void>;
+const buildDispatcher = createDispatcher as unknown as (opts: Record<string, unknown>) => InputDispatcherView;
+
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {} };
 
 async function makeWorld() {
   const store = openStore({ path: ":memory:" });
-  await seedBaselineEntities(store, {
+  await seedBaseline(store, {
     principal: { principalId: "local-operator" },
     workspace: { workspaceId: "ws-lab", rootPath: "C:\\ws-lab" },
     agent: { agentId: "ag-in", adapterKind: "dsh", capabilities: { cancel: "supported" } },
     capabilityRevision: { revisionId: "rev-in-1", capability: "review.diff@1" },
   });
-  const engine = createTaskEngine(store);
-  const sent = [];
+  const engine = createTaskEngine(store) as unknown as InputEngineView;
+  const sent: InputSentRecord[] = [];
   const adapter = {
     kind: "dsh",
     async probe() {
@@ -29,7 +58,7 @@ async function makeWorld() {
     async inspect() {
       return { status: "running" };
     },
-    async sendInput(target, input) {
+    async sendInput(target: unknown, input: { text?: string; questionId?: string }) {
       sent.push({ target, input });
       return { delivered: true };
     },
@@ -43,12 +72,12 @@ async function makeWorld() {
       return { delivered: true };
     },
   };
-  const dispatcher = createDispatcher({ store, engine, adapters: { dsh: adapter } });
+  const dispatcher = buildDispatcher({ store, engine, adapters: { dsh: adapter } });
   void silentLogger;
   return { store, engine, dispatcher, sent };
 }
 
-async function startTask(engine, dispatcher, key = "sub-1") {
+async function startTask(engine: InputEngineView, dispatcher: InputDispatcherView, key = "sub-1") {
   const submitted = await engine.submit({
     idempotencyKey: key,
     capabilityRevisionId: "rev-in-1",
@@ -60,7 +89,7 @@ async function startTask(engine, dispatcher, key = "sub-1") {
   return { taskId: submitted.taskId, attemptId: started.attemptId ?? started.attempt?.attemptId ?? null };
 }
 
-async function waitForInput(engine, taskId, attemptId) {
+async function waitForInput(engine: InputEngineView, taskId: string, attemptId: string | null) {
   await engine.applyReport({
     taskId,
     attemptId,
@@ -119,9 +148,9 @@ test("the same key is idempotent, a different answer under it conflicts, and a c
 
   await assert.rejects(
     () => engine.input({ taskId, idempotencyKey: "in-2", text: "production", questionId: "q_env" }),
-    (error) => {
+    (error: { message?: string }) => {
       assert.ok(isTaskError(error), "expected a task error");
-      assert.match(error.message, /different input/);
+      assert.match(error.message ?? "", /different input/);
       return true;
     },
   );
@@ -133,18 +162,18 @@ test("the same key is idempotent, a different answer under it conflicts, and a c
   await assert.rejects(
     () =>
       engine.input({ taskId, idempotencyKey: "in-4", text: "again", questionId: "q_env" }),
-    (error) => {
+    (error: { message?: string }) => {
       assert.ok(isTaskError(error), "expected a task error");
-      assert.match(error.message, /question/i);
+      assert.match(error.message ?? "", /question/i);
       return true;
     },
   );
 
   await assert.rejects(
     () => engine.input({ taskId, idempotencyKey: "in-5", text: "x", questionId: "q_missing" }),
-    (error) => {
+    (error: { message?: string }) => {
       assert.ok(isTaskError(error), "expected a task error");
-      assert.match(error.message, /question/i);
+      assert.match(error.message ?? "", /question/i);
       return true;
     },
   );
@@ -162,9 +191,9 @@ test("an answer is refused when the task has not started, the attempt is stale, 
   });
   await assert.rejects(
     () => engine.input({ taskId: notStarted.taskId, idempotencyKey: "in-a", text: "too early" }),
-    (error) => {
+    (error: { message?: string }) => {
       assert.ok(isTaskError(error), "expected a task error");
-      assert.match(error.message, /attempt/i);
+      assert.match(error.message ?? "", /attempt/i);
       return true;
     },
   );
@@ -174,9 +203,9 @@ test("an answer is refused when the task has not started, the attempt is stale, 
 
   await assert.rejects(
     () => engine.input({ taskId, attemptId: "att-nope", idempotencyKey: "in-b", text: "wrong attempt" }),
-    (error) => {
+    (error: { message?: string }) => {
       assert.ok(isTaskError(error), "expected a task error");
-      assert.match(error.message, /attempt/i);
+      assert.match(error.message ?? "", /attempt/i);
       return true;
     },
   );
@@ -196,9 +225,9 @@ test("an answer is refused when the task has not started, the attempt is stale, 
 
   await assert.rejects(
     () => engine.input({ taskId, idempotencyKey: "in-d", text: "late" }),
-    (error) => {
+    (error: { message?: string }) => {
       assert.ok(isTaskError(error), "expected a task error");
-      assert.match(error.message, /no longer accepted|finished|succeeded/i);
+      assert.match(error.message ?? "", /no longer accepted|finished|succeeded/i);
       return true;
     },
   );
