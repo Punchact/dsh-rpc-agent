@@ -16,26 +16,59 @@ import { createStats } from "../dist/lib/stats.mjs";
 
 const TOKEN = "a".repeat(48);
 
+interface FakeReqShape {
+  method: string;
+  url: string;
+  headers: Record<string, string>;
+  socket: { remoteAddress: string };
+}
+
+interface FakeResShape {
+  status: number;
+  headers: Record<string, string>;
+  body: string;
+  writeHead(status: number, headers?: Record<string, string>): void;
+  end(body?: string): void;
+  json(): Record<string, unknown>;
+}
+
+type StatusRouteHandler = (req: FakeReqShape, res: FakeResShape) => Promise<void> | void;
+
+interface RouteMountSpec {
+  since?: number;
+  kind: string;
+  path: string;
+  handler: StatusRouteHandler;
+}
+
 function fakeServer() {
-  const routes = new Map();
+  const routes = new Map<string, StatusRouteHandler>();
   return {
     routes,
     getOrigin: () => "http://127.0.0.1:3820",
-    register({ since, kind, path, handler }) {
+    register({ since: _since, kind, path, handler }: RouteMountSpec) {
       assert.equal(kind, "exact", "the bridge only mounts exact routes");
       if (routes.has(path)) throw new Error(`webserver: duplicate exact route "${path}"`);
       routes.set(path, handler);
       return () => routes.delete(path);
     },
-    failOn: null,
+    failOn: null as string | null,
   };
 }
 
-function fakeReq({ method = "GET", address = "127.0.0.1", headers = {} } = {}) {
+function fakeReq({
+  method = "GET",
+  address = "127.0.0.1",
+  headers = {},
+}: {
+  method?: string;
+  address?: string;
+  headers?: Record<string, string>;
+} = {}): FakeReqShape {
   return { method, url: "/dsh-rpc/status", headers, socket: { remoteAddress: address } };
 }
 
-function fakeRes() {
+function fakeRes(): FakeResShape {
   return {
     status: 0,
     headers: {},
@@ -48,14 +81,20 @@ function fakeRes() {
       if (body) this.body += body;
     },
     json() {
-      return JSON.parse(this.body);
+      return JSON.parse(this.body) as Record<string, unknown>;
     },
   };
 }
 
 const config = resolveConfig({});
 
-function harness({ server = fakeServer(), stats = createStats({ startedAt: Date.now() - 4000, pid: 4242 }) } = {}) {
+function harness({
+  server = fakeServer(),
+  stats = createStats({ startedAt: Date.now() - 4000, pid: 4242 }),
+}: {
+  server?: ReturnType<typeof fakeServer>;
+  stats?: ReturnType<typeof createStats>;
+} = {}) {
   const methods = {
     ping: async () => ({
       origin: "http://127.0.0.1:3820",
@@ -71,7 +110,7 @@ function harness({ server = fakeServer(), stats = createStats({ startedAt: Date.
     server,
     stats,
     routes: registerRoutes({
-      webServer: server,
+      webServer: server as never,
       config,
       dispatch: async () => ({ ok: true }),
       methods,
@@ -87,10 +126,22 @@ test("the status route answers loopback with an aggregate-only payload", async (
   const { server, routes } = harness();
   try {
     const res = fakeRes();
-    await server.routes.get("/dsh-rpc/status")(fakeReq(), res);
+    await server.routes.get("/dsh-rpc/status")!(fakeReq(), res);
 
     assert.equal(res.status, 200);
-    const body = res.json();
+    const body = res.json() as {
+      ok: boolean;
+      plugin: string;
+      origin: string;
+      path: string;
+      pid: number;
+      tokenSource: string;
+      startedAt: string;
+      servedForMs: number;
+      routes: Record<string, string>;
+      activeRuns: unknown[];
+      calls: Record<string, unknown>;
+    };
     assert.equal(body.ok, true);
     assert.equal(body.plugin, "dsh-rpc-agent");
     assert.equal(body.origin, "http://127.0.0.1:3820");
@@ -131,10 +182,24 @@ test("the status route answers loopback with an aggregate-only payload", async (
 
 test("stats count what the bridge served, without recording arguments", async () => {
   const stats = createStats({ startedAt: Date.now(), pid: 1 });
-  stats.record("dsh.sessions.ask", 12, true);
-  stats.record("ask", 30, false, -32004);
+  const record = stats.record as (
+    method: string,
+    durationMs: number,
+    ok: boolean,
+    code?: number | null,
+    outcome?: string | null,
+  ) => void;
+  record("dsh.sessions.ask", 12, true);
+  record("ask", 30, false, -32004);
 
-  const snapshot = stats.snapshot();
+  const snapshot = stats.snapshot() as unknown as {
+    total: number;
+    errors: number;
+    byMethod: Record<string, { count: number; errors: number }>;
+    recent: Array<{ at: number }>;
+    lastCallAt: number;
+    lastErrorAt: number;
+  };
   assert.equal(snapshot.total, 2);
   assert.equal(snapshot.errors, 1);
   assert.deepEqual(Object.keys(snapshot.byMethod).sort(), ["ask", "dsh.sessions.ask"]);
@@ -153,7 +218,7 @@ test("a remote address is refused", async () => {
   const { server, routes } = harness();
   try {
     const res = fakeRes();
-    await server.routes.get("/dsh-rpc/status")(fakeReq({ address: "10.0.0.7" }), res);
+    await server.routes.get("/dsh-rpc/status")!(fakeReq({ address: "10.0.0.7" }), res);
     assert.equal(res.status, 403);
     assert.equal(res.json().error, "loopback only");
   } finally {
@@ -165,7 +230,7 @@ test("only GET and HEAD are accepted", async () => {
   const { server, routes } = harness();
   try {
     const res = fakeRes();
-    await server.routes.get("/dsh-rpc/status")(fakeReq({ method: "POST" }), res);
+    await server.routes.get("/dsh-rpc/status")!(fakeReq({ method: "POST" }), res);
     assert.equal(res.status, 405);
     assert.equal(res.headers.allow, "GET");
   } finally {
@@ -185,7 +250,7 @@ test("a second generation takes over the same routes instead of colliding", asyn
   assert.equal(server.routes.size, 4, "re-adoption must not add routes");
 
   const res = fakeRes();
-  await server.routes.get("/dsh-rpc/status")(fakeReq(), res);
+  await server.routes.get("/dsh-rpc/status")!(fakeReq(), res);
   assert.equal(res.status, 200, "the newest generation answers");
 
   // The newest owner is the one allowed to unmount, and disposing the older

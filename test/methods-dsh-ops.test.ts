@@ -8,22 +8,78 @@ import { TASK_ERROR, isTaskError } from "../dist/lib/tasks/errors.mjs";
 import { createPreview } from "../dist/lib/tasks/preview.mjs";
 import { openStore } from "../dist/lib/tasks/store.mjs";
 
-function makeFakeSessionController(overrides = {}) {
-  const calls = [];
+interface FakeControllerReq {
+  agentPreset?: string;
+  requestId?: string;
+  [key: string]: unknown;
+}
+
+type FakeControllerCall = [string, FakeControllerReq?];
+
+interface DshOpsMethodsView {
+  registerAgent(params: Record<string, unknown>): Promise<{
+    agentId: string;
+    projectId: string;
+    capabilityRevisions: Array<{ revisionId: string }>;
+  }>;
+  submitTask(params: Record<string, unknown>): Promise<{ taskId: string }>;
+  dispatchTask(params: Record<string, unknown>): Promise<{
+    status: string;
+    attemptId: string;
+    locator: { kind: string; sessionId: string };
+  }>;
+  decideApprovalTask(params: Record<string, unknown>): Promise<unknown>;
+}
+
+const seedBaseline = seedBaselineEntities as unknown as (
+  store: unknown,
+  seed: Record<string, unknown>,
+) => Promise<void>;
+const buildOps = createDshAdapterOps as unknown as (opts: {
+  sessionController: unknown;
+  config?: Record<string, unknown>;
+  approvals?: unknown;
+}) => {
+  createSession(p: Record<string, unknown>): Promise<{ ok: boolean; sessionId?: string; reason?: string }>;
+  askSession(p: Record<string, unknown>): Promise<{ ok: boolean; status: string }>;
+  promptSession(p: Record<string, unknown>): Promise<{ ok: boolean; mode: string }>;
+  sessionStatus(p: Record<string, unknown>): Promise<{
+    ok: boolean;
+    count?: number;
+    status?: string;
+    pendingApproval?: { approvalId: string };
+  }>;
+  sessionHistory(p: Record<string, unknown>): Promise<{ ok: boolean; cursor: number; records: unknown[] }>;
+  resolveApproval(p: Record<string, unknown>): Promise<{ ok: boolean; decision?: string }>;
+  cancelSession(p: Record<string, unknown>): Promise<{ ok: boolean; stopped: boolean }>;
+};
+const buildOpsMethods = createMethods as unknown as (
+  deps: Record<string, unknown>,
+  config: Record<string, unknown>,
+  services: Record<string, unknown>,
+  extra: Record<string, unknown>,
+) => DshOpsMethodsView;
+const buildOpsDispatcher = buildDispatcher as unknown as (methods: DshOpsMethodsView) => (
+  method: string,
+  params: Record<string, unknown>,
+) => Promise<{ decision: string; status: string; operationId: string }>;
+
+function makeFakeSessionController(overrides: Record<string, unknown> = {}) {
+  const calls: FakeControllerCall[] = [];
   let createdSeq = 0;
   return {
     calls,
     sessionController: {
-      async create(req) {
+      async create(req: FakeControllerReq) {
         calls.push(["create", req]);
         createdSeq += 1;
         return { sessionId: `sess_${createdSeq}`, agentPreset: req.agentPreset ?? "coder" };
       },
-      async prompt(req) {
+      async prompt(req: FakeControllerReq) {
         calls.push(["prompt", req]);
         return { accepted: true, requestId: req.requestId };
       },
-      async cancel(req) {
+      async cancel(req: FakeControllerReq) {
         calls.push(["cancel", req]);
         return { accepted: true, stopped: false };
       },
@@ -36,7 +92,7 @@ function makeFakeSessionController(overrides = {}) {
           ],
         };
       },
-      async *follow(req) {
+      async *follow(req: FakeControllerReq) {
         calls.push(["follow", req]);
         yield {
           type: "snapshot",
@@ -71,14 +127,14 @@ function validCard(agentId = "ag_1", kind = "dsh") {
 
 test("createDshAdapterOps wraps sessionController + approvals without throwing", async () => {
   const { sessionController, calls } = makeFakeSessionController();
-  const resolvedCalls = [];
+  const resolvedCalls: Array<{ id: string; decision: string; note?: string }> = [];
   const approvals = {
-    async waitForAny({ sessionId }) {
+    async waitForAny({ sessionId }: { sessionId: string }) {
       return sessionId === "sess_wait_apr"
         ? { pending: [{ approvalId: "apr_7", toolName: "bash" }] }
         : { pending: [] };
     },
-    resolve(id, decision, note) {
+    resolve(id: string, decision: string, note?: string) {
       resolvedCalls.push({ id, decision, note });
       return id === "apr_7"
         ? { resolved: true, sessionId: "sess_wait_apr", toolName: "bash" }
@@ -86,7 +142,7 @@ test("createDshAdapterOps wraps sessionController + approvals without throwing",
     },
   };
 
-  const ops = createDshAdapterOps({
+  const ops = buildOps({
     sessionController,
     config: { defaultCwd: "C:\\repo" },
     approvals,
@@ -113,7 +169,7 @@ test("createDshAdapterOps wraps sessionController + approvals without throwing",
 
   const aprSt = await ops.sessionStatus({ sessionId: "sess_wait_apr" });
   assert.equal(aprSt.status, "waiting_approval");
-  assert.equal(aprSt.pendingApproval.approvalId, "apr_7");
+  assert.equal(aprSt.pendingApproval!.approvalId, "apr_7");
 
   const doneSt = await ops.sessionStatus({ sessionId: "sess_done" });
   assert.equal(doneSt.status, "completed");
@@ -137,7 +193,7 @@ test("createDshAdapterOps wraps sessionController + approvals without throwing",
   assert.ok(calls.some(([m]) => m === "cancel"));
 
   // Throwing controller errors are caught cleanly into `{ ok: false, reason }`.
-  const brokenOps = createDshAdapterOps({
+  const brokenOps = buildOps({
     sessionController: {
       async create() {
         throw new Error("host down");
@@ -146,20 +202,22 @@ test("createDshAdapterOps wraps sessionController + approvals without throwing",
   });
   const brokenRes = await brokenOps.createSession({});
   assert.equal(brokenRes.ok, false);
-  assert.match(brokenRes.reason, /host down/);
+  assert.match(brokenRes.reason ?? "", /host down/);
 });
 
 test("createMethods auto-wires dsh adapter when tasksEnabled=true and validates registerAgent + decideApproval", async () => {
   const store = openStore({ path: ":memory:" });
-  const engine = createTaskEngine(store);
+  const engine = createTaskEngine(store) as unknown as {
+    applyReport(p: Record<string, unknown>): Promise<{ status: string }>;
+  };
   try {
-    await seedBaselineEntities(store, {
+    await seedBaseline(store, {
       principal: { principalId: "local-operator" },
       workspace: { workspaceId: "local", rootPath: "C:\\work\\repo" },
       capabilityRevision: { revisionId: "cap_1", capability: "dsh.test@1" },
     });
     const { sessionController } = makeFakeSessionController();
-    const methods = createMethods(
+    const methods = buildOpsMethods(
       { sessionController, webServer: { getOrigin: () => "http://127.0.0.1:1" }, taskStore: store, taskEngine: engine },
       { tasksEnabled: true, tasksMaxConcurrent: 2 },
       { logger: { info() {}, warn() {}, error() {}, debug() {} }, get: () => undefined },
@@ -236,7 +294,7 @@ test("createMethods auto-wires dsh adapter when tasksEnabled=true and validates 
     );
 
     // Valid allow decision via HTTP dispatcher -> maps to allow-once in engine
-    const dispatchRpc = buildDispatcher(methods);
+    const dispatchRpc = buildOpsDispatcher(methods);
     const decided = await dispatchRpc("dsh.tasks.decideApproval", {
       taskId: submitted.taskId,
       attemptId: disp.attemptId,
@@ -284,9 +342,9 @@ test("createMethods auto-wires dsh adapter when tasksEnabled=true and validates 
             card: validCard("ag_codex_bad", "codex"),
             adapterConfigRef: badRef,
           }),
-        (err) =>
+        (err: { message?: string }) =>
           isTaskError(err, TASK_ERROR.VALIDATION_FAILED) &&
-          /tasksAdapters\.<kind>\.binary/.test(err.message),
+          /tasksAdapters\.<kind>\.binary/.test(err.message ?? ""),
       );
     }
   } finally {
