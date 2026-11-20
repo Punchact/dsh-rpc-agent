@@ -1,6 +1,6 @@
 # 变更记录
 
-## [0.9.5] - 未发布
+## [0.9.5] - 2026-11-20（内部锁定，未发布）
 
 - **五个只读 MCP 工具补上名字级测试**：`dsh_status`、`dsh_workspaces`、`dsh_capabilities`、`dsh_permissions`、`dsh_approvals_pending` 此前只有底层 RPC 被覆盖，缺的是「工具名 → RPC 方法 → 参数映射 → 渲染文案」这一层——映射写错（例如 `wait_ms` 没转成 `waitMs`、`session_id` 没转成 `sessionId`）在旧测试里照样全绿。新增 `test/mcp-base-tools.test.ts` 16 例：五个工具的名字注册、各自调用哪条 RPC、参数映射、`dsh_status` 的四行文案与「没有 endpoint 时打 `?`」、三种空结果文案（`(no workspaces registered)` / `(this deployment exposes no permission presets)` / `does not hold escalations: approvals.mode=…`）、审批转义里 `call:` 优先展示 args 而不是 argv，以及两条「坏参数不许到达插件」（schema 层拦住类型错、handler 层拦住空 `session_id`）。写测试时发现桥每次 reset 都会先发一帧 `dsh.discover` 取 `tasksEnabled`，断言前必须把它滤掉，否则会误判成「参数非法也调到了插件」。
 - **门禁脚本也迁到 TypeScript（9 个文件 / 1,458 行）**：`scripts/` 下 `build`、`check-dist-fidelity`、`check-docs`、`check-entry-parity`、`check-package`、`check-release-path`、`check-surface`、`check-test-targets`、`count-cases` 从 `.mjs` 改成 `.ts`，由 Node 22.19+/24 的原生类型剥离直接运行（`node scripts/build.ts`），不需要额外构建步骤，也**不进发布包**。此前这 1,458 行既不在 `tsconfig.json` 的 `include` 里、也没有任何类型检查覆盖——"发布面 100% TypeScript"之外的一块盲区。新增 `tsconfig.scripts.json`（`noEmit`、`allowImportingTsExtensions`、继承 `strict`），`npm run check:types` 现在同时检查 `client.js` 与 `scripts/`，strict 报错从 **93 条收敛到 0**；`package.json`、两个 workflow、`docs/` 里的脚本路径同步更新，CI 的语法检查 glob 改为 `scripts/*.ts`（`node --check` 对 `.ts` 可用，本机与 CI 实测）。九处脚本的运行输出文案逐字未变（`docs ok …`、`surface ok …`、`check-release-path: ok …`、`build: 编译 41 个 .mts …` 等），`npm run verify` 与 `test:host` 均 exit 0。
