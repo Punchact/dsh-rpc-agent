@@ -989,3 +989,15 @@ A07（外部执行方）勘察时发现：任务中心能登记一个 `antigravi
 因此 `.github/workflows/acceptance.yml` 只挂 `workflow_dispatch`：手动选 runner、必要时给 url、勾 `require_live` 控制“没宿主时是否要失败”。开跑前先用 `rpcCall("dsh.ping")` 探一次，探到才跑，探不到 `::notice` 记一句“按设计跳过”并以 0 退出，并在 job summary 里写清两条接宿主的路。
 
 边界：这不是“e2e 被降级”，而是把“必须在真机上才有意义”的验证放到它唯一有意义的地方——本机或 self-hosted runner。PR 门禁仍然由 `npm run verify`（468 例 + 四道 gate）负责，两者职责不重叠。
+
+## 71. 决策 0.9.5-l：确认停手的窗口要够长，而且必须配得到
+
+现象：`a09b` 取消探针三次里红过一次——`cancel.requested` 之后升到了 `needs_reconcile`，事件尾是 `cancel.unconfirmed`。查下来 executor 的 `turn/completed(status=interrupted)` 来得比 1.5 秒晚，桥按“等不到确认就是没确认”的规矩把任务交给人。
+
+决定：
+
+- 默认窗口从 1.5 秒提到 **5 秒**。这个等待发生在 `pump()` 里，5 秒仍然有界（推进环 5 秒一遍，`inFlight` 挡住重叠），代价是一遍推进最多慢半拍。
+- 窗口必须能从宿主配置改：`tasksAdapters.codex.interruptConfirmMs`（0–60000，0 表示从不等待，即 0.9.5 之前的行为）。
+- 顺手补上一个更底层的问题：`asAdaptersMap` 会构造一个“干净对象”，只放行 `enabled`/`adapterConfigRef`/`binary`/`projectId`/`model`，**其余键静默丢弃**——所以 README 写了也白写。现在把 `interruptConfirmMs`、`probeTimeoutMs` 纳入白名单并做范围校验，写错类型或越界直接 `ConfigError`，不装作没配。
+
+边界：确认窗口只覆盖“执行方主动报告停手”这一种证据；执行方彻底无响应时仍走既有升级路径（`needs_reconcile` + `cancel.unconfirmed`），不在这里伪造成功。回归：`test/config-adapters.test.ts` 六个用例（数值放行、向下取整、0 可用、字符串拒绝、越界拒绝、未知键仍被丢掉）。

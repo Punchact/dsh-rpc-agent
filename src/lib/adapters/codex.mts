@@ -395,7 +395,12 @@ export function createCodexAdapter({
   threadSource = "user",
   requestTimeoutMs = 5_000,
   probeTimeoutMs = 4_000,
-  interruptConfirmMs = 1_500,
+  // 1.5 s was too short: a real turn that had been asked to write forty paragraphs took
+  // longer than that to acknowledge the interrupt, so the bridge escalated a stop the
+  // executor *was* honouring (measured 2026-11-22: one flake in three runs at 1.5 s).
+  // Five seconds still bounds the pump, and an operator can lower it through
+  // `tasksAdapters.codex.interruptConfirmMs`.
+  interruptConfirmMs = 5_000,
   fsOps = { existsSync, readdirSync, accessSync, statSync } as unknown as CodexFsOps,
 }: CreateCodexAdapterOptions = {}): CodexAdapter {
   // The service name is what the desktop app writes for its own threads; defaulting it to

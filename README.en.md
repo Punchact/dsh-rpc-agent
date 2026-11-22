@@ -76,7 +76,7 @@ Repository and package name are both `dsh-rpc-agent`; the commands (`dsh-rpc`, `
 - **Self-describing**: `dsh_capabilities` returns an eight-section snapshot (runtime, permission presets, callable tools, MCP prefixes, sessions, workspaces, plugins), so a planner does not have to guess what this machine offers.
 - **No pretend knowledge**: when an outer client caps tool calls below the bridge budget, the bridge says so and recommends polling in slices instead of letting a long job look like a failure.
 - **Managed external agent tasks (Task centre, `tasksEnabled: false` by default)**: a 15-table SQLite ledger, 11-state machine, and capability cards/read-only probes driving DSH itself, Antigravity, and Codex App Server; see [docs/task-center.md](./docs/task-center.md).
-- **Regression tests guard the sharp edges**: 51 test files (468 cases) + catalog smoke (468/468 pass locally, including the 15 `approvals` cases) + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
+- **Regression tests guard the sharp edges**: 52 test files (474 cases) + catalog smoke (474/474 pass locally, including the 15 `approvals` cases) + a real-WebServer integration test + end-to-end and edge suites against a live Harness.
 
 ## Install and update
 
@@ -452,7 +452,7 @@ Asynchronous work delegated to external agents (DSH itself, Antigravity, or Code
 | `tasksPreviewTtlMs` | `300000` | Integer `1000..3600000`; lifetime of one-shot `dsh.tasks.preview` tokens in ms |
 | `tasksDbPath` | `null` | String or `null`; custom SQLite file path (defaults to `$DSH_HOME/storages/task-center/tasks.db`) |
 | `tasksProbeTimeoutMs` | `5000` | Integer `100..60000`; per-probe timeout for `dsh.agents.probe` |
-| `tasksAdapters` | `{}` | Object of per-kind adapter construction parameters (e.g. `{ codex: { binary: "…" } }`); the register RPC may **not** choose an executable |
+| `tasksAdapters` | `{}` | Object of per-kind adapter construction parameters (e.g. `{ codex: { binary: "…", interruptConfirmMs: 5000 } }`). Only these keys are read: `enabled` / `adapterConfigRef` / `binary` / `projectId` / `model` / `interruptConfirmMs` (0–60000, how long to wait for the executor to confirm a stop) / `probeTimeoutMs` (100–60000); anything else is dropped silently; the register RPC may **not** choose an executable |
 | `tasksDispatchMaxSteps` | `50` | Integer `1..1000`; step budget for one `dsh.tasks.pump`/`dsh.tasks.dispatch` call |
 | `tasksAutopilot` | `true` | Boolean; when `true` the Host runs a bounded pass on the interval below (starts due tasks, advances active ones). This is the only reason a task submitted over MCP moves on its own; `false` falls back to manual `tasks dispatch` / `tasks pump` |
 | `tasksAutopilotIntervalMs` | `5000` | Integer `1000..600000`; how often the machine side drives the ledger |
@@ -789,7 +789,7 @@ npm run verify                 # build + entry parity + npm test + check:package
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 51 test files, 468 cases, plus catalog smoke; no running Harness needed
+npm test                       # 52 test files, 474 cases, plus catalog smoke; no running Harness needed
 node test/host.test.ts         # 1 case: real WebServer integration (needs npm ci first)
 npm run test:e2e               # 14 cases: end to end against a real Harness (--cwd takes an absolute path only)
 npm run test:edge              # 24 cases: protocol/edge adversarial, against a real Harness
@@ -817,7 +817,7 @@ npm run docs:surface    # re-extract the snapshot after editing the plan doc (ne
 `check:surface` looks both ways: everything the plan promised must exist, and any new task/agent-family interface in code must be either in the plan or recorded in the snapshot's `implementationOnly`. That is the check that would have caught 0.9.0's "plan promised `dsh.tasks.resolve`, implementation missed it".
 
 <details>
-<summary>What each of the 51 test files covers</summary>
+<summary>What each of the 52 test files covers</summary>
 
 | Suite | Cases | Covers |
 | --- | --- | --- |
@@ -856,6 +856,7 @@ npm run docs:surface    # re-extract the snapshot after editing the plan doc (ne
 | `tasks-dispatch` | 12 | `startTask`/`pump`/`drainEffects`, lease reclamation, atomic `maxConcurrent` gate, failure sanitising |
 | `tasks-autopilot` | 7 | The advance loop: every active status covered, one failure does not stop the pass, a slow pass does not stack, an empty ledger stays quiet, async paging is awaited before dispatch, and a broken ledger reports instead of throwing |
 | `config-breakers` | 3 | Five circuit-breaker defaults, valid bounds, `ConfigError` rejections |
+| `config-adapters` | 6 | Numeric adapter knobs (`interruptConfirmMs`/`probeTimeoutMs`) are honoured, bad values are refused, unknown keys stay dropped |
 | `index-wiring` | 3 | Off leaves DB untouched, on initializes/seeds, external adapter init degradation |
 | `mcp-tasks-tools` | 6 | 8 gated task MCP tools visibility, disabled rejections, `reconcile`/`decideApproval` exclusion, argument validation and prototype-key refusal |
 | `mcp-summary` | 3 | A text-only summary must say "unvalidated": the marker rides the `result` line and repeats in the meta line, and validated results stay clean |
@@ -875,7 +876,7 @@ npm run docs:surface    # re-extract the snapshot after editing the plan doc (ne
 
 </details>
 
-`npm test` runs these 51 test files plus the catalog smoke in a fixed order; `npm run test:host` runs the real-WebServer integration test; `npm run test:e2e` / `npm run test:edge` need a live Harness.
+`npm test` runs these 52 test files plus the catalog smoke in a fixed order; `npm run test:host` runs the real-WebServer integration test; `npm run test:e2e` / `npm run test:edge` need a live Harness.
 
 > [!TIP]
 > **If `node --test` hits `spawn EPERM` in a restricted sandbox**: run individual files via `node <file>` or pass `node --test --test-isolation=none <file>`.
@@ -887,7 +888,7 @@ A few worth calling out:
 - **Edge** probes the protocol layer: batches, notifications, id shapes, auth headers, oversized bodies (a genuine 413, not a dropped connection), parameter-injection defences, timeout clamping, concurrent asks, `limit` semantics.
 - **Port drift** (manual): point `endpoint.json` at a dead port and run `dsh-rpc ping`; expect exit code 3 and a readable error mentioning `nothing is listening`, `pid` and `health --wait`.
 
-Local verification (2026-11-19, 0.9.0, real repository): all 51 test files in the `npm test` chain pass (**468/468** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.ts` (`methods: 34` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`). Formatting (UTF-8 without BOM, LF) is a review convention here, not an automated gate.
+Local verification (2026-11-19, 0.9.0, real repository): all 52 test files in the `npm test` chain pass (**474/474** cases, including the 15 `approvals` cases); `test/host.test.mjs` adds one real-WebServer integration case. Also green: `node test/catalog.smoke.ts` (`methods: 34` / `catalogue ok`), `npm run check:version` (`version ok: 0.9.0`). Formatting (UTF-8 without BOM, LF) is a review convention here, not an automated gate.
 
 ## License
 
