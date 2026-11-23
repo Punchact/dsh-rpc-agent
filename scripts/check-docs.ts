@@ -59,6 +59,11 @@ interface SuiteTableRule {
   header: RegExp;
 }
 
+interface ConfigTableRule {
+  file: string;
+  header: RegExp;
+}
+
 const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const read = (rel: string): string => readFileSync(join(REPO, rel), "utf8").replace(/\r\n/g, "\n");
 const readDist = (rel: string): string => {
@@ -250,6 +255,39 @@ for (const table of suiteTables) {
   if (rows !== expected.testFiles) {
     const line = text.slice(0, startIdx).split("\n").length;
     problems.push(`${table.file}:${line}: 测试表 ${rows} 行，链上有 ${expected.testFiles} 个测试文件 — 明细表也要跟着补/删`);
+  }
+}
+
+// --- 配置表结构：每行的未转义竖线数量必须等于表头 -----------------------------------------
+// 防止合并单元格或漏写列（曾发生 `tasksWorkspaceRoot` 与 `tasksExternalAdapter` 用 `||` 粘在同一行）。
+const countUnescapedPipes = (line: string): number => line.replace(/\\\|/g, "").match(/\|/g)?.length ?? 0;
+
+const configTables: ConfigTableRule[] = [
+  { file: "README.md", header: /^\| 开关 \| 默认值 \| 取值与含义 \|$/m },
+  { file: "README.en.md", header: /^\| Switch \| Default \| Range & meaning \|$/m },
+];
+for (const table of configTables) {
+  const lines = read(table.file).split("\n");
+  const headerIdx = lines.findIndex((line) => table.header.test(line));
+  if (headerIdx < 0) {
+    problems.push(`${table.file}: 找不到配置表表头（${table.header}）— 表头被改写了，请同步更新 scripts/check-docs.ts`);
+    continue;
+  }
+  const headerPipes = countUnescapedPipes(lines[headerIdx] ?? "");
+  let dataRows = 0;
+  for (let i = headerIdx + 1; i < lines.length; i += 1) {
+    const line = lines[i] ?? "";
+    if (!line.startsWith("|")) break;
+    const pipes = countUnescapedPipes(line);
+    if (pipes !== headerPipes) {
+      problems.push(
+        `${table.file}:${i + 1}: 配置表该行竖线数=${pipes}，与表头 (${headerPipes}) 不等 — 「${line.slice(0, 60)}」`,
+      );
+    }
+    if (i > headerIdx + 1) dataRows += 1;
+  }
+  if (dataRows === 0) {
+    problems.push(`${table.file}:${headerIdx + 1}: 配置表缺少数据行`);
   }
 }
 

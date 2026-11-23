@@ -1,6 +1,8 @@
-# DSH 任务中心操作手册（0.9.3）
+# DSH 任务中心操作手册
 
 > 面向本机操作者与维护者。任务中心默认关闭（`tasksEnabled: false`），打开后由本插件托管 DSH 自身、Antigravity 与 Codex App Server 的异步长任务。
+
+**这是什么 / 什么时候用它**：任务中心是本插件内建的本机异步任务队列与 SQLite 账本（`$DSH_HOME/storages/task-center/tasks.db`），按能力卡（`capability-card@1`）、并发上限与 11 态状态机统一调度长任务，并在需要审批、答疑、核对或签收时暂停等待人类介入。如果只需要即问即答的单轮会话，直接用 `dsh_ask` / `dsh_wait` 即可；当你需要跨重启不丢的任务队列、限制全局并发、或者要跨 DSH / Antigravity / Codex 派发长任务并保留可核对的交付证据时，再启用任务中心。
 
 ---
 

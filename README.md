@@ -62,6 +62,56 @@ http://127.0.0.1:<port>/dsh-rpc   ->   DSH agent
 
 仓库与包名都是 `dsh-rpc-agent`；命令行（`dsh-rpc`、`dsh-rpc-mcp`）、端点路径（`/dsh-rpc`）、状态目录（`~/.dsh/dsh-rpc`）与 `DSH_RPC_*` 环境变量属运行时契约，改名会让已装好的配置与已配对的 token 一起失效。
 
+## 任务中心（Task centre）
+
+外部 agent（如 Antigravity、Codex App Server 或 DSH 自身会话）的异步任务不再靠人或聊天上下文转述状态：任务账本独立保存在本机 SQLite（`$DSH_HOME/storages/task-center/tasks.db`），每个执行方通过**能力卡（`capability-card@1`）与只读探测**把能干什么、不能干什么提前摆在台面上，不再是黑箱。默认关闭（`tasksEnabled: false`），打开后同时提供 CLI、JSON-RPC 与 11 个受开关门控的 MCP 工具（操作详见 [docs/task-center.md](./docs/task-center.md)，备份与回滚见 [docs/backup-restore-rollback.md](./docs/backup-restore-rollback.md)）。
+
+### 谁在哪跑
+
+- **三类执行方适配器**：内建 `dsh` 基准适配器直接走 Host 的 `sessionController`；外部执行方支持 `antigravity` 与 `codex`（Codex App Server），由 `tasksExternalAdapter`（`"none" | "antigravity" | "codex"`）决定额外装配哪一个。留 `"none"` 时，注册成 `antigravity` / `codex` 的代理会在派发时被拒（`ADAPTER_UNAVAILABLE`），任务停在 `queued`。
+- **工作区与构造参数**：`tasksWorkspaceRoot` 决定这个桥的任务属于哪棵树，外部执行方的会话会用它当 `cwd`（落在对方窗口的同名项目下）；`tasksAdapters` 按执行方种类提供构造参数（如 `{ codex: { binary: "…" } }`），**不允许**在注册 RPC 里指定可执行文件。
+- **开关与混版**：受 `tasksEnabled` 门控，开启且 `tasksAutopilot: true`（默认）时宿主按 `tasksAutopilotIntervalMs`（默认 `5000` ms）自动派发与推进；全部配置开关见[配置](#配置)。当 `0.9.x` 的 CLI/MCP 桥连着 `0.8.x` 插件时，任务工具在 `tools/list` 下不会出现，直接调用会如实失败（CLI 报 `unknown method` 并附 `next: this Harness plugin predates the task centre (0.9.0)…`，MCP 提示把 profile 里的插件升级到 `0.9.0` 并重启宿主），改 `tasksEnabled` 无效。
+
+### 凭什么信它
+
+1. **能力卡 `limitations` 必填且空列表会被拒**：只写优点、不承认短板的卡片在 `normalizeCard` 阶段直接报 `INVALID_CARD`。
+2. **`declared` 与 `verified` 冲突时以 `verified` 为准**：只读探测（`dsh.agents.probe`）永不在远端新建任务或发 prompt，未全部通过探测的卡片状态为 `partial` 或 `unknown`。
+3. **`degraded[]` 提前亮明降级后果**：能力卡声明为 `"unsupported"` 的控制项会在 `dsh.tasks.preview`、`dsh.tasks.get` 与 `dsh.tasks.list` 里映射成可读的 `{ control, effect }`（例如缺少 `cancel` 时取消请求只会转 `needs_reconcile`）。
+4. **`cancel.confirmed` 必须有状态机证据，HTTP 200 不算**：Antigravity 只有观测到 `RUNNING → CANCELING → IDLE` 且带 `EXECUTOR_TERMINATION_REASON_USER_CANCELED` 才确认取消；Codex 只有观测到 `turn/completed.status="interrupted"` 才确认取消。
+5. **`approvals` 三态门禁**：桥侧延续 `approvals.mode`（`off` / `deny` / `delegate`，见[权限与升权](#权限与升权)），无人值守下不悄悄放行；任务运行中遇待批操作则进入 `waiting_approval`，等人类或调用方显式裁决。
+
+### 账本与十一个状态
+
+账本落盘在本机 SQLite，任务按十一个状态推进：`queued → dispatching → running → waiting_input/waiting_approval → review_pending → succeeded/failed/cancelled/needs_reconcile`（外加取消过渡态 `cancel_requested`）。
+
+每次查询按优先级现算派生阶段（`phase`，**阶段 = 在等谁**，不写回数据库）：
+- **等人处理**：`person/delivery`（待投递输入重试中）→ `person/approval`（待审批）→ `person/reconcile`（进入 `needs_reconcile` 且租约到期、取消未被确认或派发断链，需要人工核对；排在问题之前，执行方的「已停止」都不可信时，它的遗留问题不该由人来答）→ `person/answer`（待回答决策/输入问题）→ `person/review`（待验收/结果校验未过）。
+- **等机器执行**：`machine/queued`（`queued`/`dispatching`）→ `machine/working`（执行中）。
+- **完结**：`done`（终态 `succeeded`/`failed`/`cancelled`）。
+- 当任务没有打开中的 `attention` 记录时，派生阶段不会谎称「等你」。
+
+### 人只做三件事
+
+开启 `tasksAutopilot` 时，机器侧自动执行 `dispatch` 与 `pump`（这两个动词刻意不暴露给 MCP）。人类操作者只在需要判断时介入三件事：
+
+1. **裁决 `resolve`**：对 `review_pending`、`needs_reconcile` 或带未闭 `review` 问题的运行中任务调用 `dsh.tasks.resolve` / `tasks resolve`（仅 RPC/CLI，不进 MCP），按 `accept` / `reject` / `cancel` / `requeue` 签收终态；遇待批升权则用 `dsh.tasks.decideApproval` / `tasks approve` 裁决 `allow` 或 `deny`。
+2. **回答问题 `input`**：当任务处于 `running` 或 `waiting_input` 时，通过 `dsh.tasks.input` / `dsh_task_input` 向执行方补充输入或回答 `questionId`。
+3. **核对 `reconcile`**：当启动失败、取消未确认或收到未知停机状态而进入 `needs_reconcile` 时，对照 `tasks get` 返回的 `locator` 去真实宿主窗口亲眼确认结果，再用 `dsh.tasks.reconcile` / `tasks reconcile` 写入观测证据并关闭残留 `attempt`。
+
+**典型 CLI 流程**（可复制执行，前置已设 `tasksEnabled: true` 并重启宿主）：
+
+```powershell
+node bin/dsh-rpc.mjs agents register --file ./card.json --json
+node bin/dsh-rpc.mjs agents probe --agent ag-dsh --json
+node bin/dsh-rpc.mjs tasks preview --principal local-operator --workspace local --agent ag-dsh --capability cap_1 --input '{"prompt":"检查仓库状态"}' --json
+node bin/dsh-rpc.mjs tasks submit --preview <previewId> --principal local-operator --capability cap_1 --workspace local --agent ag-dsh --idempotency-key run-001 --json
+node bin/dsh-rpc.mjs tasks dispatch <taskId> --json
+node bin/dsh-rpc.mjs tasks pump <taskId> --max-steps 20 --json
+node bin/dsh-rpc.mjs tasks get <taskId> --json
+# 遇待批：node bin/dsh-rpc.mjs tasks approve --task <taskId> --attempt <attemptId> --approval <approvalId> --decision allow --reason "确认放行" --json
+# 遇待核对（needs_reconcile）：node bin/dsh-rpc.mjs tasks reconcile <taskId> --observed cancelled --note "已确认外部停止" --json
+```
+
 ## 亮点
 
 - **零运行期依赖**：装进 profile 只多一个包，不引入 peer 解析或版本冲突。
@@ -437,59 +487,6 @@ trace:
 - **超预算不静默**：被预算裁掉的调用在末尾写明 `… +N more (call dsh_history for the full window)`。
 - **关掉它**：`config.traceDefault: "none"`，或单次传 `trace: "none"`；要更多细节就传 `"full"`。
 
-### 任务中心（Task centre）
-
-外部 agent（如 Antigravity、Codex App Server 或 DSH 自身会话）的异步任务不再靠人或聊天上下文转述状态：任务账本独立保存在本机 SQLite（`$DSH_HOME/storages/task-center/tasks.db`），每个执行方通过**能力卡（`capability-card@1`）与只读探测**把能干什么、不能干什么提前摆在台面上，不再是黑箱。默认关闭，打开后同时提供 CLI、JSON-RPC 与 11 个受开关门控的 MCP 工具（操作详见 [docs/task-center.md](./docs/task-center.md)，备份与回滚见 [docs/backup-restore-rollback.md](./docs/backup-restore-rollback.md)）。
-
-**熔断与配置开关**（全部写入 `cordis.patch.yml` 的 `config`）：
-
-| 开关 | 默认值 | 取值与含义 |
-| --- | --- | --- |
-| `tasksEnabled` | `false` | 布尔总开关；`false` 时不开库、不起定时器、MCP 隐藏任务工具 |
-| `tasksMaxConcurrent` | `1` | 整数 `1..32`；全局活跃任务并发上限，超限在 `dispatch` 报 `STATE_CONFLICT` |
-| `tasksRequireReconcileOnUnknown` | `true` | 布尔；不可识别状态或无 `attention` 的 `blocked` 是否强制转 `needs_reconcile` |
-| `tasksWorkspaceRoot` | `""`（继承宿主 cwd） | 这个桥的任务属于哪棵树。外部执行方的会话用它当 `cwd`，因此会落在对方窗口的同名项目下；设置后 `local` 工作区的根会被替换，未设置则不动 || `tasksExternalAdapter` | `"none"` | `"none" \| "antigravity" \| "codex"`；除内建 DSH 基准适配器外额外装配的外部执行方。留 `"none"` 时，注册成 `antigravity`/`codex` 的代理会在派发时被拒（`ADAPTER_UNAVAILABLE`），任务停在 `queued` |
-| `tasksPreviewTtlMs` | `300000` | 整数 `1000..3600000`；`dsh.tasks.preview` 预览凭证有效时长（毫秒） |
-| `tasksDbPath` | `null` | 字符串或 `null`；自定义 SQLite 路径，留空使用 `$DSH_HOME/storages/task-center/tasks.db` |
-| `tasksProbeTimeoutMs` | `5000` | 整数 `100..60000`；`dsh.agents.probe` 只读探测的单次超时 |
-| `tasksAdapters` | `{}` | 对象；按执行方种类给适配器的构造参数（如 `{ codex: { binary: "…" } }`）；**不允许**在注册 RPC 里指定可执行文件 |
-| `tasksDispatchMaxSteps` | `50` | 整数 `1..1000`；一次 `dsh.tasks.pump`/`dsh.tasks.dispatch` 内推进的最大步数 |
-| `tasksAutopilot` | `true` | 布尔；为 `true` 时宿主按下面的间隔跑有界推进环（启动到期任务 + 推进活跃任务），这是经 MCP 提交的任务能自己往前走的唯一机制；置 `false` 则退回纯手工 `tasks dispatch` / `tasks pump` |
-| `tasksAutopilotIntervalMs` | `5000` | 整数 `1000..600000`；机器侧推进的间隔 |
-| `tasksAutopilotMaxStart` | `2` | 整数 `1..32`；单遍推进最多启动几个 `queued` 任务 |
-| `tasksAutopilotMaxPump` | `4` | 整数 `1..200`；单遍推进对每种活跃状态最多推进几个任务 |
-| `tasksAdapterDebugDetail` | `false` | 布尔；为 `true` 时把适配器失败的原始文本（脱敏后截断到 512 字符）以 `[raw]` 前缀写进宿主 debug 日志；默认只记安全字段 |
-
-**典型 CLI 流程**（可复制执行，前置已设 `tasksEnabled: true` 并重启宿主）：
-
-```powershell
-node bin/dsh-rpc.mjs agents register --file ./card.json --json
-node bin/dsh-rpc.mjs agents probe --agent ag-dsh --json
-node bin/dsh-rpc.mjs tasks preview --principal local-operator --workspace local --agent ag-dsh --capability cap_1 --input '{"prompt":"检查仓库状态"}' --json
-node bin/dsh-rpc.mjs tasks submit --preview <previewId> --principal local-operator --capability cap_1 --workspace local --agent ag-dsh --idempotency-key run-001 --json
-node bin/dsh-rpc.mjs tasks dispatch <taskId> --json
-node bin/dsh-rpc.mjs tasks pump <taskId> --max-steps 20 --json
-node bin/dsh-rpc.mjs tasks get <taskId> --json
-# 遇待批：node bin/dsh-rpc.mjs tasks approve --task <taskId> --attempt <attemptId> --approval <approvalId> --decision allow --reason "确认放行" --json
-# 遇待核对（needs_reconcile）：node bin/dsh-rpc.mjs tasks reconcile <taskId> --observed cancelled --note "已确认外部停止" --json
-```
-
-**派生阶段（`phase`）与 `attention` 怎么读**：
-
-`phase` 每次查询按优先级现算，不写回数据库：
-- 等人处理：`person/delivery`（待投递输入重试中）→ `person/approval`（待审批）→ `person/reconcile`（进入 `needs_reconcile` 且租约到期、取消未被确认或派发断链，需要人工核对；排在问题之前，执行方的「已停止」都不可信时，它的遗留问题不该由人来答）→ `person/answer`（待回答决策/输入问题）→ `person/review`（待验收/结果校验未过）。
-- 等机器执行：`machine/queued`（`queued`/`dispatching`）→ `machine/working`（执行中）。
-- 完结：`done`（终态 `succeeded`/`failed`/`cancelled`）。
-- 当任务没有打开中的 `attention` 记录时，派生阶段不会谎称「等你」。
-
-**三条诚实规则**：
-
-1. 能力卡的 `limitations` 必填且**空列表会被拒**：只写优点、不承认短板的卡片在 `normalizeCard` 阶段直接报 `INVALID_CARD`。
-2. `declared` 与 `verified` 冲突时**以 `verified` 为准**：声明永远不会覆盖实测探测结果，未全部通过只读探测的卡片状态为 `partial` 或 `unknown`。
-3. `cancel.confirmed` **必须有状态机证据，HTTP 200 不算**：Antigravity 只有观测到 `RUNNING → CANCELING → IDLE` 且带 `EXECUTOR_TERMINATION_REASON_USER_CANCELED` 才确认取消；Codex 只有观测到 `turn/completed.status="interrupted"` 才确认取消。
-
-**混版说明**：当 0.9.0 的 CLI/MCP 桥连着 0.8.x 的插件时，任务中心工具在 `tools/list` 下不会出现；直接调用则如实失败、绝不半成功——CLI 报 `dsh-rpc: unknown method: dsh.tasks.list` 并附 `next: this Harness plugin predates the task centre (0.9.0)…`，MCP 报 `this Harness plugin does not implement the task centre (0.9.0)` 并附 `upgrade the plugin inside the DSH profile to 0.9.0`。此时改 `tasksEnabled` 无用——那个开关只对 0.9.0 的插件有意义；把 profile 里的插件升级到 0.9.0 并重启宿主即可。
-
 ### `since` 只回增量
 
 不传是整轮；传了就只返回 `seq > since` 的事件，`text` 随之只含这段。**`status` / `turn` / `tools` / `usage` / `sandbox` 仍描述整轮**，`cursor` 照常前进。轮询进度用 `since: <上次的 cursor>`，不要重投。
@@ -615,6 +612,26 @@ approvals.mode=deny refused a sandbox escalation to "danger-full-access" for too
 ```
 
 其余键：`enabled`、`tokenFile`（自定义 token 路径）、`path`（默认 `/dsh-rpc`）、`logRequests`、`traceDefault`（默认 `"errors"`）、`maxResultChars`（默认 `20000`，`0` 表示不截断）、`timeoutAdvice`（默认 `true`）。环境变量 `DSH_RPC_TOKEN` 可覆盖 token（优先级高于文件），适合 CI 或不想落盘的场景。
+
+### 任务中心开关（`tasks*`，全部写入 `cordis.patch.yml` 的 `config`）
+
+| 开关 | 默认值 | 取值与含义 |
+| --- | --- | --- |
+| `tasksEnabled` | `false` | 布尔总开关；`false` 时不开库、不起定时器、MCP 隐藏任务工具 |
+| `tasksMaxConcurrent` | `1` | 整数 `1..32`；全局活跃任务并发上限，超限在 `dispatch` 报 `STATE_CONFLICT` |
+| `tasksRequireReconcileOnUnknown` | `true` | 布尔；不可识别状态或无 `attention` 的 `blocked` 是否强制转 `needs_reconcile` |
+| `tasksWorkspaceRoot` | `""`（继承宿主 cwd） | 这个桥的任务属于哪棵树。外部执行方的会话用它当 `cwd`，因此会落在对方窗口的同名项目下；设置后 `local` 工作区的根会被替换，未设置则不动 |
+| `tasksExternalAdapter` | `"none"` | `"none" \| "antigravity" \| "codex"`；除内建 DSH 基准适配器外额外装配的外部执行方。留 `"none"` 时，注册成 `antigravity`/`codex` 的代理会在派发时被拒（`ADAPTER_UNAVAILABLE`），任务停在 `queued` |
+| `tasksPreviewTtlMs` | `300000` | 整数 `1000..3600000`；`dsh.tasks.preview` 预览凭证有效时长（毫秒） |
+| `tasksDbPath` | `null` | 字符串或 `null`；自定义 SQLite 路径，留空使用 `$DSH_HOME/storages/task-center/tasks.db` |
+| `tasksProbeTimeoutMs` | `5000` | 整数 `100..60000`；`dsh.agents.probe` 只读探测的单次超时 |
+| `tasksAdapters` | `{}` | 对象；按执行方种类给适配器的构造参数（如 `{ codex: { binary: "…" } }`）；**不允许**在注册 RPC 里指定可执行文件 |
+| `tasksDispatchMaxSteps` | `50` | 整数 `1..1000`；一次 `dsh.tasks.pump`/`dsh.tasks.dispatch` 内推进的最大步数 |
+| `tasksAutopilot` | `true` | 布尔；为 `true` 时宿主按下面的间隔跑有界推进环（启动到期任务 + 推进活跃任务），这是经 MCP 提交的任务能自己往前走的唯一机制；置 `false` 则退回纯手工 `tasks dispatch` / `tasks pump` |
+| `tasksAutopilotIntervalMs` | `5000` | 整数 `1000..600000`；机器侧推进的间隔 |
+| `tasksAutopilotMaxStart` | `2` | 整数 `1..32`；单遍推进最多启动几个 `queued` 任务 |
+| `tasksAutopilotMaxPump` | `4` | 整数 `1..200`；单遍推进对每种活跃状态最多推进几个任务 |
+| `tasksAdapterDebugDetail` | `false` | 布尔；为 `true` 时把适配器失败的原始文本（脱敏后截断到 512 字符）以 `[raw]` 前缀写进宿主 debug 日志；默认只记安全字段 |
 
 ## 安全模型
 

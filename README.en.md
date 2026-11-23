@@ -62,6 +62,56 @@ The port is **not fixed**: DSH gets one from the OS on every launch, and it chan
 
 Repository and package name are both `dsh-rpc-agent`; the commands (`dsh-rpc`, `dsh-rpc-mcp`), the endpoint path (`/dsh-rpc`), the state directory (`~/.dsh/dsh-rpc`) and the `DSH_RPC_*` environment variables are runtime contract — renaming them breaks installed configs and paired tokens together.
 
+## Task centre
+
+Asynchronous work delegated to external agents (DSH itself, Antigravity, or Codex App Server) no longer relies on human relay or chat memory: the durable task ledger lives in a local SQLite database (`$DSH_HOME/storages/task-center/tasks.db`), and every executor's controls and weaknesses are inspectable through a **capability card (`capability-card@1`)** and read-only probes rather than treated as a black box. Disabled by default (`tasksEnabled: false`); enabling it exposes CLI, JSON-RPC, and 11 gated MCP tools (operations manual: [docs/task-center.md](./docs/task-center.md); backup and rollback: [docs/backup-restore-rollback.md](./docs/backup-restore-rollback.md)).
+
+### Who runs where
+
+- **Three executor adapters**: the built-in `dsh` baseline adapter drives the Host `sessionController` directly; external executors support `antigravity` and `codex` (Codex App Server), selected via `tasksExternalAdapter` (`"none" | "antigravity" | "codex"`). While it stays `"none"`, an agent registered as `antigravity`/`codex` is refused at dispatch (`ADAPTER_UNAVAILABLE`) and its task sits in `queued`.
+- **Workspace root & construction parameters**: `tasksWorkspaceRoot` decides which tree this bridge's tasks belong to (external executors start their sessions there, which files them under the matching project in their own window); `tasksAdapters` supplies per-kind adapter construction parameters (e.g. `{ codex: { binary: "…" } }`) — the register RPC may **not** choose an executable.
+- **Switches & version skew**: gated by `tasksEnabled`; when enabled with `tasksAutopilot: true` (default), the Host drives queued and active tasks every `tasksAutopilotIntervalMs` (`5000` ms by default); all switches live in [Configuration](#configuration). If a `0.9.x` CLI/MCP bridge talks to a `0.8.x` plugin, task tools stay hidden from `tools/list` and direct calls fail honestly (CLI reports `unknown method` with `next: this Harness plugin predates the task centre (0.9.0)…`, and MCP prompts to upgrade the plugin inside the DSH profile to `0.9.0` and restart the host); toggling `tasksEnabled` cannot help there.
+
+### Why you can trust it
+
+1. **Capability card `limitations` is required and an empty list is rejected**: a card claiming strengths with no weaknesses fails `normalizeCard` with `INVALID_CARD`.
+2. **Whenever `declared` and `verified` disagree, `verified` wins**: read-only probes (`dsh.agents.probe`) never create a remote task or send a prompt; partially probed cards report `probeStatus: "partial"` or `"unknown"`.
+3. **`degraded[]` surfaces consequences upfront**: controls marked `"unsupported"` in a capability card are projected into `{ control, effect }` on `dsh.tasks.preview`, `dsh.tasks.get`, and `dsh.tasks.list` (for example, missing `cancel` means cancel requests escalate to `needs_reconcile`).
+4. **`cancel.confirmed` requires state-machine evidence, never HTTP 200**: Antigravity requires `RUNNING → CANCELING → IDLE` with `EXECUTOR_TERMINATION_REASON_USER_CANCELED`, and Codex requires `turn/completed.status="interrupted"`.
+5. **Three `approvals` modes**: the bridge enforces `approvals.mode` (`off` / `deny` / `delegate`, see [Permissions and escalation](#permissions-and-escalation)) so unattended sessions never silently widen privileges; pending approval requests inside a task move to `waiting_approval` until explicitly decided.
+
+### Ledger and eleven states
+
+The local SQLite ledger tracks tasks across eleven states: `queued → dispatching → running → waiting_input/waiting_approval → review_pending → succeeded/failed/cancelled/needs_reconcile` (plus the cancellation transition `cancel_requested`).
+
+Derived `phase` (**who the task is waiting on**) is computed on demand on every read and never persisted:
+- **Waiting on a person**: `person/delivery` (undelivered input retrying) → `person/approval` (pending approval) → `person/reconcile` (`needs_reconcile` after lease expiry, an unconfirmed cancel or a broken dispatch; it outranks questions because once the executor's own “stopped” is untrusted, its leftover question is not the operator's to answer) → `person/answer` (pending decision/input question) → `person/review` (awaiting acceptance or schema-invalid output).
+- **Waiting on a machine**: `machine/queued` (`queued`/`dispatching`) → `machine/working` (active execution).
+- **Finished**: `done` (`succeeded`/`failed`/`cancelled`).
+- When there are no open `attention` rows, `phase` never claims it is waiting on you.
+
+### Three things a human does
+
+With `tasksAutopilot` on, the machine side automatically drives `dispatch` and `pump` (both are intentionally omitted from MCP). A human operator steps in for three actions only:
+
+1. **Resolve (`resolve`)**: settle `review_pending`, `needs_reconcile`, or a running task with an open `review` attention via `dsh.tasks.resolve` / `tasks resolve` (RPC + CLI only, never MCP) using `accept` / `reject` / `cancel` / `requeue`; decide pending approvals via `dsh.tasks.decideApproval` / `tasks approve` (`allow` or `deny`).
+2. **Answer questions (`input`)**: supply follow-up input or answer a `questionId` while a task is `running` or `waiting_input` via `dsh.tasks.input` / `dsh_task_input`.
+3. **Reconcile (`reconcile`)**: when startup fails, cancel is unconfirmed, or an unknown stop puts the task into `needs_reconcile`, inspect the real host window using the `locator` from `tasks get` and submit observed evidence via `dsh.tasks.reconcile` / `tasks reconcile` to settle the terminal state and close lingering attempts.
+
+**Typical CLI workflow** (copyable sequence after enabling `tasksEnabled: true` and restarting the host):
+
+```powershell
+node bin/dsh-rpc.mjs agents register --file ./card.json --json
+node bin/dsh-rpc.mjs agents probe --agent ag-dsh --json
+node bin/dsh-rpc.mjs tasks preview --principal local-operator --workspace local --agent ag-dsh --capability cap_1 --input '{"prompt":"inspect repo"}' --json
+node bin/dsh-rpc.mjs tasks submit --preview <previewId> --principal local-operator --capability cap_1 --workspace local --agent ag-dsh --idempotency-key run-001 --json
+node bin/dsh-rpc.mjs tasks dispatch <taskId> --json
+node bin/dsh-rpc.mjs tasks pump <taskId> --max-steps 20 --json
+node bin/dsh-rpc.mjs tasks get <taskId> --json
+# When approval is pending: node bin/dsh-rpc.mjs tasks approve --task <taskId> --attempt <attemptId> --approval <approvalId> --decision allow --reason "approved" --json
+# When manual settlement is needed (needs_reconcile): node bin/dsh-rpc.mjs tasks reconcile <taskId> --observed cancelled --note "confirmed stopped" --json
+```
+
 ## Highlights
 
 - **Zero runtime dependencies**: one package added to the profile, no peer-resolution or version conflicts.
@@ -437,59 +487,6 @@ Rules worth knowing:
 - **Budget is never silent**: dropped calls end with `… +N more (call dsh_history for the full window)`.
 - **Turn it off**: `config.traceDefault: "none"`, or pass `trace: "none"` once. Ask for `"full"` when you need the detail.
 
-### Task centre
-
-Asynchronous work delegated to external agents (DSH itself, Antigravity, or Codex App Server) no longer relies on human relay or chat memory: the durable task ledger lives in a local SQLite database (`$DSH_HOME/storages/task-center/tasks.db`), and every executor's controls and weaknesses are inspectable through a **capability card (`capability-card@1`)** and read-only probes rather than treated as a black box. Disabled by default; enabling it exposes CLI, JSON-RPC, and 11 gated MCP tools (operations manual: [docs/task-center.md](./docs/task-center.md); backup and rollback: [docs/backup-restore-rollback.md](./docs/backup-restore-rollback.md)).
-
-**Circuit-breaker & configuration switches** (set under `config` in `cordis.patch.yml`):
-
-| Switch | Default | Range & meaning |
-| --- | --- | --- |
-| `tasksEnabled` | `false` | Boolean master switch; when `false`, no DB is opened, no timer starts, and MCP hides task tools |
-| `tasksMaxConcurrent` | `1` | Integer `1..32`; global active-task concurrency cap enforced atomically at `dispatch` (`STATE_CONFLICT`) |
-| `tasksRequireReconcileOnUnknown` | `true` | Boolean; unrecognized statuses or `blocked` reports without `attention` transition to `needs_reconcile` |
-| `tasksWorkspaceRoot` | `""` (inherits the Host cwd) | Which tree this bridge's tasks belong to. External executors start their sessions there, which is what files them under the matching project in their own window; setting it replaces the root of the `local` workspace, leaving it alone when unset || `tasksExternalAdapter` | `"none"` | `"none" \| "antigravity" \| "codex"`; external adapter wired alongside the built-in DSH baseline adapter. While it stays `"none"`, an agent registered as `antigravity`/`codex` is refused at dispatch (`ADAPTER_UNAVAILABLE`) and its task sits in `queued` |
-| `tasksPreviewTtlMs` | `300000` | Integer `1000..3600000`; lifetime of one-shot `dsh.tasks.preview` tokens in ms |
-| `tasksDbPath` | `null` | String or `null`; custom SQLite file path (defaults to `$DSH_HOME/storages/task-center/tasks.db`) |
-| `tasksProbeTimeoutMs` | `5000` | Integer `100..60000`; per-probe timeout for `dsh.agents.probe` |
-| `tasksAdapters` | `{}` | Object of per-kind adapter construction parameters (e.g. `{ codex: { binary: "…" } }`); the register RPC may **not** choose an executable |
-| `tasksDispatchMaxSteps` | `50` | Integer `1..1000`; step budget for one `dsh.tasks.pump`/`dsh.tasks.dispatch` call |
-| `tasksAutopilot` | `true` | Boolean; when `true` the Host runs a bounded pass on the interval below (starts due tasks, advances active ones). This is the only reason a task submitted over MCP moves on its own; `false` falls back to manual `tasks dispatch` / `tasks pump` |
-| `tasksAutopilotIntervalMs` | `5000` | Integer `1000..600000`; how often the machine side drives the ledger |
-| `tasksAutopilotMaxStart` | `2` | Integer `1..32`; how many `queued` tasks one pass may start |
-| `tasksAutopilotMaxPump` | `4` | Integer `1..200`; how many tasks per active status one pass may advance |
-| `tasksAdapterDebugDetail` | `false` | Boolean; when `true`, the raw adapter failure text (redacted, truncated to 512 chars) goes to the host debug log with a `[raw]` prefix. Off by default: only safe fields are logged |
-
-**Typical CLI workflow** (copyable sequence after enabling `tasksEnabled: true` and restarting the host):
-
-```powershell
-node bin/dsh-rpc.mjs agents register --file ./card.json --json
-node bin/dsh-rpc.mjs agents probe --agent ag-dsh --json
-node bin/dsh-rpc.mjs tasks preview --principal local-operator --workspace local --agent ag-dsh --capability cap_1 --input '{"prompt":"inspect repo"}' --json
-node bin/dsh-rpc.mjs tasks submit --preview <previewId> --principal local-operator --capability cap_1 --workspace local --agent ag-dsh --idempotency-key run-001 --json
-node bin/dsh-rpc.mjs tasks dispatch <taskId> --json
-node bin/dsh-rpc.mjs tasks pump <taskId> --max-steps 20 --json
-node bin/dsh-rpc.mjs tasks get <taskId> --json
-# When approval is pending: node bin/dsh-rpc.mjs tasks approve --task <taskId> --attempt <attemptId> --approval <approvalId> --decision allow --reason "approved" --json
-# When manual settlement is needed (needs_reconcile): node bin/dsh-rpc.mjs tasks reconcile <taskId> --observed cancelled --note "confirmed stopped" --json
-```
-
-**Reading derived `phase` and `attention`**:
-
-`phase` is computed on demand on every read and never persisted:
-- Waiting on a person: `person/delivery` (undelivered input retrying) → `person/approval` (pending approval) → `person/reconcile` (`needs_reconcile` after lease expiry, an unconfirmed cancel or a broken dispatch; it outranks questions because once the executor's own “stopped” is untrusted, its leftover question is not the operator's to answer) → `person/answer` (pending decision/input question) → `person/review` (awaiting acceptance or schema-invalid output).
-- Waiting on a machine: `machine/queued` (`queued`/`dispatching`) → `machine/working` (active execution).
-- Finished: `done` (`succeeded`/`failed`/`cancelled`).
-- When there are no open `attention` rows, `phase` never claims it is waiting on you.
-
-**Three honesty rules**:
-
-1. Capability card `limitations` is required and **an empty list is rejected at registration** (`normalizeCard` throws `INVALID_CARD`).
-2. Whenever `declared` and `verified` disagree, **`verified` wins** (partially probed cards report `probeStatus: "partial"` or `"unknown"`).
-3. `cancel.confirmed` **requires state-machine evidence, never HTTP 200**: Antigravity requires `RUNNING → CANCELING → IDLE` with `EXECUTOR_TERMINATION_REASON_USER_CANCELED`, and Codex requires `turn/completed.status="interrupted"`.
-
-**Version-skew behaviour**: If a `0.9.0` CLI/MCP bridge talks to a `0.8.x` plugin, task tools stay hidden from `tools/list` and any direct call fails honestly rather than half-succeeding — the CLI reports `dsh-rpc: unknown method: dsh.tasks.list` with `next: this Harness plugin predates the task centre (0.9.0)…`, and MCP reports `this Harness plugin does not implement the task centre (0.9.0)` with `upgrade the plugin inside the DSH profile to 0.9.0`. Toggling `tasksEnabled` cannot help there: that switch only means something to a 0.9.0 plugin. Upgrade the plugin inside the profile and restart the host.
-
 ### `since` returns only the delta
 
 Without it you get the whole turn; with it you get only events whose `seq > since`, and `text` narrows to that span. **`status` / `turn` / `tools` / `usage` / `sandbox` still describe the whole turn**, and `cursor` keeps advancing. Poll progress with `since: <last cursor>`; do not resend the prompt.
@@ -615,6 +612,26 @@ Configured through the `config` of `cordis.patch.yml`; every key has a default:
 ```
 
 Other keys: `enabled`, `tokenFile` (custom token path), `path` (default `/dsh-rpc`), `logRequests`, `traceDefault` (default `"errors"`), `maxResultChars` (default `20000`, `0` = uncapped), `timeoutAdvice` (default `true`). The `DSH_RPC_TOKEN` environment variable overrides the token (higher priority than the file), which suits CI or setups that cannot persist a file.
+
+### Task centre switches (`tasks*`, set under `config` in `cordis.patch.yml`)
+
+| Switch | Default | Range & meaning |
+| --- | --- | --- |
+| `tasksEnabled` | `false` | Boolean master switch; when `false`, no DB is opened, no timer starts, and MCP hides task tools |
+| `tasksMaxConcurrent` | `1` | Integer `1..32`; global active-task concurrency cap enforced atomically at `dispatch` (`STATE_CONFLICT`) |
+| `tasksRequireReconcileOnUnknown` | `true` | Boolean; unrecognized statuses or `blocked` reports without `attention` transition to `needs_reconcile` |
+| `tasksWorkspaceRoot` | `""` (inherits the Host cwd) | Which tree this bridge's tasks belong to. External executors start their sessions there, which is what files them under the matching project in their own window; setting it replaces the root of the `local` workspace, leaving it alone when unset |
+| `tasksExternalAdapter` | `"none"` | `"none" \| "antigravity" \| "codex"`; external adapter wired alongside the built-in DSH baseline adapter. While it stays `"none"`, an agent registered as `antigravity`/`codex` is refused at dispatch (`ADAPTER_UNAVAILABLE`) and its task sits in `queued` |
+| `tasksPreviewTtlMs` | `300000` | Integer `1000..3600000`; lifetime of one-shot `dsh.tasks.preview` tokens in ms |
+| `tasksDbPath` | `null` | String or `null`; custom SQLite file path (defaults to `$DSH_HOME/storages/task-center/tasks.db`) |
+| `tasksProbeTimeoutMs` | `5000` | Integer `100..60000`; per-probe timeout for `dsh.agents.probe` |
+| `tasksAdapters` | `{}` | Object of per-kind adapter construction parameters (e.g. `{ codex: { binary: "…" } }`); the register RPC may **not** choose an executable |
+| `tasksDispatchMaxSteps` | `50` | Integer `1..1000`; step budget for one `dsh.tasks.pump`/`dsh.tasks.dispatch` call |
+| `tasksAutopilot` | `true` | Boolean; when `true` the Host runs a bounded pass on the interval below (starts due tasks, advances active ones). This is the only reason a task submitted over MCP moves on its own; `false` falls back to manual `tasks dispatch` / `tasks pump` |
+| `tasksAutopilotIntervalMs` | `5000` | Integer `1000..600000`; how often the machine side drives the ledger |
+| `tasksAutopilotMaxStart` | `2` | Integer `1..32`; how many `queued` tasks one pass may start |
+| `tasksAutopilotMaxPump` | `4` | Integer `1..200`; how many tasks per active status one pass may advance |
+| `tasksAdapterDebugDetail` | `false` | Boolean; when `true`, the raw adapter failure text (redacted, truncated to 512 chars) goes to the host debug log with a `[raw]` prefix. Off by default: only safe fields are logged |
 
 ## Security model
 
