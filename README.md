@@ -57,7 +57,7 @@ http://127.0.0.1:<port>/dsh-rpc   ->   DSH agent
 | 你可能想用它做 | 更好的选择 |
 | --- | --- |
 | 就问一句、看个回答 | 直接在 DSH GUI 里问，不必绕一层 |
-| 定时、后台、报警式的任务 | DSH 自己的定时任务机制，不是本插件职责 |
+| 定时（cron）、告警与看板式调度 | DSH 自己的定时任务机制；长任务与队列由本插件的任务中心托管，但它不做定时触发 |
 | 从另一台机器驱动这台 DSH | 本插件为 loopback 设计，`allowRemote` 只关白名单、不增强认证 |
 
 仓库与包名都是 `dsh-rpc-agent`；命令行（`dsh-rpc`、`dsh-rpc-mcp`）、端点路径（`/dsh-rpc`）、状态目录（`~/.dsh/dsh-rpc`）与 `DSH_RPC_*` 环境变量属运行时契约，改名会让已装好的配置与已配对的 token 一起失效。
@@ -448,7 +448,8 @@ trace:
 | `tasksEnabled` | `false` | 布尔总开关；`false` 时不开库、不起定时器、MCP 隐藏任务工具 |
 | `tasksMaxConcurrent` | `1` | 整数 `1..32`；全局活跃任务并发上限，超限在 `dispatch` 报 `STATE_CONFLICT` |
 | `tasksRequireReconcileOnUnknown` | `true` | 布尔；不可识别状态或无 `attention` 的 `blocked` 是否强制转 `needs_reconcile` |
-| `tasksWorkspaceRoot` | `""`（继承宿主 cwd） | 这个桥的任务属于哪棵树。外部执行方的会话用它当 `cwd`，因此会落在对方窗口的同名项目下；设置后 `local` 工作区的根会被替换，未设置则不动 || `tasksExternalAdapter` | `"none"` | `"none" \| "antigravity" \| "codex"`；除内建 DSH 基准适配器外额外装配的外部执行方。留 `"none"` 时，注册成 `antigravity`/`codex` 的代理会在派发时被拒（`ADAPTER_UNAVAILABLE`），任务停在 `queued` |
+| `tasksWorkspaceRoot` | `""`（继承宿主 cwd） | 这个桥的任务属于哪棵树。外部执行方的会话用它当 `cwd`，因此会落在对方窗口的同名项目下；设置后 `local` 工作区的根会被替换，未设置则不动 |
+| `tasksExternalAdapter` | `"none"` | `"none" \| "antigravity" \| "codex"`；除内建 DSH 基准适配器外额外装配的外部执行方。留 `"none"` 时，注册成 `antigravity`/`codex` 的代理会在派发时被拒（`ADAPTER_UNAVAILABLE`），任务停在 `queued` |
 | `tasksPreviewTtlMs` | `300000` | 整数 `1000..3600000`；`dsh.tasks.preview` 预览凭证有效时长（毫秒） |
 | `tasksDbPath` | `null` | 字符串或 `null`；自定义 SQLite 路径，留空使用 `$DSH_HOME/storages/task-center/tasks.db` |
 | `tasksProbeTimeoutMs` | `5000` | 整数 `100..60000`；`dsh.agents.probe` 只读探测的单次超时 |
@@ -739,7 +740,7 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 - **`dsh_history` 会当面揭穿旧插件**：桥连着 0.8.1 之前的插件时，`since` / `kinds` / `max_chars` 会被静默忽略；此时结果头部改用 `note:` 说明「这窗口没被过滤/截断」，而不是假装已经过滤。升级插件后即消失。
 - **`maxResultChars` 治不了外层的 413**：它只截单轮正文（默认 20000 字）。外层客户端（例如 Codex 的 `codex-auto-review` 旁路请求）被累计上下文撑爆时，靠截断单次结果救不回来——那要在调用方控制上下文。
 - **`principalId` 是命名空间，不是授权边界**：任务账本用它分区、做 `(principalId, idempotencyKey)` 幂等，并在传了它时校验 `get` / `cancel` 的归属；`list` / `input` / `readArtifact` / `resolve` 不读它。真正的鉴权边界仍是 loopback token 加本机用户（见上面那条 token 泄漏面）。要跨主体隔离，得把它变成强制参数并逐方法校验——这是未完成项，不是已经实现的隔离。
-- **适配器只有 DSH 自身在真机上跑过**：DSH 适配器有真机端到端证据（正常链、取消链、诚实性三组用例）；Antigravity 与 Codex 适配器目前只有离线套件与静态契约证据，未接真实执行方（方案 A07/A14/A18 未验收）。
+- **三个适配器都接过真执行方，但验收范围不同**：DSH 适配器有真机端到端证据（正常链、取消链、诚实性）；Antigravity 有 A07 真机七项（能力卡作证、cascade 落地、裁决后 `succeeded`、取消 `cancel.confirmed`）；Codex 有 A09 / A09b / A10 三组（执行方主体 7/7、取消确认 4/4、会话粘性与项目归属 4/4）。仍未验收的是方案里的 A14（第三运行时）与 A18（混版降级）。
 - **宿主端口可能是 `fetch` 拒绝的端口**：桥继承宿主 Web 服务的端口，而 `fetch` 会在建连接前拒掉一批「bad port」（`989`、`1720`、`4045`、`5060`、`6000`、`6665`–`6669`、`6697`、`10080` 等）。落进名单时客户端报 `EBADPORT`（不是 errno，是 `fetch` 给出的原因），插件启动日志也会告警一次；让宿主换端口，或用 `--url` 指到可达地址。
 
 ## 排障
