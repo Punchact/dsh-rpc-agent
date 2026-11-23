@@ -59,7 +59,7 @@ The port is **not fixed**: DSH gets one from the OS on every launch, and it chan
 | You might want it for | A better fit |
 | --- | --- |
 | Asking one question and reading the answer | Just ask in the DSH GUI; no need for a hop |
-| Scheduled, background, alerting jobs | DSH's own scheduling, not this plugin's job |
+| Scheduled (cron), alerting or dashboard-style orchestration | DSH's own scheduling; long-running tasks and queues belong to this plugin's task centre, but it never triggers on a clock |
 | Driving this DSH from another machine | This plugin is built for loopback; `allowRemote` only relaxes the allow-list, it adds no authentication |
 
 Repository and package name are both `dsh-rpc-agent`; the commands (`dsh-rpc`, `dsh-rpc-mcp`), the endpoint path (`/dsh-rpc`), the state directory (`~/.dsh/dsh-rpc`) and the `DSH_RPC_*` environment variables are runtime contract — renaming them breaks installed configs and paired tokens together.
@@ -758,7 +758,7 @@ Everything the page shows comes from that read-only endpoint; it writes nothing.
 - **`dsh_history` calls out an old plugin**: when the bridge talks to a plugin older than 0.8.1, `since` / `kinds` / `max_chars` are silently ignored; the header then switches to a `note:` saying the window was neither filtered nor capped instead of pretending otherwise. Upgrading the plugin removes it.
 - **`maxResultChars` cannot fix an outer 413**: it caps a single turn's prose (20000 chars by default). When the calling agent's own sidecar (for example Codex `codex-auto-review`) is blown up by accumulated context, capping one result will not save it — that has to be handled on the caller side.
 - **`principalId` is a namespace, not an authorization boundary**: the task ledger uses it for partitioning and for `(principalId, idempotencyKey)` idempotency, and checks ownership on `get` / `cancel` when it is passed; `list` / `input` / `readArtifact` / `resolve` never read it. The real boundary is still the loopback token plus the local OS user (see the token-exposure note above). Cross-principal isolation would require making it a mandatory argument checked by every method — that is not implemented.
-- **Only the DSH adapter has real-machine evidence**: the DSH adapter has been exercised end to end against a live host (normal chain, cancel chain, honesty checks); the Antigravity and Codex adapters currently have offline-suite and static-contract evidence only, with no real execution party attached (plan items A07/A14/A18 remain unverified).
+- **All three adapters have been driven against a real executor, with different acceptance scope**: DSH has end-to-end evidence (normal chain, cancel chain, honesty checks); Antigravity has the A07 real-machine suite (card verified, cascade landed, `succeeded` after adjudication, `cancel.confirmed`); Codex has A09 / A09b / A10 (executor body 7/7, confirmed cancel 4/4, session stickiness and project ownership 4/4). Still unverified are A14 (a third runtime) and A18 (mixed-version downgrade).
 - **The Host port can be one `fetch` refuses**: the bridge inherits the Host Web server port, and `fetch` rejects a list of "bad ports" before opening a socket (`989`, `1720`, `4045`, `5060`, `6000`, `6665`–`6669`, `6697`, `10080`, ...). On those, clients report `EBADPORT` (fetch's reason, not an errno) and the plugin warns once at start-up; start the Harness on another port, or pass `--url`.
 
 ## Troubleshooting
