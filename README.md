@@ -126,7 +126,7 @@ node bin/dsh-rpc.mjs tasks get <taskId> --json
 - **会自述**：`dsh_capabilities` 给出八节能力快照（运行时、权限档位、可调工具、MCP 前缀、会话、工作区、插件），做计划前不必猜本机有什么。
 - **不假装知道**：外层客户端有更短的超时上限时，本桥只如实说明并建议分段轮询，不让长任务看起来像失败。
 - **可托管外部 agent 任务（任务中心，`tasksEnabled` 默认关闭）**：内置 15 表 SQLite 账本、11 态状态机与能力卡/只读探测，统一调度 DSH 自身、Antigravity 与 Codex App Server，详情见 [任务中心手册](./docs/task-center.md)。
-- **关键行为有回归用例守着**：51 个测试文件共 468 例 + catalog smoke（本机实测 468/468 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
+- **关键行为有回归用例守着**：52 个测试文件共 471 例 + catalog smoke（本机实测 471/471 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
 
 ## 安装与更新
 
@@ -806,7 +806,7 @@ npm run verify                 # 构建 + 入口一致性 + npm test + check:pac
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 51 个测试文件，共 468 例，另有 catalog smoke；无需运行中的 Harness
+npm test                       # 52 个测试文件，共 471 例，另有 catalog smoke；无需运行中的 Harness
 node test/host.test.ts         # 1 例：真实 WebServer 集成（需先 npm ci）
 npm run test:e2e               # 14 例：端到端，打真实 Harness（--cwd 只接受绝对路径）
 npm run test:edge              # 24 例：协议/边界对抗，打真实 Harness
@@ -834,7 +834,7 @@ npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案
 `check:surface` 查两个方向：方案写了的接口必须真实存在；代码里任务族/代理族的新接口必须要么在方案里、要么在快照的 `implementationOnly` 里如实记着。0.9.0 就是靠这一类对账才发现「方案写了 `dsh.tasks.resolve`、实现漏了」。
 
 <details>
-<summary>51 个测试文件各自覆盖什么</summary>
+<summary>52 个测试文件各自覆盖什么</summary>
 
 | 套件 | 例 | 覆盖 |
 | --- | --- | --- |
@@ -874,6 +874,7 @@ npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案
 | `tasks-autopilot` | 7 | 推进环：覆盖所有活跃状态、失败不中断并告警、慢遍不叠加、空账本不动作、异步分页必须 await 才派发、破账本只报不抛 |
 | `config-breakers` | 3 | 五项熔断开关默认值、边界校验与 `ConfigError` |
 | `index-wiring` | 3 | 关闭不建库、开启建库播种、外部适配器失败降级 |
+| `tasks-wire` | 3 | `wireTaskCentre` 独立装配：关闭惰性态、开启全组件与 `agentProbes` 接线、建库失败降级收口 |
 | `mcp-tasks-tools` | 6 | 8 个任务 MCP 工具的开关显隐、禁用报错、`reconcile`/`decideApproval` 排除、参数校验与原型键拒绝 |
 | `mcp-summary` | 3 | 只读文本摘要必须写明「未校验」：`result` 行带标记、meta 行重复一次、已校验的结果不打标 |
 | `cli-tasks` | 5 | `tasks` / `agents` 参数解析、`UsageError`（exit 2）、JSON-RPC 调用与混版提示 |
@@ -892,7 +893,7 @@ npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案
 
 </details>
 
-`npm test` 按固定顺序跑这 51 个测试文件和 catalog smoke；`npm run test:host` 跑真实 WebServer 集成；`npm run test:e2e` / `npm run test:edge` 要活的 Harness。
+`npm test` 按固定顺序跑这 52 个测试文件和 catalog smoke；`npm run test:host` 跑真实 WebServer 集成；`npm run test:e2e` / `npm run test:edge` 要活的 Harness。
 
 > [!TIP]
 > **受限沙箱里 `node --test` 可能触发 `spawn EPERM`**：若默认并发子进程被拦，使用 `node --test --test-isolation=none <file>` 或单文件 `node <file>` 运行。
@@ -904,7 +905,7 @@ npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案
 - **边界**检查协议层：batch、通知、id 形态、鉴权头、超大 body（应得真正的 413 而不是断连）、参数注入防护、超时钳制、并发 ask、`limit` 语义。
 - **端口漂移**（手工）：把 `endpoint.json` 的 url 改成死端口再跑 `dsh-rpc ping`，应得退出码 3 与含 `nothing is listening`、`pid`、`health --wait` 的可读报错。
 
-本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 51 个测试文件 **468/468** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.ts` 输出 `methods: 34` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
+本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 52 个测试文件 **471/471** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.ts` 输出 `methods: 34` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
 
 ## 许可证
 
