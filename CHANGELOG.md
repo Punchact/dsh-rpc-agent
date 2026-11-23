@@ -19,7 +19,7 @@
 
 - **e2e / edge 变成 CI 里的可选 job**：新增 `.github/workflows/acceptance.yml`，**只挂 `workflow_dispatch`**（不挂 `push` / `pull_request`——需要活宿主的用例在托管 runner 上只会 skip，永远 skip 的绿灯会污染 PR 门禁）。矩阵 `phase: [e2e, edge]`；开跑前先用 `rpcCall("dsh.ping")` 探宿主，可达才真跑，不可达 `::notice` 记一句“按设计跳过”并以 0 退出；勾上 `require_live` 时“没有宿主 = 失败”，供定期演练用。宿主来源两条：self-hosted runner 上本来就有 `~/.dsh/dsh-rpc/endpoint.json`，或仓库里配 `DSH_RPC_URL` + `DSH_RPC_TOKEN`。
 
-> 本版验证：校验 34 个 RPC 方法、MCP 11（默认）+ 11（`tasksEnabled: true` 时共 22）个工具；全链 52 个测试文件、471 例，本机 471/471 通过。
+> 本版验证：校验 34 个 RPC 方法、MCP 11（默认）+ 11（`tasksEnabled: true` 时共 22）个工具；全链 53 个测试文件、477 例，本机 477/477 通过。
 
 ## [0.9.4] - 2026-11-20
 

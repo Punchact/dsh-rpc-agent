@@ -22,6 +22,12 @@ export interface TaskAdapterConfig {
   binary?: string;
   projectId?: string;
   model?: string;
+  // Numeric knobs an adapter may expose. They have to be whitelisted here because
+  // `asAdaptersMap` builds a clean object: anything it does not recognise is dropped
+  // silently, so a knob documented in README but missing from this list would be
+  // configurable on paper and unconfigurable in practice.
+  interruptConfirmMs?: number;
+  probeTimeoutMs?: number;
   [key: string]: unknown;
 }
 
@@ -186,6 +192,11 @@ export const MIN_RESULT_CHARS = 0;
 
 export const MIN_TASKS_PROBE_TIMEOUT_MS = 100;
 export const MAX_TASKS_PROBE_TIMEOUT_MS = 60_000;
+// How long an adapter may wait for the executor to confirm a stop before the bridge
+// hands the task to a human. Zero means "never wait" (always escalate), which is the
+// pre-0.9.5 behaviour and is kept reachable for operators who prefer it.
+export const MIN_INTERRUPT_CONFIRM_MS = 0;
+export const MAX_INTERRUPT_CONFIRM_MS = 60_000;
 export const MIN_TASKS_PREVIEW_TTL_MS = 1_000;
 export const MAX_TASKS_PREVIEW_TTL_MS = 3_600_000;
 export const MIN_TASKS_DISPATCH_MAX_STEPS = 1;
@@ -263,6 +274,15 @@ export function resolveConfig(input: Record<string, unknown> | null | undefined 
           clean[strKey] = (rec[strKey] as string).trim();
         }
       }
+      for (const numKey of ["interruptConfirmMs", "probeTimeoutMs"] as const) {
+        if (rec[numKey] === undefined) continue;
+        const value = rec[numKey];
+        if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+        const floor = numKey === "interruptConfirmMs" ? MIN_INTERRUPT_CONFIRM_MS : MIN_TASKS_PROBE_TIMEOUT_MS;
+        const ceiling = numKey === "interruptConfirmMs" ? MAX_INTERRUPT_CONFIRM_MS : MAX_TASKS_PROBE_TIMEOUT_MS;
+        if (value < floor || value > ceiling) return undefined;
+        clean[numKey] = Math.floor(value);
+      }
       out[kind.trim()] = clean;
     }
     return out;
@@ -329,7 +349,7 @@ export function resolveConfig(input: Record<string, unknown> | null | undefined 
     tasksAdapters: take(
       "tasksAdapters",
       asAdaptersMap,
-      "expected a map of { [kind]: { enabled?, adapterConfigRef?, binary?, projectId?, model? } }",
+      "expected a map of { [kind]: { enabled?, adapterConfigRef?, binary?, projectId?, model?, interruptConfirmMs?, probeTimeoutMs? } }",
     ),
     tasksDispatchMaxSteps: take(
       "tasksDispatchMaxSteps",
