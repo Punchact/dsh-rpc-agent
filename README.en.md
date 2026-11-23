@@ -38,6 +38,8 @@ node $cli ask "reply with exactly two words: received" --cwd . --json
 
 `ask` is **non-blocking** by default: it returns a handle immediately. Read the result with `dsh_wait` / `wait --session …`. That is deliberate — a caller's tool call usually has a hard 300-second ceiling, so long work has to be "take the order now, deliver later".
 
+> In the commands below, `$CLI` stands for the command-line entry this repository builds: inside the repo use `node dist/bin/dsh-rpc.mjs`; after installing into a profile use `node "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\bin\dsh-rpc.mjs"` (same arguments either way).
+
 ## What it is
 
 DSH is not a model here, it is a **whole agent** — with its own tools, skills, MCP servers, sandbox and session context. This plugin does one thin thing: it turns a sentence arriving over HTTP or MCP into one Host prompt, and turns the result back.
@@ -101,15 +103,15 @@ With `tasksAutopilot` on, the machine side automatically drives `dispatch` and `
 **Typical CLI workflow** (copyable sequence after enabling `tasksEnabled: true` and restarting the host):
 
 ```powershell
-node bin/dsh-rpc.mjs agents register --file ./card.json --json
-node bin/dsh-rpc.mjs agents probe --agent ag-dsh --json
-node bin/dsh-rpc.mjs tasks preview --principal local-operator --workspace local --agent ag-dsh --capability cap_1 --input '{"prompt":"inspect repo"}' --json
-node bin/dsh-rpc.mjs tasks submit --preview <previewId> --principal local-operator --capability cap_1 --workspace local --agent ag-dsh --idempotency-key run-001 --json
-node bin/dsh-rpc.mjs tasks dispatch <taskId> --json
-node bin/dsh-rpc.mjs tasks pump <taskId> --max-steps 20 --json
-node bin/dsh-rpc.mjs tasks get <taskId> --json
-# When approval is pending: node bin/dsh-rpc.mjs tasks approve --task <taskId> --attempt <attemptId> --approval <approvalId> --decision allow --reason "approved" --json
-# When manual settlement is needed (needs_reconcile): node bin/dsh-rpc.mjs tasks reconcile <taskId> --observed cancelled --note "confirmed stopped" --json
+$CLI agents register --file ./card.json --json
+$CLI agents probe --agent ag-dsh --json
+$CLI tasks preview --principal local-operator --workspace local --agent ag-dsh --capability cap_1 --input '{"prompt":"inspect repo"}' --json
+$CLI tasks submit --preview <previewId> --principal local-operator --capability cap_1 --workspace local --agent ag-dsh --idempotency-key run-001 --json
+$CLI tasks dispatch <taskId> --json
+$CLI tasks pump <taskId> --max-steps 20 --json
+$CLI tasks get <taskId> --json
+# When approval is pending: $CLI tasks approve --task <taskId> --attempt <attemptId> --approval <approvalId> --decision allow --reason "approved" --json
+# When manual settlement is needed (needs_reconcile): $CLI tasks reconcile <taskId> --observed cancelled --note "confirmed stopped" --json
 ```
 
 ## Highlights
@@ -268,25 +270,25 @@ One session eventually becomes a context burden, so after **200** `ask` calls on
 ### CLI
 
 ```powershell
-node bin/dsh-rpc.mjs health                  # unauthenticated liveness probe
-node bin/dsh-rpc.mjs health --wait 15000     # poll until ready after a restart
-node bin/dsh-rpc.mjs ping                    # a real call with the token
-node bin/dsh-rpc.mjs workspaces              # workspaces from the sidebar
-node bin/dsh-rpc.mjs permissions             # permission presets (* marks the default)
-node bin/dsh-rpc.mjs ask "reply with exactly two words: received" --cwd . --json
-node bin/dsh-rpc.mjs ask "look at this workspace" --workspace ws-xxxx --json
-node bin/dsh-rpc.mjs ask "continue" --session session-xxxx --json
-node bin/dsh-rpc.mjs ask "think with Opus" --session session-xxxx --model anthropic/opus-4.6 --effort high
-node bin/dsh-rpc.mjs prompt "a long task…" --session session-xxxx
-node bin/dsh-rpc.mjs wait --session session-xxxx --timeout 600000
-node bin/dsh-rpc.mjs wait --session session-xxxx --since 42   # only the delta after cursor 42
-node bin/dsh-rpc.mjs history --session session-xxxx --limit 20
-node bin/dsh-rpc.mjs sessions --limit 10
-node bin/dsh-rpc.mjs models                  # models DSH can route to
-node bin/dsh-rpc.mjs discover                # self-description: methods, transport, result shape
-node bin/dsh-rpc.mjs capabilities            # eight-section capability snapshot (--sections / --max-chars / --session)
-node bin/dsh-rpc.mjs cancel --session session-xxxx
-node bin/dsh-rpc.mjs call dsh.sessions.history '{"sessionId":"session-xxxx"}' --timeout 30000
+$CLI health                  # unauthenticated liveness probe
+$CLI health --wait 15000     # poll until ready after a restart
+$CLI ping                    # a real call with the token
+$CLI workspaces              # workspaces from the sidebar
+$CLI permissions             # permission presets (* marks the default)
+$CLI ask "reply with exactly two words: received" --cwd . --json
+$CLI ask "look at this workspace" --workspace ws-xxxx --json
+$CLI ask "continue" --session session-xxxx --json
+$CLI ask "think with Opus" --session session-xxxx --model anthropic/opus-4.6 --effort high
+$CLI prompt "a long task…" --session session-xxxx
+$CLI wait --session session-xxxx --timeout 600000
+$CLI wait --session session-xxxx --since 42   # only the delta after cursor 42
+$CLI history --session session-xxxx --limit 20
+$CLI sessions --limit 10
+$CLI models                  # models DSH can route to
+$CLI discover                # self-description: methods, transport, result shape
+$CLI capabilities            # eight-section capability snapshot (--sections / --max-chars / --session)
+$CLI cancel --session session-xxxx
+$CLI call dsh.sessions.history '{"sessionId":"session-xxxx"}' --timeout 30000
 ```
 
 Exit codes: `0` finished · `1` failed or the turn did not end normally · `2` usage error · `3` cannot reach the Harness.
@@ -510,10 +512,10 @@ These are DSH's own concepts; the bridge only forwards them and invents no new s
 Neither the CLI nor the MCP server filters these on the client side: they are forwarded, and the bridge gives one uniform rejection. That way "passed but ignored" never disguises itself as "passed and applied".
 
 ```powershell
-node bin/dsh-rpc.mjs workspaces                            # see what exists
-node bin/dsh-rpc.mjs ask "look at this project" --workspace ws-1   # go in
-node bin/dsh-rpc.mjs models | head -40
-node bin/dsh-rpc.mjs ask "think again" --session session-xxxx --model anthropic/opus-4.6 --effort high
+$CLI workspaces                            # see what exists
+$CLI ask "look at this project" --workspace ws-1   # go in
+$CLI models | head -40
+$CLI ask "think again" --session session-xxxx --model anthropic/opus-4.6 --effort high
 ```
 
 **Model names** may be written as `provider/model`; a bare id is looked up in the model catalogue — a unique match is used, several matches produce an error listing the disambiguating forms, zero matches tells you to run `dsh.models`. **It never guesses.** `reasoningEffort` must be given in the same request as `model`: the Host offers no "read back the current model" call.
@@ -536,8 +538,8 @@ Why escalation has to come from the caller: DSH's sandbox appends a hint to a de
 The escalation ladder is a closed table: `read-only` may go to `workspace-write` or `danger-full-access`, while **`workspace-write` may only go to `danger-full-access`** — there is no middle rung.
 
 ```powershell
-node bin/dsh-rpc.mjs permissions
-node bin/dsh-rpc.mjs ask "run the tests" --permission workspace-write
+$CLI permissions
+$CLI ask "run the tests" --permission workspace-write
 ```
 
 ### Unattended sessions and escalation (`approvals`)
@@ -682,7 +684,7 @@ DSH's web port is decided by the launcher, and the desktop app lets the OS pick 
 **Chaining after a restart**:
 
 ```powershell
-node bin/dsh-rpc.mjs health --wait 15000; if ($?) { node bin/dsh-rpc.mjs ask "keep going" --session session-xxxx }
+$CLI health --wait 15000; if ($?) { $CLI ask "keep going" --session session-xxxx }
 ```
 
 `--wait` re-reads the endpoint every 250 ms and probes; it returns 0 (printing the elapsed time) when ready and 3 on timeout.
@@ -766,7 +768,7 @@ Everything the page shows comes from that read-only endpoint; it writes nothing.
 | `dsh-rpc: 401` | Token mismatch. Delete `%USERPROFILE%\.dsh\dsh-rpc\token` and reload the plugin to regenerate |
 | `403` | Origin is not loopback; check for a proxy, or enable `allowRemote` |
 | `-32004 … already has a bridge run waiting for its turn` | An `ask`/`prompt` is already waiting on that session; use another session or wait it out (`wait` can observe in parallel) |
-| Exit code `3` (cannot connect) | The Harness is not running, or the plugin row is disabled; probe with `node bin/dsh-rpc.mjs health` |
+| Exit code `3` (cannot connect) | The Harness is not running, or the plugin row is disabled; probe with `$CLI health` |
 | `EBADPORT` / exit code `3` (`bad port`) | The Host bound a `fetch`-blocked port (`5060`, `6667`, etc.); `health` fails fast — restart the Harness on another port or pass `--url` |
 | Source changed, behaviour did not | The host cached the module: toggle `set_plugin` off and on |
 | Source changed, behaviour did not (npm install) | The npm route installs a copy unrelated to your checkout; use the local-directory install to iterate |

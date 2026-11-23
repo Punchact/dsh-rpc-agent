@@ -291,6 +291,19 @@ for (const table of configTables) {
   }
 }
 
+// --- CLI 入口写法：仓库里没有 bin/（构建产物在 dist/bin/），文档不许再写 `node bin/dsh-rpc.mjs` ----
+const cliDocs = ["README.md", "README.en.md", "docs/task-center.md", "docs/backup-restore-rollback.md", "docs/release.md"];
+for (const file of cliDocs) {
+  const text = read(file);
+  const stale = text.match(/node bin\/dsh-rpc/g)?.length ?? 0;
+  if (stale > 0) {
+    problems.push(`${file}: 有 ${stale} 处 \`node bin/dsh-rpc.mjs\` — 仓库里没有 bin/（构建产物在 dist/bin/），请改用 $CLI 并在文件内定义一次`);
+  }
+  if (text.includes("$CLI") && !/\$CLI`?\s*(?:指|stands for)/.test(text)) {
+    problems.push(`${file}: 用了 $CLI 却没定义它 — 补一句「$CLI 指 …」`);
+  }
+}
+
 if (mode === "check") {
   if (problems.length) {
     console.error(`check-docs: ${problems.length} 处文档数字与源码/计数不符：`);

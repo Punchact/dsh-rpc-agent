@@ -38,6 +38,8 @@ node $cli ask "只回复两个字：收到" --cwd . --json
 
 `ask` 默认**不阻塞**，立刻返回句柄；要看结果用 `dsh_wait` / `wait --session …`。这是刻意的——外层 agent 的工具调用通常有 300 秒硬上限，长任务必须能"先接单、后交货"。
 
+> 下文命令中的 `$CLI` 指本仓库构建出来的命令行入口：仓库内用 `node dist/bin/dsh-rpc.mjs`；装进 profile 后用 `node "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\bin\dsh-rpc.mjs"`（两者参数完全一致）。
+
 ## 它是什么
 
 DSH 在这里不是一个模型，而是一个**完整的 agent**——带自己的工具、技能、MCP 服务器、沙箱与会话上下文。本插件只做一件很薄的事：把 HTTP 或 MCP 上的一句话转成 Host 的一次提问，再把结果转回来。
@@ -101,15 +103,15 @@ http://127.0.0.1:<port>/dsh-rpc   ->   DSH agent
 **典型 CLI 流程**（可复制执行，前置已设 `tasksEnabled: true` 并重启宿主）：
 
 ```powershell
-node bin/dsh-rpc.mjs agents register --file ./card.json --json
-node bin/dsh-rpc.mjs agents probe --agent ag-dsh --json
-node bin/dsh-rpc.mjs tasks preview --principal local-operator --workspace local --agent ag-dsh --capability cap_1 --input '{"prompt":"检查仓库状态"}' --json
-node bin/dsh-rpc.mjs tasks submit --preview <previewId> --principal local-operator --capability cap_1 --workspace local --agent ag-dsh --idempotency-key run-001 --json
-node bin/dsh-rpc.mjs tasks dispatch <taskId> --json
-node bin/dsh-rpc.mjs tasks pump <taskId> --max-steps 20 --json
-node bin/dsh-rpc.mjs tasks get <taskId> --json
-# 遇待批：node bin/dsh-rpc.mjs tasks approve --task <taskId> --attempt <attemptId> --approval <approvalId> --decision allow --reason "确认放行" --json
-# 遇待核对（needs_reconcile）：node bin/dsh-rpc.mjs tasks reconcile <taskId> --observed cancelled --note "已确认外部停止" --json
+$CLI agents register --file ./card.json --json
+$CLI agents probe --agent ag-dsh --json
+$CLI tasks preview --principal local-operator --workspace local --agent ag-dsh --capability cap_1 --input '{"prompt":"检查仓库状态"}' --json
+$CLI tasks submit --preview <previewId> --principal local-operator --capability cap_1 --workspace local --agent ag-dsh --idempotency-key run-001 --json
+$CLI tasks dispatch <taskId> --json
+$CLI tasks pump <taskId> --max-steps 20 --json
+$CLI tasks get <taskId> --json
+# 遇待批：$CLI tasks approve --task <taskId> --attempt <attemptId> --approval <approvalId> --decision allow --reason "确认放行" --json
+# 遇待核对（needs_reconcile）：$CLI tasks reconcile <taskId> --observed cancelled --note "已确认外部停止" --json
 ```
 
 ## 亮点
@@ -268,25 +270,25 @@ dsh_history({ session_id: "session-xxxx", kinds: ["*"] })
 ### CLI
 
 ```powershell
-node bin/dsh-rpc.mjs health                  # 免鉴权探活
-node bin/dsh-rpc.mjs health --wait 15000     # 刚重启完时轮询到就绪再返回
-node bin/dsh-rpc.mjs ping                    # 带 token 的真实调用
-node bin/dsh-rpc.mjs workspaces              # 列出侧栏里的工作区
-node bin/dsh-rpc.mjs permissions             # 权限预设（* 为默认）
-node bin/dsh-rpc.mjs ask "只回复两个字：收到" --cwd . --json
-node bin/dsh-rpc.mjs ask "看看这个工作区" --workspace ws-xxxx --json
-node bin/dsh-rpc.mjs ask "接着上一句" --session session-xxxx --json
-node bin/dsh-rpc.mjs ask "换 Opus 想想" --session session-xxxx --model anthropic/opus-4.6 --effort high
-node bin/dsh-rpc.mjs prompt "长时间任务…" --session session-xxxx
-node bin/dsh-rpc.mjs wait --session session-xxxx --timeout 600000
-node bin/dsh-rpc.mjs wait --session session-xxxx --since 42   # 只要游标 42 之后的增量
-node bin/dsh-rpc.mjs history --session session-xxxx --limit 20
-node bin/dsh-rpc.mjs sessions --limit 10
-node bin/dsh-rpc.mjs models                  # DSH 可选模型
-node bin/dsh-rpc.mjs discover                # 自描述：方法、传输、结果结构
-node bin/dsh-rpc.mjs capabilities            # 八节能力快照（--sections / --max-chars / --session）
-node bin/dsh-rpc.mjs cancel --session session-xxxx
-node bin/dsh-rpc.mjs call dsh.sessions.history '{"sessionId":"session-xxxx"}' --timeout 30000
+$CLI health                  # 免鉴权探活
+$CLI health --wait 15000     # 刚重启完时轮询到就绪再返回
+$CLI ping                    # 带 token 的真实调用
+$CLI workspaces              # 列出侧栏里的工作区
+$CLI permissions             # 权限预设（* 为默认）
+$CLI ask "只回复两个字：收到" --cwd . --json
+$CLI ask "看看这个工作区" --workspace ws-xxxx --json
+$CLI ask "接着上一句" --session session-xxxx --json
+$CLI ask "换 Opus 想想" --session session-xxxx --model anthropic/opus-4.6 --effort high
+$CLI prompt "长时间任务…" --session session-xxxx
+$CLI wait --session session-xxxx --timeout 600000
+$CLI wait --session session-xxxx --since 42   # 只要游标 42 之后的增量
+$CLI history --session session-xxxx --limit 20
+$CLI sessions --limit 10
+$CLI models                  # DSH 可选模型
+$CLI discover                # 自描述：方法、传输、结果结构
+$CLI capabilities            # 八节能力快照（--sections / --max-chars / --session）
+$CLI cancel --session session-xxxx
+$CLI call dsh.sessions.history '{"sessionId":"session-xxxx"}' --timeout 30000
 ```
 
 退出码：`0` 完成 · `1` 失败或该轮未正常结束 · `2` 用法错误 · `3` 连不上 Harness。
@@ -510,10 +512,10 @@ trace:
 CLI 和 MCP 都不在客户端预先过滤这些参数：给了就转发，由桥给出统一拒绝理由。这样"传了但没生效"不会伪装成"传了并生效"。
 
 ```powershell
-node bin/dsh-rpc.mjs workspaces                            # 先看有哪些
-node bin/dsh-rpc.mjs ask "看下这个项目" --workspace ws-1      # 进去
-node bin/dsh-rpc.mjs models | head -40
-node bin/dsh-rpc.mjs ask "重新想想" --session session-xxxx --model anthropic/opus-4.6 --effort high
+$CLI workspaces                            # 先看有哪些
+$CLI ask "看下这个项目" --workspace ws-1      # 进去
+$CLI models | head -40
+$CLI ask "重新想想" --session session-xxxx --model anthropic/opus-4.6 --effort high
 ```
 
 **模型名**可写 `provider/model`；只写裸 id 时，桥会去模型目录里查——唯一命中就用，命中多个就报错并列出可消歧的写法，命中零个就让你去看 `dsh.models`。**不会替你猜一个。** `reasoningEffort` 必须和 `model` 同一次请求给出：Host 没有"读回当前模型"的接口。
@@ -536,8 +538,8 @@ node bin/dsh-rpc.mjs ask "重新想想" --session session-xxxx --model anthropic
 升权阶梯是封闭表：`read-only` 可以升到 `workspace-write` 或 `danger-full-access`，而 **`workspace-write` 只能升到 `danger-full-access`**——没有中间档。
 
 ```powershell
-node bin/dsh-rpc.mjs permissions
-node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
+$CLI permissions
+$CLI ask "跑一下测试" --permission workspace-write
 ```
 
 ### 无人值守会话与升权（`approvals`）
@@ -682,7 +684,7 @@ DSH 的 Web 服务端口由启动器决定，桌面端交给系统分配，所�
 **重启后串脚本**：
 
 ```powershell
-node bin/dsh-rpc.mjs health --wait 15000; if ($?) { node bin/dsh-rpc.mjs ask "接着干" --session session-xxxx }
+$CLI health --wait 15000; if ($?) { $CLI ask "接着干" --session session-xxxx }
 ```
 
 `--wait` 每 250 ms 重读端点并探活，就绪返回 0（打印耗时），超时返回 3。
@@ -766,7 +768,7 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 | `dsh-rpc: 401` | token 不匹配。删掉 `%USERPROFILE%\.dsh\dsh-rpc\token` 后重载插件即重新生成 |
 | `403` | 来源不是 loopback；确认没走代理，或打开 `allowRemote` |
 | `-32004 … already has a bridge run waiting for its turn` | 同一会话已有 `ask`/`prompt` 在等轮次；换一个会话，或等它结束（`wait` 可并行观察） |
-| 退出码 `3`（连不上） | Harness 没在跑，或插件的行被禁用；先 `node bin/dsh-rpc.mjs health` 探活 |
+| 退出码 `3`（连不上） | Harness 没在跑，或插件的行被禁用；先 `$CLI health` 探活 |
 | `EBADPORT` / 退出码 `3`（`bad port`） | 宿主绑定了 `fetch` 拒绝名单端口（如 `5060`、`6667`）；`health` 会立即失败告警，让宿主换端口或改用 `--url` |
 | 改了源码但行为没变 | 宿主缓存了模块：`set_plugin` 关一次再开 |
 | 改了源码但行为没变（npm 装的） | npm 路线装的是拷贝，与工作区无关；要边改边试请用本地目录安装 |
