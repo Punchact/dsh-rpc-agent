@@ -1,6 +1,6 @@
 # dsh-rpc-agent
 
-> Turn the DeepSeek Harness on this machine into a callable RPC / MCP service: Claude Code, Cursor, Codex, Trae, or your own script can hand a task to DSH and get the answer back.
+> Turn the DeepSeek Harness on this machine into a callable RPC / MCP service: Claude Code, Cursor, Codex, Trae, or your own script can hand a task to DSH and get the answer back; when enabled, it also acts as a local task centre managing async long tasks across DSH, Antigravity, and Codex in a SQLite ledger.
 
 [![npm version](https://img.shields.io/npm/v/@punchact/dsh-rpc-agent)](https://www.npmjs.com/package/@punchact/dsh-rpc-agent)
 [![npm downloads](https://img.shields.io/npm/dm/@punchact/dsh-rpc-agent)](https://www.npmjs.com/package/@punchact/dsh-rpc-agent)

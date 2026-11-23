@@ -1,7 +1,7 @@
 {
   "name": "@punchact/dsh-rpc-agent",
   "version": "0.9.5",
-  "description": "Loopback JSON-RPC bridge that lets local AI agents drive DeepSeek Harness sessions",
+  "description": "Loopback RPC bridge letting local agents drive DeepSeek Harness sessions and run long tasks as a managed queue",
   "author": "Punchact",
   "license": "MIT",
   "publishConfig": {
@@ -78,7 +78,11 @@
     "dsh",
     "json-rpc",
     "mcp",
-    "agent-bridge"
+    "agent-bridge",
+    "task-queue",
+    "orchestration",
+    "codex",
+    "antigravity"
   ],
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.5",

@@ -1,6 +1,6 @@
 # dsh-rpc-agent
 
-> 把本机的 DeepSeek Harness 变成一个可调用的 RPC / MCP 服务：Claude Code、Cursor、Codex、Trae，或你自己写的脚本，都能把任务交给 DSH，再拿回它的结果。
+> 把本机的 DeepSeek Harness 变成一个可调用的 RPC / MCP 服务：Claude Code、Cursor、Codex、Trae，或你自己写的脚本，都能把任务交给 DSH，再拿回它的结果；开启后也可作本机任务中心，用 SQLite 账本统一托管 DSH、Antigravity 与 Codex 的异步长任务。
 
 [![npm version](https://img.shields.io/npm/v/@punchact/dsh-rpc-agent)](https://www.npmjs.com/package/@punchact/dsh-rpc-agent)
 [![npm downloads](https://img.shields.io/npm/dm/@punchact/dsh-rpc-agent)](https://www.npmjs.com/package/@punchact/dsh-rpc-agent)
