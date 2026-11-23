@@ -1,6 +1,6 @@
 # dsh-rpc-agent
 
-> 把本机的 DeepSeek Harness 变成一个可调用的 RPC / MCP 服务：Claude Code、Cursor、Codex、Trae，或你自己写的脚本，都能把任务交给 DSH，再拿回它的结果。
+> 把本机的 DeepSeek Harness 变成一个可调用的 RPC / MCP 服务：Claude Code、Cursor、Codex、Trae，或你自己写的脚本，都能把任务交给 DSH，再拿回它的结果；开启后也可作本机任务中心，用 SQLite 账本统一托管 DSH、Antigravity 与 Codex 的异步长任务。
 
 [![npm version](https://img.shields.io/npm/v/@punchact/dsh-rpc-agent)](https://www.npmjs.com/package/@punchact/dsh-rpc-agent)
 [![npm downloads](https://img.shields.io/npm/dm/@punchact/dsh-rpc-agent)](https://www.npmjs.com/package/@punchact/dsh-rpc-agent)
@@ -38,6 +38,8 @@ node $cli ask "只回复两个字：收到" --cwd . --json
 
 `ask` 默认**不阻塞**，立刻返回句柄；要看结果用 `dsh_wait` / `wait --session …`。这是刻意的——外层 agent 的工具调用通常有 300 秒硬上限，长任务必须能"先接单、后交货"。
 
+> 下文命令中的 `$CLI` 指本仓库构建出来的命令行入口：仓库内用 `node dist/bin/dsh-rpc.mjs`；装进 profile 后用 `node "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\bin\dsh-rpc.mjs"`（两者参数完全一致）。
+
 ## 它是什么
 
 DSH 在这里不是一个模型，而是一个**完整的 agent**——带自己的工具、技能、MCP 服务器、沙箱与会话上下文。本插件只做一件很薄的事：把 HTTP 或 MCP 上的一句话转成 Host 的一次提问，再把结果转回来。
@@ -57,10 +59,60 @@ http://127.0.0.1:<port>/dsh-rpc   ->   DSH agent
 | 你可能想用它做 | 更好的选择 |
 | --- | --- |
 | 就问一句、看个回答 | 直接在 DSH GUI 里问，不必绕一层 |
-| 定时、后台、报警式的任务 | DSH 自己的定时任务机制，不是本插件职责 |
+| 定时（cron）、告警与看板式调度 | DSH 自己的定时任务机制；长任务与队列由本插件的任务中心托管，但它不做定时触发 |
 | 从另一台机器驱动这台 DSH | 本插件为 loopback 设计，`allowRemote` 只关白名单、不增强认证 |
 
 仓库与包名都是 `dsh-rpc-agent`；命令行（`dsh-rpc`、`dsh-rpc-mcp`）、端点路径（`/dsh-rpc`）、状态目录（`~/.dsh/dsh-rpc`）与 `DSH_RPC_*` 环境变量属运行时契约，改名会让已装好的配置与已配对的 token 一起失效。
+
+## 任务中心（Task centre）
+
+外部 agent（如 Antigravity、Codex App Server 或 DSH 自身会话）的异步任务不再靠人或聊天上下文转述状态：任务账本独立保存在本机 SQLite（`$DSH_HOME/storages/task-center/tasks.db`），每个执行方通过**能力卡（`capability-card@1`）与只读探测**把能干什么、不能干什么提前摆在台面上，不再是黑箱。默认关闭（`tasksEnabled: false`），打开后同时提供 CLI、JSON-RPC 与 11 个受开关门控的 MCP 工具（操作详见 [docs/task-center.md](./docs/task-center.md)，备份与回滚见 [docs/backup-restore-rollback.md](./docs/backup-restore-rollback.md)）。
+
+### 谁在哪跑
+
+- **三类执行方适配器**：内建 `dsh` 基准适配器直接走 Host 的 `sessionController`；外部执行方支持 `antigravity` 与 `codex`（Codex App Server），由 `tasksExternalAdapter`（`"none" | "antigravity" | "codex"`）决定额外装配哪一个。留 `"none"` 时，注册成 `antigravity` / `codex` 的代理会在派发时被拒（`ADAPTER_UNAVAILABLE`），任务停在 `queued`。
+- **工作区与构造参数**：`tasksWorkspaceRoot` 决定这个桥的任务属于哪棵树，外部执行方的会话会用它当 `cwd`（落在对方窗口的同名项目下）；`tasksAdapters` 按执行方种类提供构造参数（如 `{ codex: { binary: "…" } }`），**不允许**在注册 RPC 里指定可执行文件。
+- **开关与混版**：受 `tasksEnabled` 门控，开启且 `tasksAutopilot: true`（默认）时宿主按 `tasksAutopilotIntervalMs`（默认 `5000` ms）自动派发与推进；全部配置开关见[配置](#配置)。当 `0.9.x` 的 CLI/MCP 桥连着 `0.8.x` 插件时，任务工具在 `tools/list` 下不会出现，直接调用会如实失败（CLI 报 `unknown method` 并附 `next: this Harness plugin predates the task centre (0.9.0)…`，MCP 提示把 profile 里的插件升级到 `0.9.0` 并重启宿主），改 `tasksEnabled` 无效。
+
+### 凭什么信它
+
+1. **能力卡 `limitations` 必填且空列表会被拒**：只写优点、不承认短板的卡片在 `normalizeCard` 阶段直接报 `INVALID_CARD`。
+2. **`declared` 与 `verified` 冲突时以 `verified` 为准**：只读探测（`dsh.agents.probe`）永不在远端新建任务或发 prompt，未全部通过探测的卡片状态为 `partial` 或 `unknown`。
+3. **`degraded[]` 提前亮明降级后果**：能力卡声明为 `"unsupported"` 的控制项会在 `dsh.tasks.preview`、`dsh.tasks.get` 与 `dsh.tasks.list` 里映射成可读的 `{ control, effect }`（例如缺少 `cancel` 时取消请求只会转 `needs_reconcile`）。
+4. **`cancel.confirmed` 必须有状态机证据，HTTP 200 不算**：Antigravity 只有观测到 `RUNNING → CANCELING → IDLE` 且带 `EXECUTOR_TERMINATION_REASON_USER_CANCELED` 才确认取消；Codex 只有观测到 `turn/completed.status="interrupted"` 才确认取消。
+5. **`approvals` 三态门禁**：桥侧延续 `approvals.mode`（`off` / `deny` / `delegate`，见[权限与升权](#权限与升权)），无人值守下不悄悄放行；任务运行中遇待批操作则进入 `waiting_approval`，等人类或调用方显式裁决。
+
+### 账本与十一个状态
+
+账本落盘在本机 SQLite，任务按十一个状态推进：`queued → dispatching → running → waiting_input/waiting_approval → review_pending → succeeded/failed/cancelled/needs_reconcile`（外加取消过渡态 `cancel_requested`）。
+
+每次查询按优先级现算派生阶段（`phase`，**阶段 = 在等谁**，不写回数据库）：
+- **等人处理**：`person/delivery`（待投递输入重试中）→ `person/approval`（待审批）→ `person/reconcile`（进入 `needs_reconcile` 且租约到期、取消未被确认或派发断链，需要人工核对；排在问题之前，执行方的「已停止」都不可信时，它的遗留问题不该由人来答）→ `person/answer`（待回答决策/输入问题）→ `person/review`（待验收/结果校验未过）。
+- **等机器执行**：`machine/queued`（`queued`/`dispatching`）→ `machine/working`（执行中）。
+- **完结**：`done`（终态 `succeeded`/`failed`/`cancelled`）。
+- 当任务没有打开中的 `attention` 记录时，派生阶段不会谎称「等你」。
+
+### 人只做三件事
+
+开启 `tasksAutopilot` 时，机器侧自动执行 `dispatch` 与 `pump`（这两个动词刻意不暴露给 MCP）。人类操作者只在需要判断时介入三件事：
+
+1. **裁决 `resolve`**：对 `review_pending`、`needs_reconcile` 或带未闭 `review` 问题的运行中任务调用 `dsh.tasks.resolve` / `tasks resolve`（仅 RPC/CLI，不进 MCP），按 `accept` / `reject` / `cancel` / `requeue` 签收终态；遇待批升权则用 `dsh.tasks.decideApproval` / `tasks approve` 裁决 `allow` 或 `deny`。
+2. **回答问题 `input`**：当任务处于 `running` 或 `waiting_input` 时，通过 `dsh.tasks.input` / `dsh_task_input` 向执行方补充输入或回答 `questionId`。
+3. **核对 `reconcile`**：当启动失败、取消未确认或收到未知停机状态而进入 `needs_reconcile` 时，对照 `tasks get` 返回的 `locator` 去真实宿主窗口亲眼确认结果，再用 `dsh.tasks.reconcile` / `tasks reconcile` 写入观测证据并关闭残留 `attempt`。
+
+**典型 CLI 流程**（可复制执行，前置已设 `tasksEnabled: true` 并重启宿主）：
+
+```powershell
+$CLI agents register --file ./card.json --json
+$CLI agents probe --agent ag-dsh --json
+$CLI tasks preview --principal local-operator --workspace local --agent ag-dsh --capability cap_1 --input '{"prompt":"检查仓库状态"}' --json
+$CLI tasks submit --preview <previewId> --principal local-operator --capability cap_1 --workspace local --agent ag-dsh --idempotency-key run-001 --json
+$CLI tasks dispatch <taskId> --json
+$CLI tasks pump <taskId> --max-steps 20 --json
+$CLI tasks get <taskId> --json
+# 遇待批：$CLI tasks approve --task <taskId> --attempt <attemptId> --approval <approvalId> --decision allow --reason "确认放行" --json
+# 遇待核对（needs_reconcile）：$CLI tasks reconcile <taskId> --observed cancelled --note "已确认外部停止" --json
+```
 
 ## 亮点
 
@@ -76,7 +128,7 @@ http://127.0.0.1:<port>/dsh-rpc   ->   DSH agent
 - **会自述**：`dsh_capabilities` 给出八节能力快照（运行时、权限档位、可调工具、MCP 前缀、会话、工作区、插件），做计划前不必猜本机有什么。
 - **不假装知道**：外层客户端有更短的超时上限时，本桥只如实说明并建议分段轮询，不让长任务看起来像失败。
 - **可托管外部 agent 任务（任务中心，`tasksEnabled` 默认关闭）**：内置 15 表 SQLite 账本、11 态状态机与能力卡/只读探测，统一调度 DSH 自身、Antigravity 与 Codex App Server，详情见 [任务中心手册](./docs/task-center.md)。
-- **关键行为有回归用例守着**：51 个测试文件共 468 例 + catalog smoke（本机实测 468/468 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
+- **关键行为有回归用例守着**：52 个测试文件共 471 例 + catalog smoke（本机实测 471/471 通过，含 `approvals` 的 15 例）+ 真实 WebServer 集成测试 + 端到端/边界两套真 Harness 用例。
 
 ## 安装与更新
 
@@ -218,25 +270,25 @@ dsh_history({ session_id: "session-xxxx", kinds: ["*"] })
 ### CLI
 
 ```powershell
-node bin/dsh-rpc.mjs health                  # 免鉴权探活
-node bin/dsh-rpc.mjs health --wait 15000     # 刚重启完时轮询到就绪再返回
-node bin/dsh-rpc.mjs ping                    # 带 token 的真实调用
-node bin/dsh-rpc.mjs workspaces              # 列出侧栏里的工作区
-node bin/dsh-rpc.mjs permissions             # 权限预设（* 为默认）
-node bin/dsh-rpc.mjs ask "只回复两个字：收到" --cwd . --json
-node bin/dsh-rpc.mjs ask "看看这个工作区" --workspace ws-xxxx --json
-node bin/dsh-rpc.mjs ask "接着上一句" --session session-xxxx --json
-node bin/dsh-rpc.mjs ask "换 Opus 想想" --session session-xxxx --model anthropic/opus-4.6 --effort high
-node bin/dsh-rpc.mjs prompt "长时间任务…" --session session-xxxx
-node bin/dsh-rpc.mjs wait --session session-xxxx --timeout 600000
-node bin/dsh-rpc.mjs wait --session session-xxxx --since 42   # 只要游标 42 之后的增量
-node bin/dsh-rpc.mjs history --session session-xxxx --limit 20
-node bin/dsh-rpc.mjs sessions --limit 10
-node bin/dsh-rpc.mjs models                  # DSH 可选模型
-node bin/dsh-rpc.mjs discover                # 自描述：方法、传输、结果结构
-node bin/dsh-rpc.mjs capabilities            # 八节能力快照（--sections / --max-chars / --session）
-node bin/dsh-rpc.mjs cancel --session session-xxxx
-node bin/dsh-rpc.mjs call dsh.sessions.history '{"sessionId":"session-xxxx"}' --timeout 30000
+$CLI health                  # 免鉴权探活
+$CLI health --wait 15000     # 刚重启完时轮询到就绪再返回
+$CLI ping                    # 带 token 的真实调用
+$CLI workspaces              # 列出侧栏里的工作区
+$CLI permissions             # 权限预设（* 为默认）
+$CLI ask "只回复两个字：收到" --cwd . --json
+$CLI ask "看看这个工作区" --workspace ws-xxxx --json
+$CLI ask "接着上一句" --session session-xxxx --json
+$CLI ask "换 Opus 想想" --session session-xxxx --model anthropic/opus-4.6 --effort high
+$CLI prompt "长时间任务…" --session session-xxxx
+$CLI wait --session session-xxxx --timeout 600000
+$CLI wait --session session-xxxx --since 42   # 只要游标 42 之后的增量
+$CLI history --session session-xxxx --limit 20
+$CLI sessions --limit 10
+$CLI models                  # DSH 可选模型
+$CLI discover                # 自描述：方法、传输、结果结构
+$CLI capabilities            # 八节能力快照（--sections / --max-chars / --session）
+$CLI cancel --session session-xxxx
+$CLI call dsh.sessions.history '{"sessionId":"session-xxxx"}' --timeout 30000
 ```
 
 退出码：`0` 完成 · `1` 失败或该轮未正常结束 · `2` 用法错误 · `3` 连不上 Harness。
@@ -437,59 +489,6 @@ trace:
 - **超预算不静默**：被预算裁掉的调用在末尾写明 `… +N more (call dsh_history for the full window)`。
 - **关掉它**：`config.traceDefault: "none"`，或单次传 `trace: "none"`；要更多细节就传 `"full"`。
 
-### 任务中心（Task centre）
-
-外部 agent（如 Antigravity、Codex App Server 或 DSH 自身会话）的异步任务不再靠人或聊天上下文转述状态：任务账本独立保存在本机 SQLite（`$DSH_HOME/storages/task-center/tasks.db`），每个执行方通过**能力卡（`capability-card@1`）与只读探测**把能干什么、不能干什么提前摆在台面上，不再是黑箱。默认关闭，打开后同时提供 CLI、JSON-RPC 与 11 个受开关门控的 MCP 工具（操作详见 [docs/task-center.md](./docs/task-center.md)，备份与回滚见 [docs/backup-restore-rollback.md](./docs/backup-restore-rollback.md)）。
-
-**熔断与配置开关**（全部写入 `cordis.patch.yml` 的 `config`）：
-
-| 开关 | 默认值 | 取值与含义 |
-| --- | --- | --- |
-| `tasksEnabled` | `false` | 布尔总开关；`false` 时不开库、不起定时器、MCP 隐藏任务工具 |
-| `tasksMaxConcurrent` | `1` | 整数 `1..32`；全局活跃任务并发上限，超限在 `dispatch` 报 `STATE_CONFLICT` |
-| `tasksRequireReconcileOnUnknown` | `true` | 布尔；不可识别状态或无 `attention` 的 `blocked` 是否强制转 `needs_reconcile` |
-| `tasksWorkspaceRoot` | `""`（继承宿主 cwd） | 这个桥的任务属于哪棵树。外部执行方的会话用它当 `cwd`，因此会落在对方窗口的同名项目下；设置后 `local` 工作区的根会被替换，未设置则不动 || `tasksExternalAdapter` | `"none"` | `"none" \| "antigravity" \| "codex"`；除内建 DSH 基准适配器外额外装配的外部执行方。留 `"none"` 时，注册成 `antigravity`/`codex` 的代理会在派发时被拒（`ADAPTER_UNAVAILABLE`），任务停在 `queued` |
-| `tasksPreviewTtlMs` | `300000` | 整数 `1000..3600000`；`dsh.tasks.preview` 预览凭证有效时长（毫秒） |
-| `tasksDbPath` | `null` | 字符串或 `null`；自定义 SQLite 路径，留空使用 `$DSH_HOME/storages/task-center/tasks.db` |
-| `tasksProbeTimeoutMs` | `5000` | 整数 `100..60000`；`dsh.agents.probe` 只读探测的单次超时 |
-| `tasksAdapters` | `{}` | 对象；按执行方种类给适配器的构造参数（如 `{ codex: { binary: "…" } }`）；**不允许**在注册 RPC 里指定可执行文件 |
-| `tasksDispatchMaxSteps` | `50` | 整数 `1..1000`；一次 `dsh.tasks.pump`/`dsh.tasks.dispatch` 内推进的最大步数 |
-| `tasksAutopilot` | `true` | 布尔；为 `true` 时宿主按下面的间隔跑有界推进环（启动到期任务 + 推进活跃任务），这是经 MCP 提交的任务能自己往前走的唯一机制；置 `false` 则退回纯手工 `tasks dispatch` / `tasks pump` |
-| `tasksAutopilotIntervalMs` | `5000` | 整数 `1000..600000`；机器侧推进的间隔 |
-| `tasksAutopilotMaxStart` | `2` | 整数 `1..32`；单遍推进最多启动几个 `queued` 任务 |
-| `tasksAutopilotMaxPump` | `4` | 整数 `1..200`；单遍推进对每种活跃状态最多推进几个任务 |
-| `tasksAdapterDebugDetail` | `false` | 布尔；为 `true` 时把适配器失败的原始文本（脱敏后截断到 512 字符）以 `[raw]` 前缀写进宿主 debug 日志；默认只记安全字段 |
-
-**典型 CLI 流程**（可复制执行，前置已设 `tasksEnabled: true` 并重启宿主）：
-
-```powershell
-node bin/dsh-rpc.mjs agents register --file ./card.json --json
-node bin/dsh-rpc.mjs agents probe --agent ag-dsh --json
-node bin/dsh-rpc.mjs tasks preview --principal local-operator --workspace local --agent ag-dsh --capability cap_1 --input '{"prompt":"检查仓库状态"}' --json
-node bin/dsh-rpc.mjs tasks submit --preview <previewId> --principal local-operator --capability cap_1 --workspace local --agent ag-dsh --idempotency-key run-001 --json
-node bin/dsh-rpc.mjs tasks dispatch <taskId> --json
-node bin/dsh-rpc.mjs tasks pump <taskId> --max-steps 20 --json
-node bin/dsh-rpc.mjs tasks get <taskId> --json
-# 遇待批：node bin/dsh-rpc.mjs tasks approve --task <taskId> --attempt <attemptId> --approval <approvalId> --decision allow --reason "确认放行" --json
-# 遇待核对（needs_reconcile）：node bin/dsh-rpc.mjs tasks reconcile <taskId> --observed cancelled --note "已确认外部停止" --json
-```
-
-**派生阶段（`phase`）与 `attention` 怎么读**：
-
-`phase` 每次查询按优先级现算，不写回数据库：
-- 等人处理：`person/delivery`（待投递输入重试中）→ `person/approval`（待审批）→ `person/reconcile`（进入 `needs_reconcile` 且租约到期、取消未被确认或派发断链，需要人工核对；排在问题之前，执行方的「已停止」都不可信时，它的遗留问题不该由人来答）→ `person/answer`（待回答决策/输入问题）→ `person/review`（待验收/结果校验未过）。
-- 等机器执行：`machine/queued`（`queued`/`dispatching`）→ `machine/working`（执行中）。
-- 完结：`done`（终态 `succeeded`/`failed`/`cancelled`）。
-- 当任务没有打开中的 `attention` 记录时，派生阶段不会谎称「等你」。
-
-**三条诚实规则**：
-
-1. 能力卡的 `limitations` 必填且**空列表会被拒**：只写优点、不承认短板的卡片在 `normalizeCard` 阶段直接报 `INVALID_CARD`。
-2. `declared` 与 `verified` 冲突时**以 `verified` 为准**：声明永远不会覆盖实测探测结果，未全部通过只读探测的卡片状态为 `partial` 或 `unknown`。
-3. `cancel.confirmed` **必须有状态机证据，HTTP 200 不算**：Antigravity 只有观测到 `RUNNING → CANCELING → IDLE` 且带 `EXECUTOR_TERMINATION_REASON_USER_CANCELED` 才确认取消；Codex 只有观测到 `turn/completed.status="interrupted"` 才确认取消。
-
-**混版说明**：当 0.9.0 的 CLI/MCP 桥连着 0.8.x 的插件时，任务中心工具在 `tools/list` 下不会出现；直接调用则如实失败、绝不半成功——CLI 报 `dsh-rpc: unknown method: dsh.tasks.list` 并附 `next: this Harness plugin predates the task centre (0.9.0)…`，MCP 报 `this Harness plugin does not implement the task centre (0.9.0)` 并附 `upgrade the plugin inside the DSH profile to 0.9.0`。此时改 `tasksEnabled` 无用——那个开关只对 0.9.0 的插件有意义；把 profile 里的插件升级到 0.9.0 并重启宿主即可。
-
 ### `since` 只回增量
 
 不传是整轮；传了就只返回 `seq > since` 的事件，`text` 随之只含这段。**`status` / `turn` / `tools` / `usage` / `sandbox` 仍描述整轮**，`cursor` 照常前进。轮询进度用 `since: <上次的 cursor>`，不要重投。
@@ -513,10 +512,10 @@ node bin/dsh-rpc.mjs tasks get <taskId> --json
 CLI 和 MCP 都不在客户端预先过滤这些参数：给了就转发，由桥给出统一拒绝理由。这样"传了但没生效"不会伪装成"传了并生效"。
 
 ```powershell
-node bin/dsh-rpc.mjs workspaces                            # 先看有哪些
-node bin/dsh-rpc.mjs ask "看下这个项目" --workspace ws-1      # 进去
-node bin/dsh-rpc.mjs models | head -40
-node bin/dsh-rpc.mjs ask "重新想想" --session session-xxxx --model anthropic/opus-4.6 --effort high
+$CLI workspaces                            # 先看有哪些
+$CLI ask "看下这个项目" --workspace ws-1      # 进去
+$CLI models | head -40
+$CLI ask "重新想想" --session session-xxxx --model anthropic/opus-4.6 --effort high
 ```
 
 **模型名**可写 `provider/model`；只写裸 id 时，桥会去模型目录里查——唯一命中就用，命中多个就报错并列出可消歧的写法，命中零个就让你去看 `dsh.models`。**不会替你猜一个。** `reasoningEffort` 必须和 `model` 同一次请求给出：Host 没有"读回当前模型"的接口。
@@ -539,8 +538,8 @@ node bin/dsh-rpc.mjs ask "重新想想" --session session-xxxx --model anthropic
 升权阶梯是封闭表：`read-only` 可以升到 `workspace-write` 或 `danger-full-access`，而 **`workspace-write` 只能升到 `danger-full-access`**——没有中间档。
 
 ```powershell
-node bin/dsh-rpc.mjs permissions
-node bin/dsh-rpc.mjs ask "跑一下测试" --permission workspace-write
+$CLI permissions
+$CLI ask "跑一下测试" --permission workspace-write
 ```
 
 ### 无人值守会话与升权（`approvals`）
@@ -616,6 +615,26 @@ approvals.mode=deny refused a sandbox escalation to "danger-full-access" for too
 
 其余键：`enabled`、`tokenFile`（自定义 token 路径）、`path`（默认 `/dsh-rpc`）、`logRequests`、`traceDefault`（默认 `"errors"`）、`maxResultChars`（默认 `20000`，`0` 表示不截断）、`timeoutAdvice`（默认 `true`）。环境变量 `DSH_RPC_TOKEN` 可覆盖 token（优先级高于文件），适合 CI 或不想落盘的场景。
 
+### 任务中心开关（`tasks*`，全部写入 `cordis.patch.yml` 的 `config`）
+
+| 开关 | 默认值 | 取值与含义 |
+| --- | --- | --- |
+| `tasksEnabled` | `false` | 布尔总开关；`false` 时不开库、不起定时器、MCP 隐藏任务工具 |
+| `tasksMaxConcurrent` | `1` | 整数 `1..32`；全局活跃任务并发上限，超限在 `dispatch` 报 `STATE_CONFLICT` |
+| `tasksRequireReconcileOnUnknown` | `true` | 布尔；不可识别状态或无 `attention` 的 `blocked` 是否强制转 `needs_reconcile` |
+| `tasksWorkspaceRoot` | `""`（继承宿主 cwd） | 这个桥的任务属于哪棵树。外部执行方的会话用它当 `cwd`，因此会落在对方窗口的同名项目下；设置后 `local` 工作区的根会被替换，未设置则不动 |
+| `tasksExternalAdapter` | `"none"` | `"none" \| "antigravity" \| "codex"`；除内建 DSH 基准适配器外额外装配的外部执行方。留 `"none"` 时，注册成 `antigravity`/`codex` 的代理会在派发时被拒（`ADAPTER_UNAVAILABLE`），任务停在 `queued` |
+| `tasksPreviewTtlMs` | `300000` | 整数 `1000..3600000`；`dsh.tasks.preview` 预览凭证有效时长（毫秒） |
+| `tasksDbPath` | `null` | 字符串或 `null`；自定义 SQLite 路径，留空使用 `$DSH_HOME/storages/task-center/tasks.db` |
+| `tasksProbeTimeoutMs` | `5000` | 整数 `100..60000`；`dsh.agents.probe` 只读探测的单次超时 |
+| `tasksAdapters` | `{}` | 对象；按执行方种类给适配器的构造参数（如 `{ codex: { binary: "…" } }`）；**不允许**在注册 RPC 里指定可执行文件 |
+| `tasksDispatchMaxSteps` | `50` | 整数 `1..1000`；一次 `dsh.tasks.pump`/`dsh.tasks.dispatch` 内推进的最大步数 |
+| `tasksAutopilot` | `true` | 布尔；为 `true` 时宿主按下面的间隔跑有界推进环（启动到期任务 + 推进活跃任务），这是经 MCP 提交的任务能自己往前走的唯一机制；置 `false` 则退回纯手工 `tasks dispatch` / `tasks pump` |
+| `tasksAutopilotIntervalMs` | `5000` | 整数 `1000..600000`；机器侧推进的间隔 |
+| `tasksAutopilotMaxStart` | `2` | 整数 `1..32`；单遍推进最多启动几个 `queued` 任务 |
+| `tasksAutopilotMaxPump` | `4` | 整数 `1..200`；单遍推进对每种活跃状态最多推进几个任务 |
+| `tasksAdapterDebugDetail` | `false` | 布尔；为 `true` 时把适配器失败的原始文本（脱敏后截断到 512 字符）以 `[raw]` 前缀写进宿主 debug 日志；默认只记安全字段 |
+
 ## 安全模型
 
 **一句话：本插件的 bearer token 等价于"在这台机器上让 DSH 替你执行动作"的权限。**
@@ -665,7 +684,7 @@ DSH 的 Web 服务端口由启动器决定，桌面端交给系统分配，所�
 **重启后串脚本**：
 
 ```powershell
-node bin/dsh-rpc.mjs health --wait 15000; if ($?) { node bin/dsh-rpc.mjs ask "接着干" --session session-xxxx }
+$CLI health --wait 15000; if ($?) { $CLI ask "接着干" --session session-xxxx }
 ```
 
 `--wait` 每 250 ms 重读端点并探活，就绪返回 0（打印耗时），超时返回 3。
@@ -739,7 +758,7 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 - **`dsh_history` 会当面揭穿旧插件**：桥连着 0.8.1 之前的插件时，`since` / `kinds` / `max_chars` 会被静默忽略；此时结果头部改用 `note:` 说明「这窗口没被过滤/截断」，而不是假装已经过滤。升级插件后即消失。
 - **`maxResultChars` 治不了外层的 413**：它只截单轮正文（默认 20000 字）。外层客户端（例如 Codex 的 `codex-auto-review` 旁路请求）被累计上下文撑爆时，靠截断单次结果救不回来——那要在调用方控制上下文。
 - **`principalId` 是命名空间，不是授权边界**：任务账本用它分区、做 `(principalId, idempotencyKey)` 幂等，并在传了它时校验 `get` / `cancel` 的归属；`list` / `input` / `readArtifact` / `resolve` 不读它。真正的鉴权边界仍是 loopback token 加本机用户（见上面那条 token 泄漏面）。要跨主体隔离，得把它变成强制参数并逐方法校验——这是未完成项，不是已经实现的隔离。
-- **适配器只有 DSH 自身在真机上跑过**：DSH 适配器有真机端到端证据（正常链、取消链、诚实性三组用例）；Antigravity 与 Codex 适配器目前只有离线套件与静态契约证据，未接真实执行方（方案 A07/A14/A18 未验收）。
+- **三个适配器都接过真执行方，但验收范围不同**：DSH 适配器有真机端到端证据（正常链、取消链、诚实性）；Antigravity 有 A07 真机七项（能力卡作证、cascade 落地、裁决后 `succeeded`、取消 `cancel.confirmed`）；Codex 有 A09 / A09b / A10 三组（执行方主体 7/7、取消确认 4/4、会话粘性与项目归属 4/4）。仍未验收的是方案里的 A14（第三运行时）与 A18（混版降级）。
 - **宿主端口可能是 `fetch` 拒绝的端口**：桥继承宿主 Web 服务的端口，而 `fetch` 会在建连接前拒掉一批「bad port」（`989`、`1720`、`4045`、`5060`、`6000`、`6665`–`6669`、`6697`、`10080` 等）。落进名单时客户端报 `EBADPORT`（不是 errno，是 `fetch` 给出的原因），插件启动日志也会告警一次；让宿主换端口，或用 `--url` 指到可达地址。
 
 ## 排障
@@ -749,7 +768,7 @@ CLI 的 stdout 只在执行它的终端里——那是**调用方进程**的输�
 | `dsh-rpc: 401` | token 不匹配。删掉 `%USERPROFILE%\.dsh\dsh-rpc\token` 后重载插件即重新生成 |
 | `403` | 来源不是 loopback；确认没走代理，或打开 `allowRemote` |
 | `-32004 … already has a bridge run waiting for its turn` | 同一会话已有 `ask`/`prompt` 在等轮次；换一个会话，或等它结束（`wait` 可并行观察） |
-| 退出码 `3`（连不上） | Harness 没在跑，或插件的行被禁用；先 `node bin/dsh-rpc.mjs health` 探活 |
+| 退出码 `3`（连不上） | Harness 没在跑，或插件的行被禁用；先 `$CLI health` 探活 |
 | `EBADPORT` / 退出码 `3`（`bad port`） | 宿主绑定了 `fetch` 拒绝名单端口（如 `5060`、`6667`）；`health` 会立即失败告警，让宿主换端口或改用 `--url` |
 | 改了源码但行为没变 | 宿主缓存了模块：`set_plugin` 关一次再开 |
 | 改了源码但行为没变（npm 装的） | npm 路线装的是拷贝，与工作区无关；要边改边试请用本地目录安装 |
@@ -789,7 +808,7 @@ npm run verify                 # 构建 + 入口一致性 + npm test + check:pac
 
 ```powershell
 cd dsh-rpc-plugin
-npm test                       # 51 个测试文件，共 468 例，另有 catalog smoke；无需运行中的 Harness
+npm test                       # 52 个测试文件，共 471 例，另有 catalog smoke；无需运行中的 Harness
 node test/host.test.ts         # 1 例：真实 WebServer 集成（需先 npm ci）
 npm run test:e2e               # 14 例：端到端，打真实 Harness（--cwd 只接受绝对路径）
 npm run test:edge              # 24 例：协议/边界对抗，打真实 Harness
@@ -817,7 +836,7 @@ npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案
 `check:surface` 查两个方向：方案写了的接口必须真实存在；代码里任务族/代理族的新接口必须要么在方案里、要么在快照的 `implementationOnly` 里如实记着。0.9.0 就是靠这一类对账才发现「方案写了 `dsh.tasks.resolve`、实现漏了」。
 
 <details>
-<summary>51 个测试文件各自覆盖什么</summary>
+<summary>52 个测试文件各自覆盖什么</summary>
 
 | 套件 | 例 | 覆盖 |
 | --- | --- | --- |
@@ -857,6 +876,7 @@ npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案
 | `tasks-autopilot` | 7 | 推进环：覆盖所有活跃状态、失败不中断并告警、慢遍不叠加、空账本不动作、异步分页必须 await 才派发、破账本只报不抛 |
 | `config-breakers` | 3 | 五项熔断开关默认值、边界校验与 `ConfigError` |
 | `index-wiring` | 3 | 关闭不建库、开启建库播种、外部适配器失败降级 |
+| `tasks-wire` | 3 | `wireTaskCentre` 独立装配：关闭惰性态、开启全组件与 `agentProbes` 接线、建库失败降级收口 |
 | `mcp-tasks-tools` | 6 | 8 个任务 MCP 工具的开关显隐、禁用报错、`reconcile`/`decideApproval` 排除、参数校验与原型键拒绝 |
 | `mcp-summary` | 3 | 只读文本摘要必须写明「未校验」：`result` 行带标记、meta 行重复一次、已校验的结果不打标 |
 | `cli-tasks` | 5 | `tasks` / `agents` 参数解析、`UsageError`（exit 2）、JSON-RPC 调用与混版提示 |
@@ -875,7 +895,7 @@ npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案
 
 </details>
 
-`npm test` 按固定顺序跑这 51 个测试文件和 catalog smoke；`npm run test:host` 跑真实 WebServer 集成；`npm run test:e2e` / `npm run test:edge` 要活的 Harness。
+`npm test` 按固定顺序跑这 52 个测试文件和 catalog smoke；`npm run test:host` 跑真实 WebServer 集成；`npm run test:e2e` / `npm run test:edge` 要活的 Harness。
 
 > [!TIP]
 > **受限沙箱里 `node --test` 可能触发 `spawn EPERM`**：若默认并发子进程被拦，使用 `node --test --test-isolation=none <file>` 或单文件 `node <file>` 运行。
@@ -887,7 +907,7 @@ npm run docs:surface    # 改了方案文档后重抽快照（本机需要方案
 - **边界**检查协议层：batch、通知、id 形态、鉴权头、超大 body（应得真正的 413 而不是断连）、参数注入防护、超时钳制、并发 ask、`limit` 语义。
 - **端口漂移**（手工）：把 `endpoint.json` 的 url 改成死端口再跑 `dsh-rpc ping`，应得退出码 3 与含 `nothing is listening`、`pid`、`health --wait` 的可读报错。
 
-本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 51 个测试文件 **468/468** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.ts` 输出 `methods: 34` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
+本次本地验证（2026-11-19，0.9.0，真仓库）：`npm test` 链上 52 个测试文件 **471/471** 全部通过（`test/host.test.mjs` 另跑 1 例真实 WebServer 集成）；`node test/catalog.smoke.ts` 输出 `methods: 34` / `catalogue ok`；`npm run check:version` 输出 `version ok: 0.9.0`。
 
 ## 许可证
 

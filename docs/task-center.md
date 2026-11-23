@@ -1,6 +1,10 @@
-# DSH 任务中心操作手册（0.9.3）
+# DSH 任务中心操作手册
 
 > 面向本机操作者与维护者。任务中心默认关闭（`tasksEnabled: false`），打开后由本插件托管 DSH 自身、Antigravity 与 Codex App Server 的异步长任务。
+
+**这是什么 / 什么时候用它**：任务中心是本插件内建的本机异步任务队列与 SQLite 账本（`$DSH_HOME/storages/task-center/tasks.db`），按能力卡（`capability-card@1`）、并发上限与 11 态状态机统一调度长任务，并在需要审批、答疑、核对或签收时暂停等待人类介入。如果只需要即问即答的单轮会话，直接用 `dsh_ask` / `dsh_wait` 即可；当你需要跨重启不丢的任务队列、限制全局并发、或者要跨 DSH / Antigravity / Codex 派发长任务并保留可核对的交付证据时，再启用任务中心。
+
+下文命令里的 `$CLI` 指命令行入口：仓库内用 `node dist/bin/dsh-rpc.mjs`，装进 profile 后用 `node "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@punchact\dsh-rpc-agent\bin\dsh-rpc.mjs"`。
 
 ---
 
@@ -22,8 +26,8 @@
 2. **验证生效**：
 
 ```powershell
-node bin/dsh-rpc.mjs discover --json        # 检查 config.tasksEnabled === true 且方法数包含 dsh.tasks.* / dsh.agents.*
-node bin/dsh-rpc.mjs tasks list --json      # 返回 { items: [] } 即说明账本已就绪
+$CLI discover --json        # 检查 config.tasksEnabled === true 且方法数包含 dsh.tasks.* / dsh.agents.*
+$CLI tasks list --json      # 返回 { items: [] } 即说明账本已就绪
 ```
 
 ---
@@ -57,9 +61,9 @@ node bin/dsh-rpc.mjs tasks list --json      # 返回 { items: [] } 即说明账�
 #   "limitations": ["cancel.stopped only true when host confirms stop"]
 # }
 
-node bin/dsh-rpc.mjs agents register --file ./dsh-card.json --json
-node bin/dsh-rpc.mjs agents probe --agent ag-dsh --json
-node bin/dsh-rpc.mjs agents list --verified-only --json
+$CLI agents register --file ./dsh-card.json --json
+$CLI agents probe --agent ag-dsh --json
+$CLI agents list --verified-only --json
 ```
 
 > [!NOTE]
@@ -75,9 +79,9 @@ node bin/dsh-rpc.mjs agents list --verified-only --json
 3. **派发（`dispatch`）**：开启 `tasksAutopilot`（默认 `true`）时这一步由宿主自己完成，下面的命令是手工兜底（自查、复现、或把自动环关掉之后用）。派发先受 `tasksMaxConcurrent` 原子并发门控检查，再将状态推至 `dispatching` 并调用 `adapter.start`；启动成功写入 `running` 与无密钥 `locator`，若启动抛错则立即转入 `needs_reconcile`（不会卡在 `dispatching`）。
 
 ```powershell
-node bin/dsh-rpc.mjs tasks preview --principal local-operator --workspace local --agent ag-dsh --capability cap_review_1 --input '{"prompt":"检查最近改动"}' --json
-node bin/dsh-rpc.mjs tasks submit --preview <previewId> --principal local-operator --capability cap_review_1 --workspace local --agent ag-dsh --idempotency-key job-20261119-01 --json
-node bin/dsh-rpc.mjs tasks dispatch <taskId> --json
+$CLI tasks preview --principal local-operator --workspace local --agent ag-dsh --capability cap_review_1 --input '{"prompt":"检查最近改动"}' --json
+$CLI tasks submit --preview <previewId> --principal local-operator --capability cap_review_1 --workspace local --agent ag-dsh --idempotency-key job-20261119-01 --json
+$CLI tasks dispatch <taskId> --json
 ```
 
 ---
@@ -87,7 +91,7 @@ node bin/dsh-rpc.mjs tasks dispatch <taskId> --json
 - **推进状态机（`pump`）**：
 
   ```powershell
-  node bin/dsh-rpc.mjs tasks pump <taskId> --max-steps 50 --json
+  $CLI tasks pump <taskId> --max-steps 50 --json
   ```
 
   每次 `pump` 有步数（`maxSteps`）和截止时间（`deadlineMs`）双上限：先拉取 `adapter.events(locator, cursor)` 并按 `adapterEventId` 去重写入账本，若无增量事件则调用一次 `adapter.inspect`；遇到未知状态或无 `attention` 的 `blocked` 报告时转入 `needs_reconcile`。
@@ -95,7 +99,7 @@ node bin/dsh-rpc.mjs tasks dispatch <taskId> --json
    > **谁在按按钮**：`dispatch` 与 `pump` 是机器侧动词，MCP 面刻意不暴露（外部调用方只有 8 个 `dsh_task_*` + 3 个 `dsh_agents_*`）。为了让经 MCP 提交的任务也能往前走，宿主自己跑一个有界推进环：每隔 `tasksAutopilotIntervalMs`（默认 `5000`ms）先按 `tasksAutopilotMaxStart`（默认 `2`）启动 `queued` 任务，再按 `tasksAutopilotMaxPump`（默认 `4`）逐个活跃状态（`dispatching`、`running`、`cancel_requested`、`waiting_input`、`waiting_approval`）推进一遍；单遍有步数与截止时间上限，上一遍没跑完时本遍直接跳过，失败只记录不中断。把 `tasksAutopilot` 置 `false` 就退回纯手工模式——此时经 MCP 提交的任务会一直停在 `queued`，直到有人执行 `tasks dispatch`。
 
 - **查看当前状态、`phase` 与事件（`get` / `events`）**：
-  - CLI 执行 `node bin/dsh-rpc.mjs tasks get <taskId> --json` 查看最新 `status`、`phase`、`stateVersion`、开放的 `attention` / `pendingApproval` 与最新事件摘要。
+  - CLI 执行 `$CLI tasks get <taskId> --json` 查看最新 `status`、`phase`、`stateVersion`、开放的 `attention` / `pendingApproval` 与最新事件摘要。
   - 若需按游标拉取完整账本事件窗口，在插件内或 JSON-RPC 层调用 `engine.events({ taskId, afterSeq })`（只读、递增 `seq`）。
 
 - **向运行中任务补充输入（`input`）**：
@@ -105,7 +109,7 @@ node bin/dsh-rpc.mjs tasks dispatch <taskId> --json
   - 当 `tasks get` 显示 `phase: "person/approval"`（且存在 `attemptId` 与 `approvalId`）时，用 CLI 或 `dsh.tasks.decideApproval` 裁决（该入口有意不暴露给 MCP）：
 
   ```powershell
-  node bin/dsh-rpc.mjs tasks approve --task <taskId> --attempt <attemptId> --approval <approvalId> --decision allow --reason "已核对命令安全" --json
+  $CLI tasks approve --task <taskId> --attempt <attemptId> --approval <approvalId> --decision allow --reason "已核对命令安全" --json
   # 拒绝则传 --decision deny
   ```
 
@@ -114,7 +118,7 @@ node bin/dsh-rpc.mjs tasks dispatch <taskId> --json
 - **取消任务（`cancel`）**：
 
   ```powershell
-  node bin/dsh-rpc.mjs tasks cancel <taskId> --expected-version <stateVersion> --reason "取消本次检查" --json
+  $CLI tasks cancel <taskId> --expected-version <stateVersion> --reason "取消本次检查" --json
   ```
 
   只登记 `cancel_requested` 与 `cancel` effect；只有拿到目标执行方的真状态机停机证据（而非 HTTP 200）才会变为 `cancelled`。
@@ -133,7 +137,7 @@ node bin/dsh-rpc.mjs tasks dispatch <taskId> --json
 2. 用 CLI / `dsh.tasks.reconcile` 写入外部观测证据，一次性关闭仍标记 `side_effect_active = 1` 的旧 `attempt` 并推进任务态：
 
 ```powershell
-node bin/dsh-rpc.mjs tasks reconcile <taskId> --observed cancelled --note "已在宿主侧确认级联停止" --json
+$CLI tasks reconcile <taskId> --observed cancelled --note "已在宿主侧确认级联停止" --json
 # --observed 可选：succeeded | failed | cancelled
 ```
 
